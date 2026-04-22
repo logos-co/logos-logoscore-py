@@ -22,6 +22,7 @@
         inherit system;
         pkgs = import nixpkgs { inherit system; };
       });
+
     in
     {
       # ── Packages ──────────────────────────────────────────────────────────
@@ -71,7 +72,9 @@
         let
           python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
-          testModules = logos-test-modules.packages.${system}.default;
+          # `.install` lays out modules/<name>/<name>_plugin.{so,dylib} +
+          # manifest.json — the layout logoscore's `-m` flag expects.
+          testBasicInstall = logos-test-modules.modules.${system}.test_basic_module.install;
         in
         {
           unit = pkgs.runCommand "logoscore-py-unit-tests" {
@@ -97,7 +100,7 @@
             ''}
             export PYTHONPATH=$PWD/src
             export LOGOSCORE_BIN=${logoscoreBin}/bin/logoscore
-            export LOGOSCORE_TEST_MODULES_DIR=${testModules}/lib
+            export LOGOSCORE_TEST_MODULES_DIR=${testBasicInstall}/modules
             # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
             export HOME=$PWD/home
             mkdir -p $HOME
