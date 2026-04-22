@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "logoscore"
+version = "0.1.0"
+description = "Python wrapper for the logoscore CLI — launch daemons, load modules, call methods, subscribe to events."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+authors = [
+  { name = "Logos", email = "info@logos.co" },
+]
+keywords = ["logos", "logoscore", "modules", "ipc"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/logos-co/logos-logoscore-py"
+Issues = "https://github.com/logos-co/logos-logoscore-py/issues"
+"logoscore CLI" = "https://github.com/logos-co/logos-logoscore-cli"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/logoscore"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
