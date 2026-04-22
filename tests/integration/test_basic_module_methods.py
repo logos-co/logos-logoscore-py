@@ -209,14 +209,7 @@ def test_echo_with_delay(client):
 
 
 # ── Events ───────────────────────────────────────────────────────────────────
-# Event delivery through `logoscore watch` is flaky in the current CLI build:
-# the daemon forwards the event (visible in the log) but the watch subprocess
-# does not always surface it. Marked as xfail(strict=False) so the suite is
-# green when it works and silently tolerates the gap when it doesn't.
 
-@pytest.mark.xfail(
-    reason="logoscore watch event delivery is unreliable", strict=False
-)
 def test_emit_test_event_single_arg(client):
     received: list[dict] = []
     evt = threading.Event()
@@ -236,9 +229,6 @@ def test_emit_test_event_single_arg(client):
     assert "payload-123" in flat
 
 
-@pytest.mark.xfail(
-    reason="logoscore watch event delivery is unreliable", strict=False
-)
 def test_emit_multi_arg_event(client):
     received: list[dict] = []
     evt = threading.Event()

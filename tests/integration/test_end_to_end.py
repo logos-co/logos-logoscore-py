@@ -34,9 +34,6 @@ def test_list_modules_returns_entries(daemon):
     assert any(n and "test_basic" in n for n in names), names
 
 
-@pytest.mark.xfail(
-    reason="logoscore watch event delivery is unreliable", strict=False
-)
 def test_load_call_and_event_roundtrip(daemon):
     client = daemon.client()
 
