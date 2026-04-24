@@ -49,8 +49,8 @@ RUN case "$FLAVOR" in \
 
 # ─────────────────────────────────────────────────────────────────────
 # Runtime stage. Shape depends on flavor:
-#   dev      → /usr/local/bin/logoscore links rpath into /nix/store, so
-#              we copy the store. Image is 3+ GB.
+#   dev      → /opt/logoscore/bin/logoscore is rpath-linked into /nix/store,
+#              so we copy the store. Image is 3+ GB.
 #   portable → /opt/logoscore/{bin,lib,modules} is self-contained; no
 #              nix store needed at runtime. Image is ~500 MB. We pick a
 #              minimal debian base instead of nixos/nix.
@@ -73,13 +73,13 @@ ARG FLAVOR=dev
 COPY --from=build /nix/store                 /nix/store
 COPY --from=build /out/bundle                /opt/logoscore
 
-# Wire a fixed launch path so the entrypoint doesn't need to know about
-# the flavor — both layouts put the binary at the same relative path.
-RUN ln -s /opt/logoscore/bin/logoscore /usr/local/bin/logoscore
-
-# Default modules dir at /opt/logoscore/modules in both flavors.
+# Both flavors put the binary at the same path, so the entrypoint can
+# point straight at it — no `/usr/local/bin` symlink needed. That matters
+# because `nixos/nix:2.24.9` (alpine-based) doesn't ship `/usr/local/bin/`,
+# so `ln -s … /usr/local/bin/logoscore` fails at build time with
+# "No such file or directory" on the parent dir.
 EXPOSE 6000
-ENTRYPOINT ["/usr/local/bin/logoscore"]
+ENTRYPOINT ["/opt/logoscore/bin/logoscore"]
 CMD ["daemon", \
      "--transport", "tcp", \
      "--tcp-host",  "0.0.0.0", \
