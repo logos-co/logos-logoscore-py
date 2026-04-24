@@ -7,6 +7,10 @@ QVariant, QJsonArray, QStringList) exposed by `test-basic-module` in the
   repos/logos-test-modules/test-basic-module/src/test_basic_module_plugin.h
   repos/logos-test-modules/test-basic-module/src/test_basic_module_plugin.cpp
 
+The data-driven method cases come from `_basic_module_cases.BASIC_MODULE_CASES`
+so the docker smoke test (which also replays the full matrix over TCP in
+both JSON and CBOR) can't drift from the expectations here.
+
 Skipped unless LOGOSCORE_BIN and LOGOSCORE_TEST_MODULES_DIR are set — the
 Nix `integration` check wires both up.
 """
@@ -23,11 +27,21 @@ MODULE = "test_basic_module"
 
 
 @pytest.fixture(scope="module")
-def client(logoscore_bin, test_modules_dir):
+def client(logoscore_bin, test_modules_dir, transport):
+    kwargs = {}
+    if transport != "local":
+        kwargs["transports"] = [transport]
+        if transport == "tcp":
+            # Scoped per-test-module so this fixture doesn't collide with
+            # per-test `tcp_port`. Pick at daemon startup.
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                kwargs["tcp_port"] = s.getsockname()[1]
     with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin
+        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
     ) as daemon:
-        c = daemon.client()
+        c = daemon.client(transport=transport)
         c.load_module(MODULE)
         yield c
 

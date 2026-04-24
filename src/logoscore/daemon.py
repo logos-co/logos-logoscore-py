@@ -39,6 +39,19 @@ class LogoscoreDaemon:
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
         startup_timeout: float = 15.0,
+        # Transport options for core_service. `local` is always on; pass
+        # extra protocols to open additional listeners (e.g. remote clients
+        # over TCP+SSL). These translate directly to --transport=... flags.
+        transports: list[str] | None = None,
+        tcp_host: str = "127.0.0.1",
+        tcp_port: int = 0,
+        tcp_codec: str = "json",        # "json" | "cbor"
+        tcp_ssl_host: str = "127.0.0.1",
+        tcp_ssl_port: int = 0,
+        tcp_ssl_codec: str = "json",    # "json" | "cbor"
+        ssl_cert: str | Path | None = None,
+        ssl_key: str | Path | None = None,
+        ssl_ca: str | Path | None = None,
     ) -> None:
         if isinstance(modules_dir, (str, Path)):
             self.modules_dirs: list[Path] = [Path(modules_dir)]
@@ -52,6 +65,16 @@ class LogoscoreDaemon:
         self.extra_args = list(extra_args or [])
         self.extra_env = dict(env or {})
         self.startup_timeout = startup_timeout
+        self.transports = list(transports or [])
+        self.tcp_host = tcp_host
+        self.tcp_port = tcp_port
+        self.tcp_codec = tcp_codec
+        self.tcp_ssl_host = tcp_ssl_host
+        self.tcp_ssl_port = tcp_ssl_port
+        self.tcp_ssl_codec = tcp_ssl_codec
+        self.ssl_cert = Path(ssl_cert) if ssl_cert else None
+        self.ssl_key = Path(ssl_key) if ssl_key else None
+        self.ssl_ca = Path(ssl_ca) if ssl_ca else None
 
         if config_dir is None:
             self._config_dir = Path(tempfile.mkdtemp(prefix="logoscore-"))
@@ -88,6 +111,26 @@ class LogoscoreDaemon:
             cmd.extend(["-m", str(d)])
         if self.persistence_path is not None:
             cmd.extend(["--persistence-path", str(self.persistence_path)])
+        for proto in self.transports:
+            cmd.extend(["--transport", proto])
+            if proto == "tcp":
+                cmd.extend(["--tcp-host", self.tcp_host,
+                            "--tcp-port", str(self.tcp_port),
+                            "--tcp-codec", self.tcp_codec])
+            elif proto == "tcp_ssl":
+                if not (self.ssl_cert and self.ssl_key):
+                    raise LogoscoreError(
+                        "transports includes 'tcp_ssl' but ssl_cert/ssl_key not set"
+                    )
+                cmd.extend([
+                    "--tcp-ssl-host", self.tcp_ssl_host,
+                    "--tcp-ssl-port", str(self.tcp_ssl_port),
+                    "--tcp-ssl-codec", self.tcp_ssl_codec,
+                    "--ssl-cert", str(self.ssl_cert),
+                    "--ssl-key", str(self.ssl_key),
+                ])
+                if self.ssl_ca:
+                    cmd.extend(["--ssl-ca", str(self.ssl_ca)])
         cmd.extend(self.extra_args)
 
         env = os.environ.copy()
@@ -147,7 +190,16 @@ class LogoscoreDaemon:
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
 
-    def client(self, *, timeout: float | None = 30.0) -> LogoscoreClient:
+    def client(
+        self,
+        *,
+        timeout: float | None = 30.0,
+        transport: str | None = None,
+        tcp_host: str | None = None,
+        tcp_port: int | None = None,
+        no_verify_peer: bool = False,
+        codec: str | None = None,
+    ) -> LogoscoreClient:
         if self._process is None:
             raise LogoscoreError(
                 "daemon is not running — call start() or use the context manager"
@@ -157,6 +209,11 @@ class LogoscoreDaemon:
             config_dir=self._config_dir,
             token=self._read_token(),
             timeout=timeout,
+            transport=transport,
+            tcp_host=tcp_host,
+            tcp_port=tcp_port,
+            no_verify_peer=no_verify_peer,
+            codec=codec,
         )
 
     def logs(self) -> tuple[str, str]:

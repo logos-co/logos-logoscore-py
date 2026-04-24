@@ -14,11 +14,29 @@ from logoscore import LogoscoreDaemon
 
 
 @pytest.fixture
-def daemon(logoscore_bin, test_modules_dir):
+def daemon(logoscore_bin, test_modules_dir, transport, tcp_port):
+    # transport == "local" uses today's QLocalSocket path (zero extra flags).
+    # transport == "tcp" adds a --transport=tcp listener + picks it client-side.
+    kwargs = {}
+    if transport != "local":
+        kwargs["transports"] = [transport]
+        if transport == "tcp":
+            kwargs["tcp_port"] = tcp_port
     with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin
+        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
     ) as d:
+        d._chosen_transport = transport  # stash for client fixture below
         yield d
+
+
+# Convenience: make every client() call pick the tested transport.
+import logoscore as _lgs
+_orig_client = _lgs.LogoscoreDaemon.client
+def _wrapped_client(self, **kw):
+    if hasattr(self, "_chosen_transport"):
+        kw.setdefault("transport", self._chosen_transport)
+    return _orig_client(self, **kw)
+_lgs.LogoscoreDaemon.client = _wrapped_client
 
 
 def test_daemon_starts_and_reports_status(daemon):

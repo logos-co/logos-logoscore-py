@@ -25,6 +25,7 @@ from .errors import (
     ModuleError,
 )
 from .events import Subscription
+from .tokens import issue_token, revoke_token, list_tokens
 
 __all__ = [
     "LogoscoreDaemon",
@@ -34,6 +35,9 @@ __all__ = [
     "DaemonNotRunningError",
     "ModuleError",
     "MethodError",
+    "issue_token",
+    "revoke_token",
+    "list_tokens",
 ]
 
 __version__ = "0.1.0"
