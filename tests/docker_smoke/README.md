@@ -174,5 +174,40 @@ layer cache and nix's content-addressed store.
    for environmental reasons; always worth running on top of anything
    else.
 
-Per-test skips show exactly which of (json, cbor, two-daemon) you're
-missing when docker isn't present.
+5. **TLS smoke** (`test_docker_ssl_smoke.py`) — one daemon inside docker
+   listening on `tcp_ssl` with a self-signed cert generated at fixture
+   time (via `openssl req`) and bind-mounted into the container. The
+   host-side client dials over TLS with `--no-verify-peer` (because
+   self-signed) and runs two scenarios: a `status` round-trip (with a
+   `rpc_error not in response` assertion so it doesn't false-positive
+   on the fallback-to-daemon.json path when the RPC actually fails)
+   and a load-module + method-call round-trip (proves the full
+   payload path — method args → TLS → RPC → return → TLS → client).
+
+Per-test skips show exactly which of (json, cbor, two-daemon, ssl)
+you're missing when docker or `openssl` isn't present.
+
+### Using `LogoscoreDockerDaemon` for TLS directly
+
+```python
+from logoscore import LogoscoreDockerDaemon
+
+with LogoscoreDockerDaemon(
+    image="logoscore:smoke-portable",
+    modules_dir="./my-modules/modules",
+    transport="tcp_ssl",
+    ssl_cert=Path("./cert.pem"),   # host paths — mounted as /certs/*.pem
+    ssl_key=Path("./key.pem"),
+) as daemon:
+    client = daemon.client(binary="logoscore")   # auto-passes --no-verify-peer
+    client.status()
+```
+
+The helper bind-mounts the two PEM files as individual files into
+`/certs/cert.pem` and `/certs/key.pem` (so they can live in different
+host dirs) and flags the daemon with `--transport=local --transport=tcp_ssl
+--tcp-ssl-port=<internal> --ssl-cert=... --ssl-key=...`. `local` is kept
+alongside `tcp_ssl` so module-to-module traffic inside the daemon process
+group still uses the local socket; without it, spawned module-host
+processes would inherit the tcp_ssl default and abort with "TLS bind
+failed" (they have no cert to bind with).

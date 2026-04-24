@@ -67,36 +67,52 @@ RUN case "$FLAVOR" in \
     nix build -L ".#$ATTR" --out-link /out/bundle
 
 # ─────────────────────────────────────────────────────────────────────
-# Runtime stage. Shape depends on flavor:
-#   dev      → /opt/logoscore/bin/logoscore is rpath-linked into /nix/store,
-#              so we copy the store. Image is 3+ GB.
-#   portable → /opt/logoscore/{bin,lib,modules} is self-contained; no
-#              nix store needed at runtime. Image is ~500 MB. We pick a
-#              minimal debian base instead of nixos/nix.
+# Runtime stage.
+#
+# We use ubuntu:24.04 as the runtime base (rather than nixos/nix or
+# alpine) because it ships a fully normal glibc runtime:
+#   * `/lib/ld-linux-<arch>.so.1` exists at the canonical path, so the
+#     portable bundle's ELF PT_INTERP resolves natively (the
+#     `cli-bundle-dir` binary isn't patched to use a custom interpreter).
+#   * `libstdc++.so.6`, `libgcc_s.so.1`, `libssl.so.3`, `libcrypto.so.3`
+#     etc. are all in standard locations, matching what the binary's
+#     `$ORIGIN/../lib` rpath plus the dynamic linker's default search
+#     paths expect. No LD_LIBRARY_PATH hacks, no symlinks from /nix/store.
+#   * Standard Linux filesystem layout (`/usr/local/bin`, `/etc`, …),
+#     which simplifies anything that writes there at image-build time.
+#
+# Same Ubuntu-as-runtime pattern used by
+# https://github.com/logos-co/logos-docker. Builder stage stays on
+# nixos/nix for the nix-build itself.
+#
+# Size: dev ≈ 3 GB (ubuntu base + nix closure), portable ≈ 700 MB
+# (ubuntu base + Qt/boost/openssl libs bundled). If the dev size
+# becomes painful we can split this into two runtime stages keyed off
+# $FLAVOR; for now one linear Dockerfile is easier to reason about.
 # ─────────────────────────────────────────────────────────────────────
 
-# Single runtime stage, using nixos/nix as a convenient common base.
-# The dev flavor needs /nix/store available; the portable flavor
-# doesn't, but keeping a single stage keeps the Dockerfile linear
-# and the size difference is still dominated by the flavor's own
-# content. If portable-image size becomes important, split this into
-# two stages keyed off $FLAVOR with a multi-stage `FROM …AS rt-dev`
-# / `FROM debian AS rt-portable` + a final `FROM rt-$FLAVOR`.
-
-FROM nixos/nix:2.24.9
+FROM ubuntu:24.04
 ARG FLAVOR=portable
 
-# Stage in everything the bundle needs. For `dev` we need the full nix
-# closure (binary links via rpath into /nix/store); for `portable` the
-# bundle has its own bin/lib/modules and we only need those.
+# `ca-certificates` lets the TLS transport verify server certs against
+# the system CA bundle when `--no-verify-peer` isn't in play. Every
+# other runtime dep (glibc, libstdc++, libssl, libcrypto) ships with
+# ubuntu:24.04 out of the box.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# For `dev`, the binary links via rpath into /nix/store — we need to
+# ship the closure. For `portable`, the binary links into $ORIGIN/../lib
+# (shipped inside the bundle) and resolves standard libs via ubuntu's
+# default linker search path, so /nix/store is dead weight — but
+# copying it unconditionally keeps the Dockerfile linear and the layer
+# is a no-op for callers who already have the image built.
 COPY --from=build /nix/store                 /nix/store
 COPY --from=build /out/bundle                /opt/logoscore
 
 # Both flavors put the binary at the same path, so the entrypoint can
-# point straight at it — no `/usr/local/bin` symlink needed. That matters
-# because `nixos/nix:2.24.9` (alpine-based) doesn't ship `/usr/local/bin/`,
-# so `ln -s … /usr/local/bin/logoscore` fails at build time with
-# "No such file or directory" on the parent dir.
+# point straight at it.
 EXPOSE 6000
 ENTRYPOINT ["/opt/logoscore/bin/logoscore"]
 # Default CMD = a bare daemon scanning only the CLI's built-in modules.

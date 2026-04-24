@@ -57,26 +57,9 @@ def _docker_image_for(flavor: str) -> str:
     return DOCKER_IMAGE_FMT.format(flavor=flavor)
 
 
-def _flavors_to_run(config) -> list[str]:
-    """Turn `--docker-flavor` into the list of flavors to parametrise on.
-    `dev` | `portable` run the matrix once; `both` replays it twice."""
-    choice = config.getoption("--docker-flavor")
-    if choice == "both":
-        return ["portable", "dev"]
-    if choice in ("dev", "portable"):
-        return [choice]
-    raise pytest.UsageError(
-        f"--docker-flavor must be dev|portable|both (got: {choice!r})"
-    )
-
-
-def pytest_generate_tests(metafunc):
-    """Inject a `docker_flavor` fixture wherever a test requests it so
-    each test is invoked once per flavor the user asked for."""
-    if "docker_flavor" in metafunc.fixturenames:
-        flavors = _flavors_to_run(metafunc.config)
-        metafunc.parametrize("docker_flavor", flavors, scope="module",
-                             ids=[f"flavor={f}" for f in flavors])
+# `docker_flavor` parametrisation lives in `conftest.py` so every file
+# in this directory shares the hook. Running any single file (e.g. the
+# SSL smoke alone) still gets the fixture injected.
 
 
 # ── Environmental skip helpers ────────────────────────────────────────────

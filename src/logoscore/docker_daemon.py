@@ -105,14 +105,29 @@ class LogoscoreDockerDaemon:
         persistence_dir: str | Path | None = None,
         host_port: int | None = None,
         codec: str = "json",
+        transport: str = "tcp",
+        ssl_cert: str | Path | None = None,
+        ssl_key: str | Path | None = None,
         container_name: str | None = None,
         extra_module_dirs: Sequence[str] | None = None,
         extra_args: Sequence[str] | None = None,
         startup_timeout: float = 20.0,
     ) -> None:
+        if transport not in ("tcp", "tcp_ssl"):
+            raise ValueError(
+                f"transport must be 'tcp' or 'tcp_ssl' (got {transport!r})"
+            )
+        if transport == "tcp_ssl" and not (ssl_cert and ssl_key):
+            raise ValueError(
+                "transport='tcp_ssl' requires ssl_cert and ssl_key"
+            )
+
         self.image = image
         self.modules_dir = Path(modules_dir)
         self.codec = codec
+        self.transport = transport
+        self.ssl_cert = Path(ssl_cert) if ssl_cert else None
+        self.ssl_key = Path(ssl_key) if ssl_key else None
         self.startup_timeout = startup_timeout
         # Additional dirs *inside the container* to scan for modules, on
         # top of `/opt/logoscore/modules` (CLI's built-in) and
@@ -191,6 +206,48 @@ class LogoscoreDockerDaemon:
         if self._host_port is None:
             self._host_port = pick_free_port()
 
+        # Volume mounts common to both transports.
+        volumes = [
+            "-v", f"{self._config_dir}:/config",
+            "-v", f"{self._persistence_dir}:/persistence",
+            "-v", f"{self.modules_dir}:/user-modules:ro",
+        ]
+        # For tcp_ssl, also bind-mount the cert+key into /certs:ro.
+        # They're exposed read-only because the daemon only reads them.
+        if self.transport == "tcp_ssl":
+            # Mount each cert file's parent as /certs would be wrong if
+            # cert and key live in different dirs — mount them as
+            # individual files to avoid that pitfall. Docker supports
+            # file-level bind mounts natively.
+            volumes += [
+                "-v", f"{self.ssl_cert}:/certs/cert.pem:ro",
+                "-v", f"{self.ssl_key}:/certs/key.pem:ro",
+            ]
+
+        # Transport-specific daemon flags. We always *also* advertise
+        # `local` because module-to-module traffic inside the daemon's
+        # process group still uses it (the module-host spawns inherit
+        # the daemon's transport config; if tcp_ssl were the only
+        # option, they'd try to bind TLS with no cert and abort).
+        # `local` satisfies that; the network listener is separate.
+        transport_flags: list[str] = ["--transport", "local"]
+        if self.transport == "tcp":
+            transport_flags += [
+                "--transport", "tcp",
+                "--tcp-host", "0.0.0.0",
+                "--tcp-port", str(CONTAINER_TCP_PORT),
+                "--tcp-codec", self.codec,
+            ]
+        else:  # tcp_ssl
+            transport_flags += [
+                "--transport", "tcp_ssl",
+                "--tcp-ssl-host", "0.0.0.0",
+                "--tcp-ssl-port", str(CONTAINER_TCP_PORT),
+                "--tcp-ssl-codec", self.codec,
+                "--ssl-cert", "/certs/cert.pem",
+                "--ssl-key", "/certs/key.pem",
+            ]
+
         cmd: list[str] = [
             "docker", "run", "--rm", "-d",
             "--name", self._container_name,
@@ -198,17 +255,12 @@ class LogoscoreDockerDaemon:
             # module docstring for why we don't bind the same port on
             # both sides.
             "-p", f"{self._host_port}:{CONTAINER_TCP_PORT}",
-            "-v", f"{self._config_dir}:/config",
-            "-v", f"{self._persistence_dir}:/persistence",
-            "-v", f"{self.modules_dir}:/user-modules:ro",
+            *volumes,
             self.image,
             "daemon",
             "--config-dir", "/config",
             "--persistence-path", "/persistence",
-            "--transport", "tcp",
-            "--tcp-host", "0.0.0.0",
-            "--tcp-port", str(CONTAINER_TCP_PORT),
-            "--tcp-codec", self.codec,
+            *transport_flags,
             # -m is repeatable. /opt/logoscore/modules is the CLI's own
             # built-in modules (capability_module et al., populated in
             # the portable flavor; empty-but-harmless in dev). The
@@ -268,6 +320,7 @@ class LogoscoreDockerDaemon:
         timeout: float | None = 30.0,
         tcp_host: str = "localhost",
         codec: str | None = None,
+        no_verify_peer: bool | None = None,
     ) -> LogoscoreClient:
         """Build a LogoscoreClient wired to dial this daemon.
 
@@ -277,19 +330,28 @@ class LogoscoreDockerDaemon:
 
         `tcp_host` defaults to localhost because the container's port
         is published there. Override for remote-docker setups.
+
+        `no_verify_peer`: for `tcp_ssl` daemons this defaults to True so
+        self-signed certs work out of the box (the common case for smoke
+        tests). Set to False to exercise the verification path once
+        you're feeding the client a real CA. Ignored when transport is
+        plain `tcp`.
         """
         if self._container_id is None:
             raise LogoscoreError(
                 "daemon is not running — call start() or use the context manager"
             )
+        if no_verify_peer is None:
+            no_verify_peer = (self.transport == "tcp_ssl")
         return LogoscoreClient(
             binary=binary,
             config_dir=self._config_dir,
             timeout=timeout,
-            transport="tcp",
+            transport=self.transport,
             tcp_host=tcp_host,
             tcp_port=self.host_port,   # <-- the critical override
             codec=codec or self.codec,
+            no_verify_peer=no_verify_peer,
         )
 
     # ── Internals ───────────────────────────────────────────────────────
