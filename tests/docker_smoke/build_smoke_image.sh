@@ -19,7 +19,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-py_repo="$(cd "$here/../../.." && pwd)"
+py_repo="$(cd "$here/../.." && pwd)"
 
 # Default to the host's native Linux platform — avoids Rosetta
 # emulation on Apple Silicon, which has been seen to trip Boost.Asio's

@@ -7,11 +7,11 @@
 # status-go's tests-functional image.
 #
 # Usage (from this repo's root):
-#   docker build -f tests/integration/docker/Dockerfile -t logoscore:smoke .
+#   docker build -f tests/docker_smoke/Dockerfile -t logoscore:smoke .
 #
 #   # Build the "portable" flavor (cli-bundle-dir + install-portable):
 #   docker build --build-arg FLAVOR=portable \
-#       -f tests/integration/docker/Dockerfile -t logoscore:smoke-portable .
+#       -f tests/docker_smoke/Dockerfile -t logoscore:smoke-portable .
 #
 # FLAVOR selects the flake's bundle output:
 #   - dev       (default) → .#dockerBundle          — uses .#cli + .install

@@ -7,9 +7,10 @@ QVariant, QJsonArray, QStringList) exposed by `test-basic-module` in the
   repos/logos-test-modules/test-basic-module/src/test_basic_module_plugin.h
   repos/logos-test-modules/test-basic-module/src/test_basic_module_plugin.cpp
 
-The data-driven method cases come from `_basic_module_cases.BASIC_MODULE_CASES`
-so the docker smoke test (which also replays the full matrix over TCP in
-both JSON and CBOR) can't drift from the expectations here.
+Assertions here are written out one test per method for readability. The
+docker smoke suite (`tests/docker_smoke/test_docker_smoke.py`) replays the
+same matrix over TCP in both JSON and CBOR via `tests/_basic_module_cases.py`;
+keep the two in sync when adding methods to `test_basic_module`.
 
 Skipped unless LOGOSCORE_BIN and LOGOSCORE_TEST_MODULES_DIR are set — the
 Nix `integration` check wires both up.

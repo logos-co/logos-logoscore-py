@@ -28,9 +28,9 @@ FLAVOR=portable ./build_smoke_image.sh
 FLAVOR=both     ./build_smoke_image.sh         # builds both
 
 # Run the suite (default: dev)
-pytest tests/integration/test_docker_smoke.py --docker-flavor=dev
-pytest tests/integration/test_docker_smoke.py --docker-flavor=portable
-pytest tests/integration/test_docker_smoke.py --docker-flavor=both    # replays matrix twice
+pytest tests/docker_smoke --docker-flavor=dev
+pytest tests/docker_smoke --docker-flavor=portable
+pytest tests/docker_smoke --docker-flavor=both    # replays matrix twice
 ```
 
 Tag convention: `logoscore:smoke-dev` / `logoscore:smoke-portable`.
@@ -57,7 +57,7 @@ logos-logoscore-cli.url = "github:<you>/logos-logoscore-cli/<branch>";
 then rebuild the image:
 
 ```bash
-./tests/integration/docker/build_smoke_image.sh
+./tests/docker_smoke/build_smoke_image.sh
 ```
 
 First build takes a few minutes while nix populates its store in the

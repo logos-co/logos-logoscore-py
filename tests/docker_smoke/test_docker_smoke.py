@@ -38,7 +38,7 @@ import pytest
 
 from logoscore import LogoscoreClient
 
-from ._basic_module_cases import BASIC_MODULE_CASES
+from .._basic_module_cases import BASIC_MODULE_CASES
 
 
 # Docker image tag convention: logoscore:smoke-<flavor>, where <flavor>
@@ -162,7 +162,7 @@ def _require_docker_and_image(flavor: str = "dev") -> None:
     if not _image_present(image):
         pytest.skip(
             f"docker image '{image}' not built — run "
-            f"FLAVOR={flavor} tests/integration/docker/build_smoke_image.sh first"
+            f"FLAVOR={flavor} tests/docker_smoke/build_smoke_image.sh first"
         )
 
 
