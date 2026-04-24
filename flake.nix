@@ -9,7 +9,7 @@
     logos-logoscore-cli.inputs.logos-nix.follows = "logos-nix";
     logos-logoscore-cli.inputs.nixpkgs.follows = "nixpkgs";
 
-    logos-test-modules.url = "github:logos-co/logos-test-modules";
+    logos-test-modules.url = "github:logos-co/logos-test-modules/add-basic-module-cpp";
     logos-test-modules.inputs.logos-nix.follows = "logos-nix";
     logos-test-modules.inputs.logos-logoscore-cli.follows = "logos-logoscore-cli";
     logos-test-modules.inputs.nixpkgs.follows = "nixpkgs";
@@ -115,7 +115,22 @@
         let
           logoscoreBin             = logos-logoscore-cli.packages.${system}.default;
           testBasicInstall         = logos-test-modules.modules.${system}.test_basic_module.install;
+          testBasicCppInstall      = logos-test-modules.modules.${system}.test_basic_module_cpp.install;
           testBasicInstallPortable = logos-test-modules.modules.${system}.test_basic_module.install-portable;
+          testBasicCppInstallPortable = logos-test-modules.modules.${system}.test_basic_module_cpp.install-portable;
+
+          # Merge every test module's `.install` output into one dir so a
+          # single `-m` flag on the daemon picks them all up. Each module's
+          # install output already has the shape `modules/<name>/…`, so
+          # symlinkJoin stacks them without collision.
+          testModulesInstall = pkgs.symlinkJoin {
+            name = "logoscore-py-test-modules";
+            paths = [ testBasicInstall testBasicCppInstall ];
+          };
+          testModulesInstallPortable = pkgs.symlinkJoin {
+            name = "logoscore-py-test-modules-portable";
+            paths = [ testBasicInstallPortable testBasicCppInstallPortable ];
+          };
         in {
         default = pkgs.mkShell {
           packages = [
@@ -134,8 +149,8 @@
           # so we need `.install-portable` (self-contained). The docker
           # smoke fixture picks the right one per flavor.
           LOGOSCORE_BIN                       = "${logoscoreBin}/bin/logoscore";
-          LOGOSCORE_TEST_MODULES_DIR          = "${testBasicInstall}/modules";
-          LOGOSCORE_TEST_MODULES_DIR_PORTABLE = "${testBasicInstallPortable}/modules";
+          LOGOSCORE_TEST_MODULES_DIR          = "${testModulesInstall}/modules";
+          LOGOSCORE_TEST_MODULES_DIR_PORTABLE = "${testModulesInstallPortable}/modules";
 
           shellHook = ''
             echo "logos-logoscore-py dev shell"
@@ -158,7 +173,15 @@
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
           # `.install` lays out modules/<name>/<name>_plugin.{so,dylib} +
           # manifest.json — the layout logoscore's `-m` flag expects.
-          testBasicInstall = logos-test-modules.modules.${system}.test_basic_module.install;
+          # Merge `test_basic_module` (Qt) + `test_basic_module_cpp` (pure-C++)
+          # into one dir so a single `-m` flag loads both — the integration
+          # suite has separate test files per module.
+          testBasicInstall    = logos-test-modules.modules.${system}.test_basic_module.install;
+          testBasicCppInstall = logos-test-modules.modules.${system}.test_basic_module_cpp.install;
+          testModulesInstall  = pkgs.symlinkJoin {
+            name = "logoscore-py-test-modules";
+            paths = [ testBasicInstall testBasicCppInstall ];
+          };
         in
         {
           unit = pkgs.runCommand "logoscore-py-unit-tests" {
@@ -184,7 +207,7 @@
             ''}
             export PYTHONPATH=$PWD/src
             export LOGOSCORE_BIN=${logoscoreBin}/bin/logoscore
-            export LOGOSCORE_TEST_MODULES_DIR=${testBasicInstall}/modules
+            export LOGOSCORE_TEST_MODULES_DIR=${testModulesInstall}/modules
             # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
             export HOME=$PWD/home
             mkdir -p $HOME
