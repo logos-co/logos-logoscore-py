@@ -53,10 +53,14 @@ jobs:
       # `nixos/nix` container — no dependency on the host's nix).
       # Step 2 runs pytest via `nix develop` so python + pytest are on
       # PATH and PYTHONPATH points at the local `logoscore` source tree.
+      # Defaults to FLAVOR=portable / --docker-flavor=portable — that's
+      # the self-contained cli-bundle-dir shape that matches how released
+      # logoscore binaries are distributed, so it's the most realistic
+      # smoke. `dev` is still available via FLAVOR=dev on the build step
+      # and --docker-flavor=dev on pytest.
       - name: Build docker smoke image
         run: ./tests/docker_smoke/build_smoke_image.sh
 
       - name: Run docker smoke tests
         run: |
-          nix develop --command pytest tests/docker_smoke \
-            --docker-flavor=dev -v
+          nix develop --command pytest tests/docker_smoke -v

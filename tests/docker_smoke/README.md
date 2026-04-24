@@ -5,19 +5,103 @@ logoscore daemon and drive them via the Python wrapper from the host.
 Without docker installed they skip cleanly; the rest of the suite stays
 green on CI runners that don't have docker available.
 
+## The image is a reusable CLI runtime
+
+The `logoscore:smoke-*` image contains **only** the logoscore CLI plus
+the modules the CLI itself ships with (`capability_module`,
+`package_manager_module`). It does NOT bake in `test_basic_module` or
+any other user module. User modules — the ones you're writing and
+testing — are bind-mounted in at runtime.
+
+### Preferred: `LogoscoreDockerDaemon`
+
+If you're testing a module from Python, use the helper that ships with
+`logoscore-py`. It encapsulates the container lifecycle (volume mounts,
+port wiring, client construction) so your tests don't have to:
+
+```python
+from logoscore import LogoscoreDockerDaemon
+
+with LogoscoreDockerDaemon(
+    image="logoscore:smoke-portable",
+    modules_dir="./my-module/result/modules",  # host path
+) as daemon:
+    client = daemon.client(binary="logoscore")
+    client.load_module("my_module")
+    print(client.call("my_module", "do_something", 42))
+```
+
+The helper picks a free host port, bind-mounts everything the daemon
+needs (`/config`, `/persistence`, `/user-modules`), starts the
+container, waits for `daemon.json`, and returns a `LogoscoreClient`
+configured to dial the right port. Optional knobs: `host_port=...` to
+pin a port, `persistence_dir=...` to restore a pre-seeded session,
+`codec="cbor"` to pick a wire codec, `extra_module_dirs=[...]` /
+`extra_args=[...]` to extend the daemon invocation.
+
+### Equivalent raw `docker run`
+
+For reference / non-Python callers the same thing as a shell invocation:
+
+```bash
+docker run --rm -p 6000:6000 \
+    -v "$PWD/config":/config \
+    -v "$PWD/persistence":/persistence \
+    -v "$PWD/my-modules-install/modules":/user-modules:ro \
+    logoscore:smoke-portable \
+    daemon --config-dir /config \
+           --persistence-path /persistence \
+           --transport tcp --tcp-host 0.0.0.0 --tcp-port 6000 \
+           -m /opt/logoscore/modules \
+           -m /user-modules
+```
+
+The three mounts each have a specific purpose:
+
+| Host dir                  | Container path | Read/write | Why                                                                                           |
+|---------------------------|----------------|------------|-----------------------------------------------------------------------------------------------|
+| `./config`                | `/config`      | rw         | Daemon writes `daemon.json` here; your client reads it to discover host/port/instance_id.     |
+| `./persistence`           | `/persistence` | rw         | Module state (`--persistence-path`). Pre-seed to restore a session; read back to inspect it.  |
+| `./my-modules/modules`    | `/user-modules`| ro         | Compiled Qt plugins loaded via `-m`. Read-only because the daemon never mutates these.        |
+
+### Port strategy
+
+The container always binds `6000` internally; the host maps a
+dynamically-picked ephemeral port to it (`-p $host_port:6000`). The
+client gets told `tcp_port=$host_port` so it dials `localhost:$host_port`
+rather than the container-internal `6000` the daemon wrote into its
+`daemon.json`. Same pattern as
+[status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
+
+Result: parallel container-backed tests don't fight over port 6000 on
+the host, and you don't need to know which ports are free before you
+start.
+
 ## Flavors
 
 Two build flavors, to match how the daemon gets distributed:
 
-| Flavor     | Flake attr               | Binary                              | Test modules            | Image size |
-|------------|--------------------------|-------------------------------------|-------------------------|------------|
-| `dev`      | `.#dockerBundle`         | `logos-logoscore-cli.packages.…cli` | `.test_basic_module.install`          | ~3 GB      |
-| `portable` | `.#dockerBundlePortable` | `…cli-bundle-dir` (self-contained)  | `.test_basic_module.install-portable` | ~600 MB    |
+| Flavor     | Flake attr               | Binary                                | Modules the user mounts in     | Image size |
+|------------|--------------------------|---------------------------------------|--------------------------------|------------|
+| `portable` | `.#dockerBundlePortable` | `…cli-bundle-dir` (self-contained)    | `.install-portable`            | ~600 MB    |
+| `dev`      | `.#dockerBundle`         | `logos-logoscore-cli.packages.…cli`   | `.install` (nix-store rpaths)  | ~3 GB      |
 
-The `dev` flavor links against Qt/Boost/OpenSSL via nix-store rpaths —
-what the `logoscore-py` dev shell uses. The `portable` flavor is a
-self-contained bin/+lib/+modules/ tree that matches a released
-logoscore distribution.
+**`portable` is the default** — it's the self-contained
+`bin/ + lib/ + modules/` tree that matches how released logoscore
+binaries are distributed, so it's the most realistic smoke. `dev`
+links against Qt/Boost/OpenSSL via nix-store rpaths (what the
+`logoscore-py` dev shell itself uses) and is faster to iterate on when
+you already have the nix cache warm, but requires copying `/nix/store`
+into the image at build time.
+
+The user-mounted modules must match the image flavor: `.install`
+modules (rpath-linked into `/nix/store`) only work in the `dev` image
+because its `/nix/store` is present; `.install-portable` modules
+(self-contained shared-lib bundles) work in the `portable` image.
+The smoke test driver picks the right one via
+`LOGOSCORE_TEST_MODULES_DIR` (dev) or
+`LOGOSCORE_TEST_MODULES_DIR_PORTABLE` (portable), both set by the
+`nix develop` shell.
 
 ## Setup
 

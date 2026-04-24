@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # Builds `logoscore:smoke-<flavor>` via `docker build`. Two flavors:
 #
-#   ./build_smoke_image.sh                  # tag: logoscore:smoke-dev
-#   FLAVOR=portable ./build_smoke_image.sh  # tag: logoscore:smoke-portable
+#   ./build_smoke_image.sh                  # tag: logoscore:smoke-portable (default)
+#   FLAVOR=dev      ./build_smoke_image.sh  # tag: logoscore:smoke-dev
 #   FLAVOR=both     ./build_smoke_image.sh  # builds both tags
 #
-# - `dev`      → .#dockerBundle         (.#cli + .install test modules)
-# - `portable` → .#dockerBundlePortable (.#cli-bundle-dir + .install-portable)
+# - `portable` (default) → .#dockerBundlePortable (cli-bundle-dir,
+#                          self-contained; matches how released binaries
+#                          are distributed)
+# - `dev`                → .#dockerBundle         (.#cli linked against
+#                          /nix/store)
+#
+# Note: the image is a *CLI-only runtime* — it does not bake in any user
+# modules. User modules (e.g. test_basic_module for the smoke suite)
+# are bind-mounted into the container at runtime; see the README and
+# `test_docker_smoke.py::_run_daemon_container`.
 #
 # Everything happens inside a Linux container (stage 1 runs `nix build`
 # inside nixos/nix), so macOS hosts run fine under Docker Desktop's
@@ -46,13 +54,13 @@ build_flavor() {
         "$py_repo"
 }
 
-case "${FLAVOR:-dev}" in
+case "${FLAVOR:-portable}" in
     dev|portable)
-        build_flavor "${FLAVOR:-dev}"
+        build_flavor "${FLAVOR:-portable}"
         ;;
     both)
-        build_flavor dev
         build_flavor portable
+        build_flavor dev
         ;;
     *)
         echo "Unknown FLAVOR='$FLAVOR'; use dev|portable|both" >&2

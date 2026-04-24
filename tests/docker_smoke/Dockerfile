@@ -1,21 +1,40 @@
 # syntax=docker/dockerfile:1.6
 #
-# Smoke-test image for the logoscore daemon. Builds entirely inside a
-# Linux container — no cross-compilation from the host. Docker Desktop
-# on macOS runs this via the host-native Linux VM (linux/arm64 on
-# Apple Silicon), so no Rosetta emulation is needed. Same pattern as
-# status-go's tests-functional image.
+# Reusable logoscore daemon image. Contains only the CLI (and the modules
+# it ships with — capability_module, package_manager_module); user modules
+# are expected to be bind-mounted in at runtime:
+#
+#   docker run --rm -p 6000:6000 \
+#       -v "$PWD/config":/config \
+#       -v "$PWD/persistence":/persistence \
+#       -v /path/to/your/modules:/user-modules:ro \
+#       logoscore:smoke-portable \
+#       daemon --config-dir /config \
+#              --persistence-path /persistence \
+#              --transport tcp --tcp-host 0.0.0.0 --tcp-port 6000 \
+#              -m /opt/logoscore/modules \
+#              -m /user-modules
+#
+# That's the exact shape the pytest smoke suite uses and what
+# logoscore-py consumers (who want to test their own Qt-plugin modules
+# against a real daemon) should replicate. Pre-seed `/persistence` on
+# the host to restore a session; read it back after to inspect state.
+#
+# Builds entirely inside a Linux container — no cross-compilation from
+# the host. Docker Desktop on macOS runs this via the host-native Linux
+# VM (linux/arm64 on Apple Silicon), so no Rosetta emulation is needed.
+# Same pattern as status-go's tests-functional image.
 #
 # Usage (from this repo's root):
 #   docker build -f tests/docker_smoke/Dockerfile -t logoscore:smoke .
 #
-#   # Build the "portable" flavor (cli-bundle-dir + install-portable):
+#   # Build the "portable" flavor (cli-bundle-dir):
 #   docker build --build-arg FLAVOR=portable \
 #       -f tests/docker_smoke/Dockerfile -t logoscore:smoke-portable .
 #
 # FLAVOR selects the flake's bundle output:
-#   - dev       (default) → .#dockerBundle          — uses .#cli + .install
-#   - portable            → .#dockerBundlePortable  — uses .#cli-bundle-dir + .install-portable
+#   - dev       (default) → .#dockerBundle          — uses .#cli
+#   - portable            → .#dockerBundlePortable  — uses .#cli-bundle-dir
 #
 # The image uses whatever logos-logoscore-cli revision this repo's
 # flake.lock / flake.nix points at. To iterate on unpublished CLI
@@ -23,7 +42,7 @@
 
 FROM nixos/nix:2.24.9 AS build
 
-ARG FLAVOR=dev
+ARG FLAVOR=portable
 
 # Enable flakes. Disable the sandbox + seccomp filter: Docker Desktop's
 # Rosetta layer (on Apple Silicon's linux/amd64 fallback) blocks the
@@ -65,7 +84,7 @@ RUN case "$FLAVOR" in \
 # / `FROM debian AS rt-portable` + a final `FROM rt-$FLAVOR`.
 
 FROM nixos/nix:2.24.9
-ARG FLAVOR=dev
+ARG FLAVOR=portable
 
 # Stage in everything the bundle needs. For `dev` we need the full nix
 # closure (binary links via rpath into /nix/store); for `portable` the
@@ -80,6 +99,9 @@ COPY --from=build /out/bundle                /opt/logoscore
 # "No such file or directory" on the parent dir.
 EXPOSE 6000
 ENTRYPOINT ["/opt/logoscore/bin/logoscore"]
+# Default CMD = a bare daemon scanning only the CLI's built-in modules.
+# In practice callers almost always override CMD to add their own `-m
+# /user-modules` (or equivalent) — see the usage block at the top.
 CMD ["daemon", \
      "--transport", "tcp", \
      "--tcp-host",  "0.0.0.0", \

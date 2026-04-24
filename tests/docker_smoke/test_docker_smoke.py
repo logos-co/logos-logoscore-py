@@ -17,26 +17,31 @@ Three scenarios:
    `test_docker_tcp_load_and_call`, kept as a minimal fallback when the
    matrix fixtures are skipped for environmental reasons.
 
+All the container lifecycle — volume mounts, port mapping, client
+wiring — is handled by the public `LogoscoreDockerDaemon` helper. This
+file is just the pytest glue + test assertions; external consumers
+replicating this shape for their own modules should use the helper
+directly (see `src/logoscore/docker_daemon.py`).
+
 All tests are opt-in: they require docker on the host and a pre-built
-`logoscore:smoke` image (see `docker/build_smoke_image.sh`). If either is
-missing the suite skips cleanly rather than failing.
+`logoscore:smoke-<flavor>` image (see `build_smoke_image.sh`). If either
+is missing the suite skips cleanly rather than failing.
 """
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import socket
-import subprocess
 import threading
 import time
-import uuid
-from pathlib import Path
 from typing import Iterator
 
 import pytest
 
-from logoscore import LogoscoreClient
+from logoscore import (
+    LogoscoreDockerDaemon,
+    docker_available,
+    image_present,
+)
 
 from .._basic_module_cases import BASIC_MODULE_CASES
 
@@ -57,7 +62,7 @@ def _flavors_to_run(config) -> list[str]:
     `dev` | `portable` run the matrix once; `both` replays it twice."""
     choice = config.getoption("--docker-flavor")
     if choice == "both":
-        return ["dev", "portable"]
+        return ["portable", "dev"]
     if choice in ("dev", "portable"):
         return [choice]
     raise pytest.UsageError(
@@ -74,92 +79,43 @@ def pytest_generate_tests(metafunc):
                              ids=[f"flavor={f}" for f in flavors])
 
 
-# ── Docker helpers ─────────────────────────────────────────────────────────
+# ── Environmental skip helpers ────────────────────────────────────────────
 
-def _docker_available() -> bool:
-    if not shutil.which("docker"):
-        return False
-    r = subprocess.run(["docker", "info"], capture_output=True, text=True)
-    return r.returncode == 0
+def _resolve_user_modules_dir(flavor: str) -> str:
+    """Host path to bind-mount as `/user-modules` inside the container.
 
+    The smoke image is intentionally a *bare CLI runtime* — it doesn't
+    ship test_basic_module or any other consumer-authored module. The
+    test driver mounts them in at runtime, which is also the shape
+    end users are expected to adopt for their own modules.
 
-def _image_present(image: str) -> bool:
-    r = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True, text=True,
+    Two env vars because the two image flavors need differently-built
+    module plugins:
+      * `dev`      → `.install` modules (rpath-linked into /nix/store)
+      * `portable` → `.install-portable` modules (self-contained libs)
+    Using the wrong flavor's modules in the wrong image fails at dlopen
+    time with missing libs, so pick explicitly per flavor.
+    """
+    env_var = (
+        "LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
+        if flavor == "portable"
+        else "LOGOSCORE_TEST_MODULES_DIR"
     )
-    return r.returncode == 0
+    d = os.environ.get(env_var)
+    if not d:
+        pytest.skip(
+            f"{env_var} not set — can't bind-mount user modules into "
+            f"the {flavor} container. Enter the dev shell (`nix develop`) "
+            f"or wire the var up in your own CI."
+        )
+    return d
 
 
-def _pick_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _wait_for_conn_file(config_dir: Path, timeout: float = 20.0) -> bool:
-    """Block until <config_dir>/daemon.json appears (daemon wrote it)
-    or timeout elapses. Returns True on success."""
-    deadline = time.monotonic() + timeout
-    conn_file = config_dir / "daemon.json"
-    while time.monotonic() < deadline:
-        if conn_file.exists():
-            return True
-        time.sleep(0.1)
-    return False
-
-
-def _run_daemon_container(
-    *,
-    name: str,
-    host_port: int,
-    config_dir: Path,
-    codec: str = "json",
-    flavor: str = "dev",
-) -> str:
-    """Spawn a detached docker container running the logoscore daemon with a
-    TCP listener on port 6000 inside the container, published on
-    host_port on the host. Returns the container id.
-
-    Built for the host's native Linux platform (see build_smoke_image.sh),
-    so we skip --platform here — on Apple Silicon this means linux/arm64
-    natively, avoiding Rosetta emulation issues with Boost.Asio's socket
-    acceptor."""
-    # Bind the same port inside and outside the container. The daemon
-    # writes its own port into daemon.json, so if host and container
-    # ports differ the client would read the container-internal port
-    # and connect to the wrong endpoint on localhost.
-    r = subprocess.run([
-        "docker", "run", "--rm", "-d",
-        "--name", name,
-        "-p", f"{host_port}:{host_port}",
-        "-v", f"{config_dir}:/config",
-        _docker_image_for(flavor),
-        "daemon",
-        "--config-dir", "/config",
-        "--transport", "tcp",
-        "--tcp-host", "0.0.0.0",
-        "--tcp-port", str(host_port),
-        "--tcp-codec", codec,
-        # Default modules dir in the new unified image layout, works
-        # for both dev and portable flavors.
-        "-m", "/opt/logoscore/modules",
-    ], capture_output=True, text=True)
-    if r.returncode != 0:
-        pytest.skip(f"docker run failed: {r.stderr}")
-    return r.stdout.strip()
-
-
-def _remove_container(container_id: str) -> None:
-    subprocess.run(["docker", "rm", "-f", container_id],
-                   capture_output=True, text=True)
-
-
-def _require_docker_and_image(flavor: str = "dev") -> None:
-    if not _docker_available():
+def _require_docker_and_image(flavor: str) -> None:
+    if not docker_available():
         pytest.skip("docker not available")
     image = _docker_image_for(flavor)
-    if not _image_present(image):
+    if not image_present(image):
         pytest.skip(
             f"docker image '{image}' not built — run "
             f"FLAVOR={flavor} tests/docker_smoke/build_smoke_image.sh first"
@@ -169,42 +125,28 @@ def _require_docker_and_image(flavor: str = "dev") -> None:
 # ── Legacy single-container fixture (kept for the old fallback tests) ─────
 
 @pytest.fixture(scope="module")
-def dockerized_daemon(tmp_path_factory, docker_flavor) -> Iterator[tuple[str, Path, int]]:
+def dockerized_daemon(docker_flavor) -> Iterator[LogoscoreDockerDaemon]:
     _require_docker_and_image(docker_flavor)
-    host_port  = _pick_free_port()
-    config_dir = tmp_path_factory.mktemp(f"logoscore-docker-{docker_flavor}-cfg")
-    container  = f"logoscore-smoke-{docker_flavor}-{uuid.uuid4().hex[:8]}"
-
-    cid = _run_daemon_container(
-        name=container, host_port=host_port, config_dir=config_dir,
-        flavor=docker_flavor,
-    )
-    if not _wait_for_conn_file(config_dir):
-        _remove_container(cid)
-        pytest.fail(f"daemon ({docker_flavor}) never wrote daemon.json")
+    modules_dir = _resolve_user_modules_dir(docker_flavor)
     try:
-        yield cid, config_dir, host_port
-    finally:
-        _remove_container(cid)
+        with LogoscoreDockerDaemon(
+            image=_docker_image_for(docker_flavor),
+            modules_dir=modules_dir,
+        ) as daemon:
+            yield daemon
+    except Exception as e:
+        pytest.fail(f"daemon ({docker_flavor}) failed to start: {e}")
 
 
 def test_docker_tcp_status(dockerized_daemon, logoscore_bin):
-    _, config_dir, _ = dockerized_daemon
-    client = LogoscoreClient(
-        binary=logoscore_bin, config_dir=config_dir,
-        transport="tcp", tcp_host="localhost",
-    )
+    client = dockerized_daemon.client(binary=logoscore_bin)
     status = client.status()
     assert isinstance(status, dict)
     assert "daemon" in status or "modules" in status
 
 
 def test_docker_tcp_load_and_call(dockerized_daemon, logoscore_bin):
-    _, config_dir, _ = dockerized_daemon
-    client = LogoscoreClient(
-        binary=logoscore_bin, config_dir=config_dir,
-        transport="tcp", tcp_host="localhost",
-    )
+    client = dockerized_daemon.client(binary=logoscore_bin)
     modules = client.list_modules()
     names = {m.get("name") for m in modules if isinstance(m, dict)}
     assert any("test_basic" in (n or "") for n in names), names
@@ -215,35 +157,22 @@ def test_docker_tcp_load_and_call(dockerized_daemon, logoscore_bin):
 # ── Matrix fixture: one daemon per codec, reused across the full test set ─
 
 @pytest.fixture(scope="module", params=["json", "cbor"])
-def docker_matrix_client(request, tmp_path_factory, logoscore_bin, docker_flavor):
+def docker_matrix_client(request, logoscore_bin, docker_flavor):
     """Yield a LogoscoreClient connected over TCP to a fresh docker daemon
     running with the requested wire codec + flavor. Module-scoped so the
     ~40-case matrix below doesn't spin up a container per test."""
     _require_docker_and_image(docker_flavor)
+    modules_dir = _resolve_user_modules_dir(docker_flavor)
     codec = request.param
 
-    host_port  = _pick_free_port()
-    config_dir = tmp_path_factory.mktemp(
-        f"logoscore-docker-{docker_flavor}-{codec}-cfg")
-    container  = f"logoscore-matrix-{docker_flavor}-{codec}-{uuid.uuid4().hex[:8]}"
-
-    cid = _run_daemon_container(
-        name=container, host_port=host_port, config_dir=config_dir,
-        codec=codec, flavor=docker_flavor,
-    )
-    if not _wait_for_conn_file(config_dir):
-        _remove_container(cid)
-        pytest.fail(f"daemon ({docker_flavor},{codec}) never wrote daemon.json")
-    try:
-        client = LogoscoreClient(
-            binary=logoscore_bin, config_dir=config_dir,
-            transport="tcp", tcp_host="localhost",
-            codec=codec,
-        )
+    with LogoscoreDockerDaemon(
+        image=_docker_image_for(docker_flavor),
+        modules_dir=modules_dir,
+        codec=codec,
+    ) as daemon:
+        client = daemon.client(binary=logoscore_bin)
         client.load_module(MODULE)
         yield client
-    finally:
-        _remove_container(cid)
 
 
 @pytest.mark.parametrize(
@@ -303,35 +232,27 @@ def test_docker_basic_module_emit_multi_arg_event(docker_matrix_client):
 # ── Two-daemon test: one client process, two independent containers ──────
 
 @pytest.fixture(scope="module")
-def two_dockerized_daemons(tmp_path_factory, docker_flavor):
-    """Spin up two independent daemon containers on different host ports,
-    each with its own config dir. Used by `test_two_daemons_in_docker` to
-    verify that the wrapper doesn't accidentally share any global state
-    between daemon handles."""
+def two_dockerized_daemons(docker_flavor):
+    """Spin up two independent daemon containers on different host ports.
+    Used by `test_two_daemons_in_docker` to verify that the wrapper
+    doesn't accidentally share any global state between daemon handles."""
     _require_docker_and_image(docker_flavor)
+    modules_dir = _resolve_user_modules_dir(docker_flavor)
 
-    specs = []
-    for label in ("alpha", "beta"):
-        host_port  = _pick_free_port()
-        config_dir = tmp_path_factory.mktemp(f"logoscore-docker-{docker_flavor}-{label}")
-        container  = f"logoscore-twopair-{docker_flavor}-{label}-{uuid.uuid4().hex[:8]}"
-        cid = _run_daemon_container(
-            name=container, host_port=host_port, config_dir=config_dir,
-            flavor=docker_flavor)
-        if not _wait_for_conn_file(config_dir):
-            for s in specs:
-                _remove_container(s["cid"])
-            _remove_container(cid)
-            pytest.fail(f"daemon '{label}' never wrote daemon.json")
-        specs.append({
-            "label": label, "cid": cid,
-            "host_port": host_port, "config_dir": config_dir,
-        })
+    daemons: list[LogoscoreDockerDaemon] = []
     try:
-        yield specs
+        for label in ("alpha", "beta"):
+            d = LogoscoreDockerDaemon(
+                image=_docker_image_for(docker_flavor),
+                modules_dir=modules_dir,
+                container_name=f"logoscore-twopair-{docker_flavor}-{label}",
+            )
+            d.start()
+            daemons.append(d)
+        yield daemons
     finally:
-        for s in specs:
-            _remove_container(s["cid"])
+        for d in daemons:
+            d.stop()
 
 
 def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
@@ -341,19 +262,14 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
     instance_ids from each connection file, (b) loading the module on
     daemon A but NOT on B, and (c) verifying only A reports it loaded
     while B remains untouched."""
-    specs = two_dockerized_daemons
-    assert len(specs) == 2
+    daemons = two_dockerized_daemons
+    assert len(daemons) == 2
 
-    clients = []
-    instance_ids = []
-    for s in specs:
-        c = LogoscoreClient(
-            binary=logoscore_bin, config_dir=s["config_dir"],
-            transport="tcp", tcp_host="localhost",
-        )
-        clients.append(c)
-        cfg = json.loads((s["config_dir"] / "daemon.json").read_text())
-        instance_ids.append(cfg["instance_id"])
+    clients = [d.client(binary=logoscore_bin) for d in daemons]
+    instance_ids = [
+        json.loads((d.config_dir / "daemon.json").read_text())["instance_id"]
+        for d in daemons
+    ]
 
     # Distinct instances (these are UUID-derived, collision is negligible).
     assert instance_ids[0] != instance_ids[1], (

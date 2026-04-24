@@ -31,13 +31,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--docker-flavor",
         action="store",
-        default="dev",
+        default="portable",
         help=(
             "Which logoscore:smoke-<flavor> docker image the docker "
-            "smoke tests target: `dev` (default, nix-store-linked "
-            "binary) or `portable` (self-contained cli-bundle-dir). "
-            "Use `both` to replay the matrix against each in turn — "
-            "the preferred setting in CI."
+            "smoke tests target: `portable` (default, self-contained "
+            "cli-bundle-dir — matches how released binaries ship) or "
+            "`dev` (nix-store-linked, faster to build when the nix "
+            "cache is warm but requires /nix/store in the image). "
+            "Use `both` to replay the matrix against each in turn."
         ),
     )
 
