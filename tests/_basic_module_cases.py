@@ -4,8 +4,8 @@ Extracted so the same matrix can be run against different daemons (local
 socket, TCP, TCP+SSL, in a docker container, with JSON or CBOR codec).
 Structure: `(method_name, args, expected_value)`. `expected_value=None`
 means "the call must dispatch cleanly, but we don't check what it
-returns" — used for methods whose return type logoscore doesn't fully
-serialise yet (notably `LogosResult`).
+returns" — escape hatch for types the runtime can't yet serialise
+deterministically. Prefer a concrete expected value when possible.
 """
 from __future__ import annotations
 
@@ -36,13 +36,16 @@ BASIC_MODULE_CASES: list[tuple[str, tuple, object]] = [
     ("echo",                ("round-trip",),            "round-trip"),
     ("concat",              ("foo", "bar"),             "foobar"),
 
-    # LogosResult — currently returns null via CLI.
-    ("successResult",       (),                         None),
-    ("errorResult",         (),                         None),
-    ("resultWithMap",       (),                         None),
-    ("resultWithList",      (),                         None),
-    ("validateInput",       ("hello",),                 None),
-    ("validateInput",       ("",),                      None),
+    # LogosResult — serialised on the wire as
+    #   {"success": bool, "value": <any>, "error": <any>}
+    # by qvariantToRpcValue in logos-cpp-sdk. `value`/`error` are whatever
+    # the method stuffed into the struct; null when absent.
+    ("successResult",       (),                         {"success": True,  "value": "operation succeeded",                                             "error": None}),
+    ("errorResult",         (),                         {"success": False, "value": None,                                                              "error": "deliberate error for testing"}),
+    ("resultWithMap",       (),                         {"success": True,  "value": {"name": "test", "count": 42, "active": True},                    "error": None}),
+    ("resultWithList",      (),                         {"success": True,  "value": [{"id": 1, "label": "first"}, {"id": 2, "label": "second"}],      "error": None}),
+    ("validateInput",       ("hello",),                 {"success": True,  "value": {"input": "hello", "length": 5},                                  "error": None}),
+    ("validateInput",       ("",),                      {"success": False, "value": None,                                                              "error": "input cannot be empty"}),
 
     # QVariant
     ("returnVariantInt",    (),                         99),
