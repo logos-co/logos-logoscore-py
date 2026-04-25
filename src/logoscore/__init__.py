@@ -40,6 +40,7 @@ from .daemon import LogoscoreDaemon
 from .docker_daemon import (
     CONTAINER_TCP_PORT,
     LogoscoreDockerDaemon,
+    build_modules_in_docker,
     docker_available,
     image_present,
     pick_free_port,
@@ -67,6 +68,7 @@ __all__ = [
     "list_tokens",
     # Docker helpers
     "CONTAINER_TCP_PORT",
+    "build_modules_in_docker",
     "docker_available",
     "image_present",
     "pick_free_port",

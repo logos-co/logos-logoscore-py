@@ -9,7 +9,7 @@
     logos-logoscore-cli.inputs.logos-nix.follows = "logos-nix";
     logos-logoscore-cli.inputs.nixpkgs.follows = "nixpkgs";
 
-    logos-test-modules.url = "github:logos-co/logos-test-modules/add-basic-module-cpp";
+    logos-test-modules.url = "github:logos-co/logos-test-modules";
     logos-test-modules.inputs.logos-nix.follows = "logos-nix";
     logos-test-modules.inputs.logos-logoscore-cli.follows = "logos-logoscore-cli";
     logos-test-modules.inputs.nixpkgs.follows = "nixpkgs";

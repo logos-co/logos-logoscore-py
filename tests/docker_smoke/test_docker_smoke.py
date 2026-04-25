@@ -62,37 +62,13 @@ def _docker_image_for(flavor: str) -> str:
 # SSL smoke alone) still gets the fixture injected.
 
 
+# Modules to mount into containers come from the session-scoped
+# `linux_test_modules_dir` fixture in conftest.py — built once
+# in-container so the resulting `.so` files are ABI-matched to the
+# daemon's Linux runtime regardless of the host OS.
+
+
 # ── Environmental skip helpers ────────────────────────────────────────────
-
-def _resolve_user_modules_dir(flavor: str) -> str:
-    """Host path to bind-mount as `/user-modules` inside the container.
-
-    The smoke image is intentionally a *bare CLI runtime* — it doesn't
-    ship test_basic_module or any other consumer-authored module. The
-    test driver mounts them in at runtime, which is also the shape
-    end users are expected to adopt for their own modules.
-
-    Two env vars because the two image flavors need differently-built
-    module plugins:
-      * `dev`      → `.install` modules (rpath-linked into /nix/store)
-      * `portable` → `.install-portable` modules (self-contained libs)
-    Using the wrong flavor's modules in the wrong image fails at dlopen
-    time with missing libs, so pick explicitly per flavor.
-    """
-    env_var = (
-        "LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
-        if flavor == "portable"
-        else "LOGOSCORE_TEST_MODULES_DIR"
-    )
-    d = os.environ.get(env_var)
-    if not d:
-        pytest.skip(
-            f"{env_var} not set — can't bind-mount user modules into "
-            f"the {flavor} container. Enter the dev shell (`nix develop`) "
-            f"or wire the var up in your own CI."
-        )
-    return d
-
 
 def _require_docker_and_image(flavor: str) -> None:
     if not docker_available():
@@ -108,13 +84,12 @@ def _require_docker_and_image(flavor: str) -> None:
 # ── Legacy single-container fixture (kept for the old fallback tests) ─────
 
 @pytest.fixture(scope="module")
-def dockerized_daemon(docker_flavor) -> Iterator[LogoscoreDockerDaemon]:
+def dockerized_daemon(docker_flavor, linux_test_modules_dir) -> Iterator[LogoscoreDockerDaemon]:
     _require_docker_and_image(docker_flavor)
-    modules_dir = _resolve_user_modules_dir(docker_flavor)
     try:
         with LogoscoreDockerDaemon(
             image=_docker_image_for(docker_flavor),
-            modules_dir=modules_dir,
+            modules_dir=linux_test_modules_dir,
         ) as daemon:
             yield daemon
     except Exception as e:
@@ -140,17 +115,16 @@ def test_docker_tcp_load_and_call(dockerized_daemon, logoscore_bin):
 # ── Matrix fixture: one daemon per codec, reused across the full test set ─
 
 @pytest.fixture(scope="module", params=["json", "cbor"])
-def docker_matrix_client(request, logoscore_bin, docker_flavor):
+def docker_matrix_client(request, logoscore_bin, docker_flavor, linux_test_modules_dir):
     """Yield a LogoscoreClient connected over TCP to a fresh docker daemon
     running with the requested wire codec + flavor. Module-scoped so the
     ~40-case matrix below doesn't spin up a container per test."""
     _require_docker_and_image(docker_flavor)
-    modules_dir = _resolve_user_modules_dir(docker_flavor)
     codec = request.param
 
     with LogoscoreDockerDaemon(
         image=_docker_image_for(docker_flavor),
-        modules_dir=modules_dir,
+        modules_dir=linux_test_modules_dir,
         codec=codec,
     ) as daemon:
         client = daemon.client(binary=logoscore_bin)
@@ -215,19 +189,18 @@ def test_docker_basic_module_emit_multi_arg_event(docker_matrix_client):
 # ── Two-daemon test: one client process, two independent containers ──────
 
 @pytest.fixture(scope="module")
-def two_dockerized_daemons(docker_flavor):
+def two_dockerized_daemons(docker_flavor, linux_test_modules_dir):
     """Spin up two independent daemon containers on different host ports.
     Used by `test_two_daemons_in_docker` to verify that the wrapper
     doesn't accidentally share any global state between daemon handles."""
     _require_docker_and_image(docker_flavor)
-    modules_dir = _resolve_user_modules_dir(docker_flavor)
 
     daemons: list[LogoscoreDockerDaemon] = []
     try:
         for label in ("alpha", "beta"):
             d = LogoscoreDockerDaemon(
                 image=_docker_image_for(docker_flavor),
-                modules_dir=modules_dir,
+                modules_dir=linux_test_modules_dir,
                 container_name=f"logoscore-twopair-{docker_flavor}-{label}",
             )
             d.start()

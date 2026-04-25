@@ -20,7 +20,11 @@ from typing import Iterator
 
 import pytest
 
-from logoscore import LogoscoreDockerDaemon, docker_available, image_present
+from logoscore import (
+    LogoscoreDockerDaemon,
+    docker_available,
+    image_present,
+)
 
 MODULE = "test_basic_module"
 
@@ -35,36 +39,9 @@ def _docker_image_for(flavor: str) -> str:
     return DOCKER_IMAGE_FMT.format(flavor=flavor)
 
 
-def _resolve_user_modules_dir(flavor: str, copy_root: Path) -> str:
-    """Return a docker-mountable path to the modules dir for `flavor`.
-
-    The nix dev shell sets `LOGOSCORE_TEST_MODULES_DIR{,_PORTABLE}` to a
-    path under `/nix/store`. That's fine on Linux CI (docker daemon is
-    root on the same host, any path is bind-mountable), but
-    Docker-Desktop-on-macOS only shares a fixed allow-list of host
-    paths with its Linux VM and `/nix/store` isn't in it. Rather than
-    ask every developer to add that path to Docker Desktop's File
-    Sharing settings, we copy the modules tree to `copy_root` (under
-    the pytest tmp tree, which is typically `/private/tmp/` — always
-    shared) and hand docker that path instead. The copy is a few MB /
-    a fraction of a second.
-    """
-    env_var = (
-        "LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
-        if flavor == "portable"
-        else "LOGOSCORE_TEST_MODULES_DIR"
-    )
-    src = os.environ.get(env_var)
-    if not src:
-        pytest.skip(
-            f"{env_var} not set — enter the dev shell (`nix develop`) or set "
-            f"it in your CI environment."
-        )
-    import shutil
-    dst = copy_root / "user-modules"
-    if not dst.exists():
-        shutil.copytree(src, dst)
-    return str(dst)
+# Building test_basic_module in the linux container happens once per
+# pytest session via the `linux_test_modules_dir` fixture in
+# conftest.py — see that file for rationale.
 
 
 def _require_docker_and_image(flavor: str) -> None:
@@ -111,17 +88,16 @@ def self_signed_cert(tmp_path_factory) -> tuple[Path, Path]:
 def ssl_daemon(
     docker_flavor: str,
     self_signed_cert: tuple[Path, Path],
-    tmp_path: Path,
+    linux_test_modules_dir: Path,
 ) -> Iterator[LogoscoreDockerDaemon]:
     """A logoscore daemon inside docker listening on `tcp_ssl`, using the
     throwaway cert. Function-scoped: each test gets a clean container."""
     _require_docker_and_image(docker_flavor)
     cert, key = self_signed_cert
-    modules_dir = _resolve_user_modules_dir(docker_flavor, tmp_path)
 
     with LogoscoreDockerDaemon(
         image=_docker_image_for(docker_flavor),
-        modules_dir=modules_dir,
+        modules_dir=linux_test_modules_dir,
         transport="tcp_ssl",
         ssl_cert=cert,
         ssl_key=key,

@@ -187,6 +187,53 @@ layer cache and nix's content-addressed store.
 Per-test skips show exactly which of (json, cbor, two-daemon, ssl)
 you're missing when docker or `openssl` isn't present.
 
+### Building your module for the container
+
+The daemon image is Linux. Your module's compiled plugin needs to be a
+Linux `.so` with a glibc/Qt/OpenSSL ABI compatible with the image's
+runtime. Modules built on macOS (dylibs) won't load; modules built on
+Linux with a different glibc usually won't either.
+
+Use the helper that builds inside the same nixos/nix base the daemon
+image was compiled in, guaranteeing ABI compatibility regardless of
+host OS:
+
+```python
+from logoscore import LogoscoreDockerDaemon, build_modules_in_docker
+
+modules_dir = build_modules_in_docker(
+    builds=[
+        # Each entry is (flake_ref, attr). ALL builds share one container
+        # run / one nix store, so common deps (logos-cpp-sdk, Qt, boost,
+        # openssl) get fetched once. Adding a second module costs only
+        # its own compile time, not another full closure download.
+        ("github:user/my-module",  "packages.x86_64-linux.install-portable"),
+        ("github:user/my-module2", "packages.x86_64-linux.install-portable"),
+    ],
+    output_dir="./build/modules",
+)
+
+with LogoscoreDockerDaemon(
+    image="logoscore:smoke-portable",
+    modules_dir=modules_dir,
+) as daemon:
+    client = daemon.client(binary="logoscore")
+    client.load_module("my_module")
+    print(client.call("my_module", "do_something", 42))
+```
+
+Or via the shell wrapper at `tests/docker_smoke/build_modules_in_docker.sh`:
+
+```bash
+./tests/docker_smoke/build_modules_in_docker.sh ./build/modules \
+    'github:user/my-module#packages.x86_64-linux.install-portable' \
+    'github:user/my-module2#packages.x86_64-linux.install-portable'
+```
+
+Each `attr` must point at a derivation whose output contains a
+`modules/<name>/<plugin>.so + manifest.json` tree. The standard
+`logos-module-builder` `.install-portable` output produces exactly this.
+
 ### Using `LogoscoreDockerDaemon` for TLS directly
 
 ```python

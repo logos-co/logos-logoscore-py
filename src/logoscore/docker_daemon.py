@@ -83,6 +83,144 @@ def pick_free_port() -> int:
         return s.getsockname()[1]
 
 
+# Pinned to the same nixos/nix base the smoke image's stage-1 builder uses
+# so the build closure (glibc, Qt, openssl, boost) lines up with what the
+# daemon image was compiled against. Override via the env var if you've
+# bumped the daemon image's builder base.
+_BUILDER_IMAGE = os.environ.get("LOGOSCORE_BUILDER_IMAGE", "nixos/nix:2.24.9")
+
+
+def build_modules_in_docker(
+    builds: Sequence[tuple[str, str]],
+    *,
+    output_dir: str | Path,
+    builder_image: str | None = None,
+    timeout: float = 1800.0,
+) -> Path:
+    """Build one or more Logos module flakes inside docker and return the
+    host-side modules dir, ready to pass as
+    `LogoscoreDockerDaemon(modules_dir=...)`.
+
+    Why this exists: a module compiled on your host (macOS dylib,
+    Linux-with-different-glibc, etc.) often won't load inside the
+    daemon container. Building inside docker via the same base image
+    guarantees ABI compatibility — same glibc, same Qt, same OpenSSL.
+    Same approach the smoke image's stage-1 already uses for the
+    daemon binary itself.
+
+    `builds` is a list of `(flake_ref, attr)` tuples. **All builds
+    share the same nix store inside one container run**, so common
+    dependencies (logos-cpp-sdk, Qt, boost, openssl) get fetched once.
+    Time saved is roughly proportional to N (number of modules) for
+    typical Logos modules. For a single module, pass a one-item list.
+
+    `flake_ref` is anything `nix build` accepts:
+      * `"github:logos-co/logos-test-modules"`
+      * `"github:user/my-module/branch"`
+      * `"path:./my-module"` (mounted into the container)
+
+    `attr` is the flake-output path that produces a derivation whose
+    `$out/modules/<name>/...` matches what the daemon's `-m` flag
+    expects. The standard logos-module-builder `.install-portable`
+    output produces this layout. Examples:
+      * `"modules.x86_64-linux.test_basic_module.install-portable"`
+      * `"packages.aarch64-linux.install-portable"`
+
+    `output_dir` is a host directory that'll receive the merged
+    `modules/<name>/<plugin>.so + manifest.json` trees from every
+    build. Created if missing. The returned `Path` is `output_dir`.
+
+    Typical use:
+
+        modules_dir = build_modules_in_docker(
+            builds=[
+                ("github:user/my-module",  "packages.x86_64-linux.install-portable"),
+                ("github:user/my-module2", "packages.x86_64-linux.install-portable"),
+            ],
+            output_dir="./build/modules",
+        )
+        with LogoscoreDockerDaemon(
+            image="logoscore:smoke-portable",
+            modules_dir=modules_dir,
+        ) as daemon:
+            ...
+
+    Raises LogoscoreError on docker / nix build failure (the offending
+    flake_ref#attr is included in the message).
+    """
+    if not builds:
+        raise ValueError("build_modules_in_docker requires at least one build")
+
+    out = Path(output_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+
+    image = builder_image or _BUILDER_IMAGE
+
+    # Pass build pairs through an env var, one per line: "<flake>\t<attr>".
+    # Tab is safe — neither flake refs nor attr paths contain it. Newline
+    # separator avoids quoting issues that would arise from passing as
+    # positional args through `sh -c`.
+    builds_env = "\n".join(f"{flake}\t{attr}" for (flake, attr) in builds)
+
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{out}:/out",
+        "-e", f"BUILDS={builds_env}",
+        image,
+        "sh", "-c",
+        # In-container build script. Notes:
+        # 1) `sandbox = false` + `filter-syscalls = false` because Docker
+        #    Desktop's seccomp + Rosetta layer (on Apple Silicon) blocks
+        #    the BPF filters nix's sandbox installs. The outer docker
+        #    layer already isolates the build.
+        # 2) Each build gets its own /tmp/result-N out-link to avoid
+        #    nix complaining about an existing link, then they're merged
+        #    into /out together at the end.
+        # 3) `tar c | tar x` so symlinks into /nix/store (which the host
+        #    won't have) become regular files in /out, and we DON'T try
+        #    to preserve the read-only nix-store permissions on the
+        #    target — Docker bind-mounts on macOS reject chmod on
+        #    host-owned paths and `cp -rL` would otherwise abort.
+        'set -e; mkdir -p /etc/nix; '
+        '{ echo "experimental-features = nix-command flakes"; '
+        '  echo "sandbox = false"; '
+        '  echo "filter-syscalls = false"; } > /etc/nix/nix.conf; '
+        'i=0; '
+        # Read the BUILDS env line-by-line. printf instead of echo so
+        # we don\'t depend on echo -e behaviour.
+        'printf "%s\\n" "$BUILDS" | while IFS="\t" read -r flake attr; do '
+        '  [ -n "$flake" ] || continue; '
+        '  echo "[$i] building $flake#$attr"; '
+        '  nix build -L "$flake#$attr" --out-link "/tmp/result-$i" --refresh; '
+        '  if [ ! -d "/tmp/result-$i/modules" ]; then '
+        '    echo "ERROR: $flake#$attr has no modules/ subdir" >&2; '
+        '    ls -la "/tmp/result-$i/" >&2; exit 1; fi; '
+        # Plain `cp` from /nix/store inherits the source\'s read-only
+        # permissions. tar would then fail to overwrite on the next
+        # iteration, and Docker Desktop bind mounts on macOS reject
+        # `chmod` from the container (the dest is host-owned) so we
+        # can\'t un-readonly after the fact. Workaround: use `find +
+        # cat + install -m` which writes EVERY file with explicit perms,
+        # bypassing tar/cp\'s preserve-perms logic entirely.
+        '  cd "/tmp/result-$i/modules" && '
+        '    find . -type d | while read -r d; do mkdir -p "/out/$d"; done && '
+        '    find . -type f | while read -r f; do '
+        '      install -m 644 "$f" "/out/$f"; done && '
+        '  cd -; '
+        '  i=$((i+1)); '
+        'done',
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise LogoscoreError(
+            f"Module build failed (exit {r.returncode}):\n"
+            f"  builds: {builds}\n"
+            f"  image:  {image}\n"
+            f"  stderr: {r.stderr.strip()}"
+        )
+    return out
+
+
 # ── The helper ────────────────────────────────────────────────────────────
 
 class LogoscoreDockerDaemon:
