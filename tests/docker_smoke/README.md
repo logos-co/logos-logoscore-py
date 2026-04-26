@@ -106,14 +106,14 @@ The smoke test driver picks the right one via
 ## Setup
 
 ```bash
-# Build one flavor (default: dev)
+# Build one flavor (default: portable)
 ./build_smoke_image.sh
-FLAVOR=portable ./build_smoke_image.sh
+FLAVOR=dev      ./build_smoke_image.sh
 FLAVOR=both     ./build_smoke_image.sh         # builds both
 
-# Run the suite (default: dev)
+# Run the suite (default: portable)
+pytest tests/docker_smoke
 pytest tests/docker_smoke --docker-flavor=dev
-pytest tests/docker_smoke --docker-flavor=portable
 pytest tests/docker_smoke --docker-flavor=both    # replays matrix twice
 ```
 

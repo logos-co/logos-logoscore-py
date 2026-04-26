@@ -14,7 +14,8 @@
 # Note: the image is a *CLI-only runtime* — it does not bake in any user
 # modules. User modules (e.g. test_basic_module for the smoke suite)
 # are bind-mounted into the container at runtime; see the README and
-# `test_docker_smoke.py::_run_daemon_container`.
+# `LogoscoreDockerDaemon` (in `src/logoscore/docker_daemon.py`), which
+# is what the smoke tests use to start the container.
 #
 # Everything happens inside a Linux container (stage 1 runs `nix build`
 # inside nixos/nix), so macOS hosts run fine under Docker Desktop's

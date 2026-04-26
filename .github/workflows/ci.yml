@@ -48,7 +48,7 @@ jobs:
       # physically keeps the `integration` nix check clean — no silent
       # skips — and makes this CI step the *only* place they run.
       #
-      # Step 1 builds the `logoscore:smoke-dev` image (a multi-stage
+      # Step 1 builds the `logoscore:smoke-portable` image (a multi-stage
       # `docker build` that internally runs `nix build` inside a
       # `nixos/nix` container — no dependency on the host's nix).
       # Step 2 runs pytest via `nix develop` so python + pytest are on

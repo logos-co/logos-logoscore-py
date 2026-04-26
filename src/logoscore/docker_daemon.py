@@ -276,17 +276,25 @@ class LogoscoreDockerDaemon:
 
         # Host-side dirs: either caller-supplied (persistent across
         # runs — useful for session restore) or freshly-minted tmpdirs
-        # we own and clean up on stop().
+        # we own and clean up on stop(). For caller-supplied dirs we
+        # mkdir(parents=True, exist_ok=True) before docker can bind-mount
+        # them: a missing host path under `docker -v host:/container`
+        # gets auto-created by the daemon with root ownership, which
+        # then breaks reads/cleanup from the unprivileged caller.
         self._owns_config_dir = config_dir is None
-        self._config_dir = (
-            Path(tempfile.mkdtemp(prefix="logoscore-docker-cfg-"))
-            if config_dir is None else Path(config_dir)
-        )
+        if config_dir is None:
+            self._config_dir = Path(
+                tempfile.mkdtemp(prefix="logoscore-docker-cfg-"))
+        else:
+            self._config_dir = Path(config_dir)
+            self._config_dir.mkdir(parents=True, exist_ok=True)
         self._owns_persistence_dir = persistence_dir is None
-        self._persistence_dir = (
-            Path(tempfile.mkdtemp(prefix="logoscore-docker-pers-"))
-            if persistence_dir is None else Path(persistence_dir)
-        )
+        if persistence_dir is None:
+            self._persistence_dir = Path(
+                tempfile.mkdtemp(prefix="logoscore-docker-pers-"))
+        else:
+            self._persistence_dir = Path(persistence_dir)
+            self._persistence_dir.mkdir(parents=True, exist_ok=True)
 
         self._host_port = host_port  # may be None until start()
         self._container_name = (
