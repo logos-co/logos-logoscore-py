@@ -51,10 +51,20 @@ from .errors import LogoscoreError
 
 # ── Module-level helpers (also re-exported from the package) ──────────────
 
-# Fixed TCP port the daemon binds *inside* the container. The host side
-# always uses a dynamically-picked ephemeral port and port-forwards it
-# in. See module docstring for the full rationale.
-CONTAINER_TCP_PORT = 6000
+# Fixed TCP ports the daemon binds *inside* the container. The host
+# side always uses dynamically-picked ephemeral ports and port-forwards
+# them in. See module docstring for the full rationale.
+#
+# core_service is on CONTAINER_TCP_PORT; capability_module on
+# CONTAINER_CAP_TCP_PORT. The latter is needed because the SDK's
+# auto-`requestModule` path inside LogosAPIClient dials capability_module
+# transparently — without forwarding it through, every host-side RPC
+# would either fail (post-config-split) or hit a 20s waitForSource
+# timeout (pre-fix). Stable, distinct container ports lets us
+# `docker run -p host_core:6000 -p host_cap:6001 ...` and keep the
+# host-side mapping deterministic.
+CONTAINER_TCP_PORT     = 6000
+CONTAINER_CAP_TCP_PORT = 6001
 
 
 def docker_available() -> bool:
@@ -296,7 +306,25 @@ class LogoscoreDockerDaemon:
             self._persistence_dir = Path(persistence_dir)
             self._persistence_dir.mkdir(parents=True, exist_ok=True)
 
+        # Host-only client config dir. The daemon's view of /config
+        # (and the LogoscoreClient's `config_dir` argument when this
+        # daemon hands one out) are NOT the same on disk — the
+        # container writes /config/{daemon,client}/* as root, and the
+        # host process can't overwrite root-owned files in there. The
+        # client side gets its own dir which the host populates with
+        # client.json (host-correct ports) + a copy of the daemon's
+        # raw auto-token. Cleaned up on stop() alongside _config_dir.
+        self._host_client_dir = Path(
+            tempfile.mkdtemp(prefix="logoscore-docker-client-"))
+
         self._host_port = host_port  # may be None until start()
+        # Capability_module's host-side port. Picked alongside
+        # `_host_port` in start() so the container's stable
+        # CONTAINER_CAP_TCP_PORT can be forwarded to a known host port.
+        # Tracked separately so the post-startup client.json rewrite
+        # (see _rewrite_client_json) knows what to point the host
+        # client at for capability_module.
+        self._host_cap_port: int | None = None
         self._container_name = (
             container_name
             or f"logoscore-{uuid.uuid4().hex[:12]}"
@@ -351,6 +379,11 @@ class LogoscoreDockerDaemon:
 
         if self._host_port is None:
             self._host_port = pick_free_port()
+        # Capability_module rides its own host:container port pair.
+        # Pick eagerly here so the docker `-p` mapping (and the
+        # daemon's `--module-tcp-port` flag below) line up.
+        if self._host_cap_port is None:
+            self._host_cap_port = pick_free_port()
 
         # Volume mounts common to both transports.
         volumes = [
@@ -370,37 +403,64 @@ class LogoscoreDockerDaemon:
                 "-v", f"{self.ssl_key}:/certs/key.pem:ro",
             ]
 
-        # Transport-specific daemon flags. We always *also* advertise
-        # `local` because module-to-module traffic inside the daemon's
-        # process group still uses it (the module-host spawns inherit
-        # the daemon's transport config; if tcp_ssl were the only
-        # option, they'd try to bind TLS with no cert and abort).
-        # `local` satisfies that; the network listener is separate.
-        transport_flags: list[str] = ["--transport", "local"]
+        # Per-module transport flags. The daemon takes
+        # `--module-transport NAME=PROTOCOL[,k=v...]` and uses each
+        # module's set independently — there's no implicit
+        # core_service/capability_module inheritance any more. We
+        # configure both modules explicitly with a `local` listener
+        # plus one network listener, and pin distinct container ports
+        # so the host-side `-p` mappings stay deterministic.
+        #
+        # core_service rides CONTAINER_TCP_PORT, capability_module
+        # rides CONTAINER_CAP_TCP_PORT. The `local` listener satisfies
+        # in-process module-to-module traffic (module-host spawns
+        # inherit the daemon's transport config; if tcp_ssl were the
+        # only option, they'd try to bind TLS with no cert and abort).
         if self.transport == "tcp":
-            transport_flags += [
-                "--transport", "tcp",
-                "--tcp-host", "0.0.0.0",
-                "--tcp-port", str(CONTAINER_TCP_PORT),
-                "--tcp-codec", self.codec,
+            # `--insecure-tcp` is the daemon's explicit opt-in for
+            # binding plaintext tcp on a non-loopback host. The whole
+            # docker setup *is* a non-loopback bind by design (0.0.0.0
+            # with port-forwarded host:container access), so the
+            # daemon's safety net legitimately needs the override here.
+            # tcp_ssl below doesn't trip the guard — SSL is exactly
+            # the production-shaped alternative the guard recommends.
+            transport_flags = [
+                "--module-transport", "core_service=local",
+                "--module-transport",
+                f"core_service=tcp,host=0.0.0.0,port={CONTAINER_TCP_PORT},codec={self.codec}",
+                "--module-transport", "capability_module=local",
+                "--module-transport",
+                f"capability_module=tcp,host=0.0.0.0,port={CONTAINER_CAP_TCP_PORT},codec={self.codec}",
+                "--insecure-tcp",
             ]
         else:  # tcp_ssl
-            transport_flags += [
-                "--transport", "tcp_ssl",
-                "--tcp-ssl-host", "0.0.0.0",
-                "--tcp-ssl-port", str(CONTAINER_TCP_PORT),
-                "--tcp-ssl-codec", self.codec,
-                "--ssl-cert", "/certs/cert.pem",
-                "--ssl-key", "/certs/key.pem",
+            transport_flags = [
+                "--module-transport", "core_service=local",
+                "--module-transport",
+                f"core_service=tcp_ssl,host=0.0.0.0,port={CONTAINER_TCP_PORT}"
+                f",codec={self.codec},cert=/certs/cert.pem,key=/certs/key.pem",
+                "--module-transport", "capability_module=local",
+                "--module-transport",
+                f"capability_module=tcp_ssl,host=0.0.0.0,port={CONTAINER_CAP_TCP_PORT}"
+                f",codec={self.codec},cert=/certs/cert.pem,key=/certs/key.pem",
             ]
 
+        # Note: deliberately no --rm. If the daemon exits during startup
+        # (e.g. CLI11 rejects an unknown flag, port bind fails), --rm
+        # would auto-remove the container before _capture_logs gets a
+        # chance to read it — the on-fail diagnostic would just say
+        # "No such container". stop() below explicitly does
+        # `docker rm -f`, so we don't leak containers either.
         cmd: list[str] = [
-            "docker", "run", "--rm", "-d",
+            "docker", "run", "-d",
             "--name", self._container_name,
-            # host_port (dynamic) → CONTAINER_TCP_PORT (fixed). See the
-            # module docstring for why we don't bind the same port on
-            # both sides.
+            # Two host:container port mappings. core_service binds
+            # CONTAINER_TCP_PORT inside the container; capability_module
+            # binds CONTAINER_CAP_TCP_PORT. Each is forwarded to its
+            # own dynamically-picked host port. See the module
+            # docstring for the rationale.
             "-p", f"{self._host_port}:{CONTAINER_TCP_PORT}",
+            "-p", f"{self._host_cap_port}:{CONTAINER_CAP_TCP_PORT}",
             *volumes,
             self.image,
             "daemon",
@@ -437,12 +497,120 @@ class LogoscoreDockerDaemon:
                 f"daemon never wrote daemon.json within "
                 f"{self.startup_timeout}s. Container logs:\n{logs}"
             )
+
+        # Build a host-side client config (separate from the
+        # daemon's bind-mounted /config — that one's owned by root
+        # because the container ran as root). Writes
+        # `<host_client_dir>/client/client.json` (host-correct ports)
+        # and `<host_client_dir>/client/auto.json` (the raw token,
+        # copied out of the daemon's /config/daemon/tokens). The
+        # `client(...)` factory below points the LogoscoreClient at
+        # `host_client_dir` so it reads from this host-owned tree
+        # instead of the container-owned bind-mount.
+        self._build_host_client_config()
+
         return self
+
+    def _build_host_client_config(self) -> None:
+        """Populate the host-only client config dir with a client.json
+        that points at the host-side forwarded ports + a copy of the
+        daemon-emitted raw auto token. Called once after the daemon
+        has come up and published daemon.json."""
+        import json as _json
+
+        # Make the daemon-written /config tree world-readable from
+        # the host. The container ran as root and emitted files with
+        # 0700/0600 ownership; from the host's unprivileged user
+        # perspective even `os.stat()` fails on entries inside
+        # daemon/tokens/. `chmod -R a+rX` (capital X = exec on dirs
+        # only) opens read access without making the token file
+        # world-writable. Issued via `docker exec` so the *container*
+        # (which owns the files) does the chmod, while the host can
+        # then read freely. Best-effort: if the exec fails the
+        # downstream reads will surface a clearer error than this
+        # would.
+        if self._container_id is not None:
+            subprocess.run(
+                ["docker", "exec", self._container_id,
+                 "chmod", "-R", "a+rX", "/config"],
+                capture_output=True, text=True,
+            )
+
+        daemon_state_path = self._config_dir / "daemon" / "daemon.json"
+        try:
+            daemon_state = _json.loads(daemon_state_path.read_text())
+        except (OSError, _json.JSONDecodeError):
+            # Best-effort: a missing or broken daemon.json is already
+            # surfaced upstream; this populate step is purely a
+            # convenience for host-side clients that read client.json.
+            return
+
+        instance_id = daemon_state.get("instance_id", "")
+
+        # Each module dials localhost:<host_port> — the docker
+        # forwarder routes those into the container's listeners.
+        # Codec must match what the daemon actually advertised; we
+        # trust self.codec because the docker run command pinned it.
+        if self.transport == "tcp_ssl":
+            transport_kind = "tcp_ssl"
+            extra: dict = {"verify_peer": False}
+        else:
+            transport_kind = "tcp"
+            extra = {}
+
+        client_cfg = {
+            "version": 1,
+            "token_file": "auto.json",
+            "instance_id": instance_id,
+            "daemon": {
+                "core_service": {
+                    "transport": transport_kind,
+                    "host":      "localhost",
+                    "port":      self._host_port,
+                    "codec":     self.codec,
+                    **extra,
+                },
+                "capability_module": {
+                    "transport": transport_kind,
+                    "host":      "localhost",
+                    "port":      self._host_cap_port,
+                    "codec":     self.codec,
+                    **extra,
+                },
+            },
+        }
+        client_dir = self._host_client_dir / "client"
+        client_dir.mkdir(parents=True, exist_ok=True)
+        (client_dir / "client.json").write_text(
+            _json.dumps(client_cfg, indent=4) + "\n")
+
+        # Copy the daemon-emitted raw token out of /config. The
+        # earlier `chmod -R a+rX /config` made it host-readable
+        # despite the container's root ownership.
+        token_src = self._config_dir / "daemon" / "tokens" / "auto.json"
+        try:
+            token_text = token_src.read_text()
+        except (OSError, PermissionError):
+            return
+        (client_dir / "auto.json").write_text(token_text)
 
     def stop(self) -> None:
         """Kill the container. Idempotent; safe to call even if start()
         never succeeded."""
         if self._container_id is not None:
+            # Mirror the daemon's container logs to the parent's stderr
+            # before tearing down — symmetric with _proc.py's CLI
+            # forwarding, so a single env flag dumps both sides of the
+            # CLI ↔ daemon conversation.
+            if os.environ.get("LOGOSCORE_PY_FORWARD_OUTPUT", "").lower() in (
+                "1", "true", "yes", "on",
+            ):
+                logs = self._capture_logs()
+                header = f"[logoscore-py docker-daemon {self._container_name}]"
+                import sys
+                print(header, file=sys.stderr, flush=True)
+                for line in logs.splitlines():
+                    print(f"{header} {line}", file=sys.stderr, flush=True)
             subprocess.run(
                 ["docker", "rm", "-f", self._container_id],
                 capture_output=True, text=True,
@@ -456,6 +624,9 @@ class LogoscoreDockerDaemon:
             shutil.rmtree(self._config_dir, ignore_errors=True)
         if self._owns_persistence_dir and self._persistence_dir.exists():
             shutil.rmtree(self._persistence_dir, ignore_errors=True)
+        # The host-only client dir is always self-owned.
+        if self._host_client_dir.exists():
+            shutil.rmtree(self._host_client_dir, ignore_errors=True)
 
     # ── Client factory ──────────────────────────────────────────────────
 
@@ -489,9 +660,14 @@ class LogoscoreDockerDaemon:
             )
         if no_verify_peer is None:
             no_verify_peer = (self.transport == "tcp_ssl")
+        # Point the client at the host-only client dir, NOT the
+        # bind-mounted /config (which is owned by root because the
+        # container ran as root). _build_host_client_config() above
+        # populated the host dir with a client.json keyed at the
+        # forwarded host ports + a copy of the auto token.
         return LogoscoreClient(
             binary=binary,
-            config_dir=self._config_dir,
+            config_dir=self._host_client_dir,
             timeout=timeout,
             transport=self.transport,
             tcp_host=tcp_host,
@@ -504,7 +680,7 @@ class LogoscoreDockerDaemon:
 
     def _wait_for_conn_file(self) -> bool:
         deadline = time.monotonic() + self.startup_timeout
-        conn_file = self._config_dir / "daemon.json"
+        conn_file = self._config_dir / "daemon" / "daemon.json"
         while time.monotonic() < deadline:
             if conn_file.exists():
                 return True

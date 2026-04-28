@@ -96,7 +96,20 @@ class LogoscoreDaemon:
 
     @property
     def connection_file(self) -> Path:
-        return self._config_dir / "daemon.json"
+        # Path to the daemon's authoritative state file. v2 of the
+        # config tree relocated it under <configDir>/daemon/daemon.json
+        # and the legacy `token` field at its root is gone — tokens
+        # live as hashed entries under the `tokens` array, with the
+        # raw values in <configDir>/daemon/tokens/<name>.json.
+        return self._config_dir / "daemon" / "daemon.json"
+
+    @property
+    def client_token_file(self) -> Path:
+        # Path to the daemon-emitted local-client raw-token file. The
+        # daemon writes this at boot from its in-memory raw value;
+        # subsequent CLI invocations can reuse it without going
+        # through env vars.
+        return self._config_dir / "client" / "auto.json"
 
     @property
     def pid(self) -> int | None:
@@ -111,26 +124,34 @@ class LogoscoreDaemon:
             cmd.extend(["-m", str(d)])
         if self.persistence_path is not None:
             cmd.extend(["--persistence-path", str(self.persistence_path)])
+        # Per-module transport flags. The daemon expects
+        # `--module-transport NAME=PROTOCOL[,k=v...]` (repeatable). We
+        # emit one entry per requested protocol for both well-known
+        # modules (`core_service` and `capability_module`); they share
+        # the same listener spec by default. Operators with
+        # finer-grained needs (different ports per module, asymmetric
+        # protocols) can drop down to extra_args + omit this fixture.
         for proto in self.transports:
-            cmd.extend(["--transport", proto])
-            if proto == "tcp":
-                cmd.extend(["--tcp-host", self.tcp_host,
-                            "--tcp-port", str(self.tcp_port),
-                            "--tcp-codec", self.tcp_codec])
-            elif proto == "tcp_ssl":
-                if not (self.ssl_cert and self.ssl_key):
-                    raise LogoscoreError(
-                        "transports includes 'tcp_ssl' but ssl_cert/ssl_key not set"
-                    )
-                cmd.extend([
-                    "--tcp-ssl-host", self.tcp_ssl_host,
-                    "--tcp-ssl-port", str(self.tcp_ssl_port),
-                    "--tcp-ssl-codec", self.tcp_ssl_codec,
-                    "--ssl-cert", str(self.ssl_cert),
-                    "--ssl-key", str(self.ssl_key),
-                ])
-                if self.ssl_ca:
-                    cmd.extend(["--ssl-ca", str(self.ssl_ca)])
+            for module in ("core_service", "capability_module"):
+                spec = f"{module}={proto}"
+                if proto == "tcp":
+                    spec += (f",host={self.tcp_host}"
+                             f",port={self.tcp_port}"
+                             f",codec={self.tcp_codec}")
+                elif proto == "tcp_ssl":
+                    if not (self.ssl_cert and self.ssl_key):
+                        raise LogoscoreError(
+                            "transports includes 'tcp_ssl' but "
+                            "ssl_cert/ssl_key not set"
+                        )
+                    spec += (f",host={self.tcp_ssl_host}"
+                             f",port={self.tcp_ssl_port}"
+                             f",codec={self.tcp_ssl_codec}"
+                             f",cert={self.ssl_cert}"
+                             f",key={self.ssl_key}")
+                    if self.ssl_ca:
+                        spec += f",ca={self.ssl_ca}"
+                cmd.extend(["--module-transport", spec])
         cmd.extend(self.extra_args)
 
         env = os.environ.copy()
@@ -237,7 +258,11 @@ class LogoscoreDaemon:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _read_token(self) -> str | None:
-        path = self.connection_file
+        # Post-config-split: tokens live in
+        # <configDir>/client/auto.json (the daemon-emitted local-client
+        # raw token), not in daemon.json. The legacy `token` field on
+        # daemon.json is gone — daemon.json carries hashes only.
+        path = self.client_token_file
         if not path.exists():
             return None
         try:
