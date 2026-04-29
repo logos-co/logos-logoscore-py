@@ -14,30 +14,49 @@ from logoscore import LogoscoreDaemon
 
 
 @pytest.fixture
-def daemon(logoscore_bin, test_modules_dir):
+def daemon(logoscore_bin, test_modules_dir, transport, tcp_port):
+    # transport == "local" uses today's QLocalSocket path (zero extra flags).
+    # transport == "tcp" adds a --transport=tcp listener + picks it client-side.
+    kwargs = {}
+    if transport != "local":
+        kwargs["transports"] = [transport]
+        if transport == "tcp":
+            kwargs["tcp_port"] = tcp_port
     with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin
+        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
     ) as d:
         yield d
 
 
-def test_daemon_starts_and_reports_status(daemon):
-    status = daemon.client().status()
+@pytest.fixture
+def client(daemon, transport):
+    """Return a callable that builds a daemon client wired to the
+    transport being tested. Replaces an earlier import-time monkeypatch
+    of ``LogoscoreDaemon.client`` that leaked across the whole test
+    session and could break tests depending on import order."""
+    def _make(**kw):
+        kw.setdefault("transport", transport)
+        return daemon.client(**kw)
+    return _make
+
+
+def test_daemon_starts_and_reports_status(daemon, client):
+    status = client().status()
     assert isinstance(status, dict)
     assert daemon.connection_file.exists()
 
 
-def test_list_modules_returns_entries(daemon):
-    mods = daemon.client().list_modules()
+def test_list_modules_returns_entries(client):
+    mods = client().list_modules()
     assert isinstance(mods, list)
     names = {m.get("name") for m in mods if isinstance(m, dict)}
     assert any(n and "test_basic" in n for n in names), names
 
 
-def test_load_call_and_event_roundtrip(daemon):
-    client = daemon.client()
+def test_load_call_and_event_roundtrip(client):
+    conn = client()
 
-    client.load_module("test_basic_module")
+    conn.load_module("test_basic_module")
 
     received: list[dict] = []
     received_evt = threading.Event()
@@ -46,10 +65,10 @@ def test_load_call_and_event_roundtrip(daemon):
         received.append(event)
         received_evt.set()
 
-    with client.on_event("test_basic_module", "testEvent", on_event):
+    with conn.on_event("test_basic_module", "testEvent", on_event):
         # Give the watcher a beat to subscribe before firing.
         import time; time.sleep(0.5)
-        client.call("test_basic_module", "emitTestEvent", "hello from python")
+        conn.call("test_basic_module", "emitTestEvent", "hello from python")
         assert received_evt.wait(timeout=10.0), "event not received within 10s"
 
     assert received, "expected at least one event"

@@ -45,12 +45,15 @@ class Subscription:
         token: str | None,
         callback: Callable[[dict], None],
         error_callback: Callable[[BaseException], None] | None,
+        extra_env: dict[str, str] | None = None,
     ) -> "Subscription":
         env = os.environ.copy()
         if config_dir is not None:
             env["LOGOSCORE_CONFIG_DIR"] = str(config_dir)
         if token is not None:
             env["LOGOSCORE_TOKEN"] = token
+        if extra_env:
+            env.update(extra_env)
 
         cmd = [binary, *args, "--json"]
         # start_new_session lets us signal the whole process group if needed

@@ -7,6 +7,11 @@ QVariant, QJsonArray, QStringList) exposed by `test-basic-module` in the
   repos/logos-test-modules/test-basic-module/src/test_basic_module_plugin.h
   repos/logos-test-modules/test-basic-module/src/test_basic_module_plugin.cpp
 
+Assertions here are written out one test per method for readability. The
+docker smoke suite (`tests/docker_smoke/test_docker_smoke.py`) replays the
+same matrix over TCP in both JSON and CBOR via `tests/_basic_module_cases.py`;
+keep the two in sync when adding methods to `test_basic_module`.
+
 Skipped unless LOGOSCORE_BIN and LOGOSCORE_TEST_MODULES_DIR are set — the
 Nix `integration` check wires both up.
 """
@@ -23,11 +28,21 @@ MODULE = "test_basic_module"
 
 
 @pytest.fixture(scope="module")
-def client(logoscore_bin, test_modules_dir):
+def client(logoscore_bin, test_modules_dir, transport):
+    kwargs = {}
+    if transport != "local":
+        kwargs["transports"] = [transport]
+        if transport == "tcp":
+            # Scoped per-test-module so this fixture doesn't collide with
+            # per-test `tcp_port`. Pick at daemon startup.
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                kwargs["tcp_port"] = s.getsockname()[1]
     with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin
+        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
     ) as daemon:
-        c = daemon.client()
+        c = daemon.client(transport=transport)
         c.load_module(MODULE)
         yield c
 
@@ -89,25 +104,49 @@ def test_concat(client):
 
 
 # ── Return type: LogosResult ─────────────────────────────────────────────────
-# The current logoscore CLI does not serialise `LogosResult` return values to
-# JSON — they come through as `null`. The method still dispatches correctly
-# (no exception, daemon logs show the call), so we just assert the RPC
-# succeeds. If/when the CLI learns to unpack LogosResult, tighten these.
+# Serialised on the wire as `{"success": bool, "value": <any>, "error": <any>}`
+# by qvariantToRpcValue in logos-cpp-sdk (see plain/qvariant_rpc_value.cpp).
 
-@pytest.mark.parametrize(
-    "method,args",
-    [
-        ("successResult", ()),
-        ("errorResult", ()),
-        ("resultWithMap", ()),
-        ("resultWithList", ()),
-        ("validateInput", ("hello",)),
-        ("validateInput", ("",)),
-    ],
-)
-def test_logos_result_dispatches(client, method, args):
-    # The method dispatches cleanly; the return shape is a CLI limitation.
-    assert client.call(MODULE, method, *args) is None
+def test_success_result(client):
+    assert client.call(MODULE, "successResult") == {
+        "success": True, "value": "operation succeeded", "error": None,
+    }
+
+
+def test_error_result(client):
+    assert client.call(MODULE, "errorResult") == {
+        "success": False, "value": None, "error": "deliberate error for testing",
+    }
+
+
+def test_result_with_map(client):
+    assert client.call(MODULE, "resultWithMap") == {
+        "success": True,
+        "value": {"name": "test", "count": 42, "active": True},
+        "error": None,
+    }
+
+
+def test_result_with_list(client):
+    assert client.call(MODULE, "resultWithList") == {
+        "success": True,
+        "value": [{"id": 1, "label": "first"}, {"id": 2, "label": "second"}],
+        "error": None,
+    }
+
+
+def test_validate_input_success(client):
+    assert client.call(MODULE, "validateInput", "hello") == {
+        "success": True,
+        "value": {"input": "hello", "length": 5},
+        "error": None,
+    }
+
+
+def test_validate_input_error(client):
+    assert client.call(MODULE, "validateInput", "") == {
+        "success": False, "value": None, "error": "input cannot be empty",
+    }
 
 
 # ── Return type: QVariant ────────────────────────────────────────────────────

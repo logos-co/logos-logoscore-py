@@ -41,3 +41,45 @@ jobs:
 
       - name: Run integration tests
         run: nix build '.#checks.${{ matrix.arch }}.integration' --print-build-logs
+
+      # Docker smoke tests live in their own directory (`tests/docker_smoke/`)
+      # rather than under `tests/integration/`, because they can't run
+      # inside the nix sandbox (no docker socket). Separating them
+      # physically keeps the `integration` nix check clean — no silent
+      # skips — and makes this CI step the *only* place they run.
+      #
+      # Step 1 builds the `logoscore:smoke-portable` image (a multi-stage
+      # `docker build` that internally runs `nix build` inside a
+      # `nixos/nix` container — no dependency on the host's nix).
+      # Step 2 runs pytest via `nix develop` so python + pytest are on
+      # PATH and PYTHONPATH points at the local `logoscore` source tree.
+      # Defaults to FLAVOR=portable / --docker-flavor=portable — that's
+      # the self-contained cli-bundle-dir shape that matches how released
+      # logoscore binaries are distributed, so it's the most realistic
+      # smoke. `dev` is still available via FLAVOR=dev on the build step
+      # and --docker-flavor=dev on pytest.
+      #
+      # buildx is set up before the build so the GHA cache backend
+      # (`type=gha`) can be used. Without it, `docker buildx build`
+      # falls back to the default `docker` driver which doesn't talk
+      # to GHA. The `BUILDX_CACHE_*` env vars on the build step tell
+      # `build_smoke_image.sh` to forward `--cache-from` / `--cache-to`
+      # — see the script's preamble for the protocol.
+      #
+      # `mode=max` (vs `min`) exports cache for every intermediate
+      # layer, not just the final one. The expensive layer here is
+      # `RUN nix build` inside the build stage; we want that cached
+      # so the next CI run skips ~5 min of nix work whenever
+      # flake.nix / flake.lock / src/ haven't changed.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build docker smoke image
+        env:
+          BUILDX_CACHE_FROM: type=gha
+          BUILDX_CACHE_TO: type=gha,mode=max
+        run: ./tests/docker_smoke/build_smoke_image.sh
+
+      - name: Run docker smoke tests
+        run: |
+          nix develop --command pytest tests/docker_smoke -v
