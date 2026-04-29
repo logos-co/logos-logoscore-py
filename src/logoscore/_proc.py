@@ -5,8 +5,11 @@ parsed as a single JSON value; non-zero exit codes are mapped to exception
 types by `errors.from_exit_code`.
 
 Set ``LOGOSCORE_PY_FORWARD_OUTPUT=1`` (or any truthy value) to mirror the
-CLI's stderr to the parent process — handy for chasing CLI-side warnings
-(e.g. "Failed to acquire plugin/replica" hangs) under pytest's `-s`.
+CLI's *stderr* to the parent process — handy for chasing CLI-side
+warnings (e.g. "Failed to acquire plugin/replica" hangs) under pytest's
+``-s``. Stdout is deliberately not forwarded: it carries the structured
+JSON response (which the caller already receives via the function
+return) and may include raw tokens from ``issue-token``.
 """
 from __future__ import annotations
 
@@ -27,16 +30,23 @@ def _forward_output_enabled() -> bool:
 
 
 def _emit_captured(cmd: Sequence[str], stdout: str | None, stderr: str | None) -> None:
-    """Print captured CLI output to the parent's stderr with a per-process
+    """Print captured CLI *stderr* to the parent's stderr with a per-process
     header so multiple concurrent invocations stay disambiguated. Only
-    runs when LOGOSCORE_PY_FORWARD_OUTPUT is set."""
+    runs when LOGOSCORE_PY_FORWARD_OUTPUT is set.
+
+    Stdout is deliberately NOT forwarded: it carries the structured JSON
+    response that the caller already receives via the function return,
+    and `issue-token` (and any future credential-issuing subcommand)
+    embeds raw tokens there. Mirroring stdout into the parent process's
+    stderr in a CI environment would write those tokens straight into
+    the build log. The diagnostic value of this hook is in the CLI's
+    qDebug/qWarning trail, all of which goes to stderr.
+    """
     if not _forward_output_enabled():
         return
+    _ = stdout  # intentionally unused — see docstring.
     header = f"[logoscore-py] {' '.join(cmd)}"
     print(header, file=sys.stderr, flush=True)
-    if stdout:
-        for line in stdout.splitlines():
-            print(f"[logoscore-py stdout] {line}", file=sys.stderr, flush=True)
     if stderr:
         for line in stderr.splitlines():
             print(f"[logoscore-py stderr] {line}", file=sys.stderr, flush=True)

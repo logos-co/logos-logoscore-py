@@ -108,7 +108,7 @@ docker run --rm \
             # explicit perms (644), bypassing tar/cp `--preserve` logic
             # that would otherwise inherit the read-only nix-store perms
             # on the source. Docker Desktop bind mounts on macOS reject
-            # `chmod` from inside the container, so we cant un-readonly
+            # `chmod` from inside the container, so we can't un-readonly
             # after the fact — the perms have to be right at write time.
             cd "/tmp/result-$i/modules"
             find . -type d | while read -r d; do mkdir -p "/out/$d"; done

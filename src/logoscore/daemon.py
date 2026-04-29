@@ -39,9 +39,13 @@ class LogoscoreDaemon:
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
         startup_timeout: float = 15.0,
-        # Transport options for core_service. `local` is always on; pass
-        # extra protocols to open additional listeners (e.g. remote clients
-        # over TCP+SSL). These translate directly to --transport=... flags.
+        # Per-module transport list applied to BOTH `core_service` and
+        # `capability_module` — i.e. every protocol named here becomes
+        # one `--module-transport <module>=<protocol>[,k=v...]` flag
+        # per module on the daemon command line. `local` is always on
+        # for the well-known modules even if omitted here (the daemon
+        # defaults missing modules to local-only). Add `tcp` /
+        # `tcp_ssl` to expose TCP listeners for remote clients.
         transports: list[str] | None = None,
         tcp_host: str = "127.0.0.1",
         tcp_port: int = 0,

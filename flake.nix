@@ -29,9 +29,12 @@
       # `nix build` produces a Python wheel. The `logoscore` CLI is propagated
       # so anyone using this package also has the binary on PATH.
       #
-      # `dockerImage` (Linux only, cross-build from macOS) bundles the CLI +
-      # test_basic_module into an image consumed by the docker smoke tests.
-      # Load with: `docker load < $(nix build .#dockerImage --no-link --print-out-paths)`.
+      # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
+      # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
+      # — the smoke image's stage-1 nix-build copies it into the
+      # ubuntu-based runtime stage. The actual docker image is built
+      # via `tests/docker_smoke/build_smoke_image.sh`, not directly
+      # from these flake outputs.
       packages = forAllSystems ({ pkgs, system }:
         let
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;

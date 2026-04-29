@@ -124,10 +124,18 @@ def build_modules_in_docker(
     Time saved is roughly proportional to N (number of modules) for
     typical Logos modules. For a single module, pass a one-item list.
 
-    `flake_ref` is anything `nix build` accepts:
+    `flake_ref` is any non-local reference `nix build` accepts inside
+    the container — e.g. github URIs:
       * `"github:logos-co/logos-test-modules"`
       * `"github:user/my-module/branch"`
-      * `"path:./my-module"` (mounted into the container)
+
+    Local `path:` flake references are NOT supported by this helper —
+    the build runs inside a one-shot `nixos/nix` container and the
+    host filesystem isn't bind-mounted in. For local iteration on an
+    unpushed branch, push to a fork and reference it via `github:...`,
+    or build outside this helper (e.g. `nix build .#install-portable`)
+    and pass the resulting `result/modules` directly to
+    `LogoscoreDockerDaemon(modules_dir=...)`.
 
     `attr` is the flake-output path that produces a derivation whose
     `$out/modules/<name>/...` matches what the daemon's `-m` flag
@@ -186,11 +194,13 @@ def build_modules_in_docker(
         # 2) Each build gets its own /tmp/result-N out-link to avoid
         #    nix complaining about an existing link, then they're merged
         #    into /out together at the end.
-        # 3) `tar c | tar x` so symlinks into /nix/store (which the host
-        #    won't have) become regular files in /out, and we DON'T try
-        #    to preserve the read-only nix-store permissions on the
-        #    target — Docker bind-mounts on macOS reject chmod on
-        #    host-owned paths and `cp -rL` would otherwise abort.
+        # 3) Walk + `install -m 644` (NOT `tar` or `cp -rL`) so symlinks
+        #    into /nix/store (which the host won't have) become regular
+        #    files in /out, and every file is written with explicit
+        #    rw-perms — Docker bind-mounts on macOS reject post-write
+        #    chmod from the container, and `cp -rL` would inherit the
+        #    nix-store's read-only perms which then fail tar/copy on
+        #    the next iteration. See the in-script comment for detail.
         'set -e; mkdir -p /etc/nix; '
         '{ echo "experimental-features = nix-command flakes"; '
         '  echo "sandbox = false"; '
@@ -272,6 +282,21 @@ class LogoscoreDockerDaemon:
 
         self.image = image
         self.modules_dir = Path(modules_dir)
+        # Validate up front. `docker run -v <missing-host-path>:...`
+        # silently auto-creates the host path with root ownership,
+        # which both pollutes the caller's filesystem and produces a
+        # confusing "modules dir is empty" failure later. Catch the
+        # typo at construction.
+        if not self.modules_dir.exists():
+            raise FileNotFoundError(
+                f"modules_dir does not exist: {self.modules_dir}. "
+                "Build your module(s) first (e.g. `nix build .#install` "
+                "or via build_modules_in_docker())."
+            )
+        if not self.modules_dir.is_dir():
+            raise NotADirectoryError(
+                f"modules_dir is not a directory: {self.modules_dir}"
+            )
         self.codec = codec
         self.transport = transport
         self.ssl_cert = Path(ssl_cert) if ssl_cert else None
@@ -518,31 +543,38 @@ class LogoscoreDockerDaemon:
         has come up and published daemon.json."""
         import json as _json
 
-        # Make the daemon-written /config tree world-readable from
-        # the host. The container ran as root and emitted files with
-        # 0700/0600 ownership; from the host's unprivileged user
-        # perspective even `os.stat()` fails on entries inside
-        # daemon/tokens/. `chmod -R a+rX` (capital X = exec on dirs
-        # only) opens read access without making the token file
-        # world-writable. Issued via `docker exec` so the *container*
-        # (which owns the files) does the chmod, while the host can
-        # then read freely. Best-effort: if the exec fails the
-        # downstream reads will surface a clearer error than this
-        # would.
-        if self._container_id is not None:
-            subprocess.run(
-                ["docker", "exec", self._container_id,
-                 "chmod", "-R", "a+rX", "/config"],
+        # The daemon emitted /config/daemon/{daemon.json,tokens/auto.json}
+        # as root inside the container, with restrictive perms
+        # (daemon/tokens is 0700, the token file 0600). The host-side
+        # process can't `os.stat()` into those directly. We need two
+        # bytes of content from there: the daemon's instance_id (for
+        # the LocalSocket dial path, even though we use TCP for the
+        # network listener) and the raw auto-token.
+        #
+        # Don't widen `/config` permissions on disk: that would leave
+        # the entire daemon/tokens/ directory (any operator-issued
+        # tokens included) world-readable on the host filesystem for
+        # the lifetime of the container's bind-mount, surviving the
+        # daemon if it leaves anything behind. Instead, pipe the two
+        # files we need through `docker exec ... cat` — the container
+        # is root inside, can read its own files, and we capture the
+        # content on stdout without touching disk permissions.
+        if self._container_id is None:
+            return
+
+        def _container_read(path: str) -> str | None:
+            r = subprocess.run(
+                ["docker", "exec", self._container_id, "cat", path],
                 capture_output=True, text=True,
             )
+            return r.stdout if r.returncode == 0 else None
 
-        daemon_state_path = self._config_dir / "daemon" / "daemon.json"
+        daemon_state_text = _container_read("/config/daemon/daemon.json")
+        if daemon_state_text is None:
+            return
         try:
-            daemon_state = _json.loads(daemon_state_path.read_text())
-        except (OSError, _json.JSONDecodeError):
-            # Best-effort: a missing or broken daemon.json is already
-            # surfaced upstream; this populate step is purely a
-            # convenience for host-side clients that read client.json.
+            daemon_state = _json.loads(daemon_state_text)
+        except _json.JSONDecodeError:
             return
 
         instance_id = daemon_state.get("instance_id", "")
@@ -584,13 +616,11 @@ class LogoscoreDockerDaemon:
         (client_dir / "client.json").write_text(
             _json.dumps(client_cfg, indent=4) + "\n")
 
-        # Copy the daemon-emitted raw token out of /config. The
-        # earlier `chmod -R a+rX /config` made it host-readable
-        # despite the container's root ownership.
-        token_src = self._config_dir / "daemon" / "tokens" / "auto.json"
-        try:
-            token_text = token_src.read_text()
-        except (OSError, PermissionError):
+        # Pipe the auto token's content out of the container the same
+        # way we did daemon.json above — the bind-mounted file on
+        # disk stays mode 0600 root-owned, but we get its bytes.
+        token_text = _container_read("/config/daemon/tokens/auto.json")
+        if token_text is None:
             return
         (client_dir / "auto.json").write_text(token_text)
 
