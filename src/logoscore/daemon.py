@@ -7,8 +7,8 @@ it runs `logoscore stop`, then terminates/kills the child process as a
 fallback, and removes any temp state directory it created.
 
 The isolated config dir means multiple daemons can run concurrently in
-the same test process without colliding on `~/.logoscore/daemon.json`,
-and nothing the wrapper does leaks into the developer's global state.
+the same test process without colliding on `~/.logoscore/daemon/`, and
+nothing the wrapper does leaks into the developer's global state.
 """
 from __future__ import annotations
 
@@ -99,13 +99,22 @@ class LogoscoreDaemon:
         return self._config_dir
 
     @property
+    def state_file(self) -> Path:
+        # Path to the daemon's live runtime-state file. Created at boot
+        # (after transports actually bind) and removed at clean
+        # shutdown. Carries instance_id, pid, started_at, and the
+        # resolved transport endpoints (post-bind, with real ports).
+        # Persistent state (tokens.json) and operator preferences
+        # (config.json, written only on --persist-config) live in
+        # their own files.
+        return self._config_dir / "daemon" / "state.json"
+
+    @property
     def connection_file(self) -> Path:
-        # Path to the daemon's authoritative state file. v2 of the
-        # config tree relocated it under <configDir>/daemon/daemon.json
-        # and the legacy `token` field at its root is gone — tokens
-        # live as hashed entries under the `tokens` array, with the
-        # raw values in <configDir>/daemon/tokens/<name>.json.
-        return self._config_dir / "daemon" / "daemon.json"
+        # Backwards-compatible alias for state_file. Existing call sites
+        # use this name (it predates the config/state split); kept so
+        # downstream code doesn't have to migrate in lockstep.
+        return self.state_file
 
     @property
     def client_token_file(self) -> Path:
@@ -262,10 +271,11 @@ class LogoscoreDaemon:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _read_token(self) -> str | None:
-        # Post-config-split: tokens live in
-        # <configDir>/client/auto.json (the daemon-emitted local-client
-        # raw token), not in daemon.json. The legacy `token` field on
-        # daemon.json is gone — daemon.json carries hashes only.
+        # Tokens live in <configDir>/client/auto.json (the
+        # daemon-emitted local-client raw token). The hashed-at-rest
+        # token list is in <configDir>/daemon/tokens.json — that file
+        # is what the daemon validates against, but the raw token
+        # we use for client RPC comes from client/auto.json.
         path = self.client_token_file
         if not path.exists():
             return None
@@ -276,11 +286,11 @@ class LogoscoreDaemon:
 
     def _wait_for_ready(self) -> None:
         deadline = time.monotonic() + self.startup_timeout
-        conn = self.connection_file
+        conn = self.state_file
         proc = self._process
         assert proc is not None
 
-        # Phase 1: wait for daemon.json to exist.
+        # Phase 1: wait for daemon/state.json to exist.
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 _, err = self.logs()

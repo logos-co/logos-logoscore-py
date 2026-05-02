@@ -85,8 +85,9 @@ def _pick_free_port() -> int:
 
 @pytest.fixture
 def tcp_port() -> int:
-    """Ephemeral port for the daemon's TCP listener. Tests that use the
-    `tcp` transport should bind to this explicitly because the current
-    daemon writes its configured --tcp-port into daemon.json verbatim
-    rather than the OS-assigned one when --tcp-port=0."""
+    """Ephemeral port for the daemon's TCP listener. Tests pick this
+    upfront so they have the host-correct port to dial; the daemon's
+    state.json carries the actually-bound port (resolved post-bind),
+    but tests that round-trip a known port avoid the introspection
+    step."""
     return _pick_free_port()

@@ -1,9 +1,11 @@
 """Thin wrappers around the `logoscore issue-token` / `revoke-token` /
 `list-tokens` subcommands.
 
-These are daemon-less operations: they read and write `$CONFIG_DIR/tokens.db`
-and `$CONFIG_DIR/tokens/<name>.json` directly. Use when provisioning client
-credentials before or alongside a daemon — no running daemon needed.
+These are daemon-less operations: they read and write
+`$CONFIG_DIR/daemon/tokens.json` (the hashed-at-rest token list) and
+`$CONFIG_DIR/daemon/tokens/<name>.json` (per-token raw files) directly.
+Use when provisioning client credentials before or alongside a daemon —
+no running daemon needed.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ def issue_token(
 
     The raw token is visible here (it's freshly minted). After this call it
     only exists in the returned dict and in the per-client file at
-    `file`; the daemon's `tokens.db` stores only a hash.
+    `file`; the daemon's `tokens.json` stores only a hash.
     """
     args = ["issue-token", "--name", name]
     if replace:

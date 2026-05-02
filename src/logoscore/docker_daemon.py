@@ -20,7 +20,9 @@ Example:
 
 Volume layout inside the container (all three dirs are on the host and
 bind-mounted in — they survive the container):
-    /config       — daemon.json lives here (read by the host-side client)
+    /config       — daemon/{config,state,tokens}.json + tokens/<name>.json
+                    live here; the host-side client config is built from
+                    state.json's resolved transports
     /persistence  — `--persistence-path`; pre-seed to restore a session,
                     read back to inspect what modules wrote
     /user-modules — compiled Qt plugins, mounted read-only; loaded by the
@@ -30,7 +32,7 @@ Port strategy (status-go `tests-functional` pattern):
     container-internal TCP port is fixed at `CONTAINER_TCP_PORT` (6000).
     The host maps an ephemeral `host_port` to it via `-p …:6000`. The
     client is told to dial `host_port` via `LOGOSCORE_CLIENT_TCP_PORT`
-    so the daemon-written `daemon.json` (which still advertises 6000)
+    so the daemon-written `state.json` (which still advertises 6000)
     doesn't mislead it.
 """
 from __future__ import annotations
@@ -248,7 +250,7 @@ class LogoscoreDockerDaemon:
     from the host over TCP.
 
     Construction stores config only. `start()` actually runs the
-    container (and waits for `daemon.json`); `stop()` kills it. Use the
+    container (and waits for `state.json`); `stop()` kills it. Use the
     context-manager form to get start/stop bracketing automatically.
     """
 
@@ -337,8 +339,9 @@ class LogoscoreDockerDaemon:
         # container writes /config/{daemon,client}/* as root, and the
         # host process can't overwrite root-owned files in there. The
         # client side gets its own dir which the host populates with
-        # client.json (host-correct ports) + a copy of the daemon's
-        # raw auto-token. Cleaned up on stop() alongside _config_dir.
+        # client/config.json (host-correct ports) + a copy of the
+        # daemon's raw auto-token. Cleaned up on stop() alongside
+        # _config_dir.
         self._host_client_dir = Path(
             tempfile.mkdtemp(prefix="logoscore-docker-client-"))
 
@@ -346,7 +349,7 @@ class LogoscoreDockerDaemon:
         # Capability_module's host-side port. Picked alongside
         # `_host_port` in start() so the container's stable
         # CONTAINER_CAP_TCP_PORT can be forwarded to a known host port.
-        # Tracked separately so the post-startup client.json rewrite
+        # Tracked separately so the post-startup client/config.json rewrite
         # (see _rewrite_client_json) knows what to point the host
         # client at for capability_module.
         self._host_cap_port: int | None = None
@@ -368,8 +371,12 @@ class LogoscoreDockerDaemon:
 
     @property
     def config_dir(self) -> Path:
-        """Host path of the daemon's config directory (contains
-        `daemon.json` after startup)."""
+        """Host path of the daemon's config directory. Contains
+        `daemon/state.json` (live runtime state),
+        `daemon/tokens.json` (hashed-at-rest tokens), and
+        `daemon/tokens/<name>.json` (raw operator-copyable tokens)
+        after startup. `daemon/config.json` is only present if the
+        daemon was launched with `--persist-config`."""
         return self._config_dir
 
     @property
@@ -392,7 +399,7 @@ class LogoscoreDockerDaemon:
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> "LogoscoreDockerDaemon":
-        """`docker run` the daemon and block until it writes daemon.json.
+        """`docker run` the daemon and block until it writes state.json.
 
         Raises LogoscoreError on docker failure / startup timeout. Does
         NOT check `docker_available()` or `image_present()` up front —
@@ -519,14 +526,14 @@ class LogoscoreDockerDaemon:
             logs = self._capture_logs()
             self.stop()
             raise LogoscoreError(
-                f"daemon never wrote daemon.json within "
+                f"daemon never wrote state.json within "
                 f"{self.startup_timeout}s. Container logs:\n{logs}"
             )
 
         # Build a host-side client config (separate from the
         # daemon's bind-mounted /config — that one's owned by root
         # because the container ran as root). Writes
-        # `<host_client_dir>/client/client.json` (host-correct ports)
+        # `<host_client_dir>/client/config.json` (host-correct ports)
         # and `<host_client_dir>/client/auto.json` (the raw token,
         # copied out of the daemon's /config/daemon/tokens). The
         # `client(...)` factory below points the LogoscoreClient at
@@ -537,19 +544,19 @@ class LogoscoreDockerDaemon:
         return self
 
     def _build_host_client_config(self) -> None:
-        """Populate the host-only client config dir with a client.json
+        """Populate the host-only client config dir with a config.json
         that points at the host-side forwarded ports + a copy of the
         daemon-emitted raw auto token. Called once after the daemon
-        has come up and published daemon.json."""
+        has come up and published state.json."""
         import json as _json
 
-        # The daemon emitted /config/daemon/{daemon.json,tokens/auto.json}
-        # as root inside the container, with restrictive perms
-        # (daemon/tokens is 0700, the token file 0600). The host-side
-        # process can't `os.stat()` into those directly. We need two
-        # bytes of content from there: the daemon's instance_id (for
-        # the LocalSocket dial path, even though we use TCP for the
-        # network listener) and the raw auto-token.
+        # The daemon emitted /config/daemon/{state,tokens}.json +
+        # tokens/auto.json as root inside the container, with restrictive
+        # perms (daemon/tokens is 0700, the token file 0600). The
+        # host-side process can't `os.stat()` into those directly. We
+        # need two bytes of content from there: the daemon's
+        # instance_id (for the LocalSocket dial path, even though we
+        # use TCP for the network listener) and the raw auto-token.
         #
         # Don't widen `/config` permissions on disk: that would leave
         # the entire daemon/tokens/ directory (any operator-issued
@@ -569,7 +576,10 @@ class LogoscoreDockerDaemon:
             )
             return r.stdout if r.returncode == 0 else None
 
-        daemon_state_text = _container_read("/config/daemon/daemon.json")
+        # state.json is the source of truth for instance_id (and the
+        # resolved transport endpoints, though we override them with
+        # the host-forwarded ports below).
+        daemon_state_text = _container_read("/config/daemon/state.json")
         if daemon_state_text is None:
             return
         try:
@@ -591,7 +601,7 @@ class LogoscoreDockerDaemon:
             extra = {}
 
         client_cfg = {
-            "version": 1,
+            "version": 2,
             "token_file": "auto.json",
             "instance_id": instance_id,
             "daemon": {
@@ -613,11 +623,11 @@ class LogoscoreDockerDaemon:
         }
         client_dir = self._host_client_dir / "client"
         client_dir.mkdir(parents=True, exist_ok=True)
-        (client_dir / "client.json").write_text(
+        (client_dir / "config.json").write_text(
             _json.dumps(client_cfg, indent=4) + "\n")
 
         # Pipe the auto token's content out of the container the same
-        # way we did daemon.json above — the bind-mounted file on
+        # way we did state.json above — the bind-mounted file on
         # disk stays mode 0600 root-owned, but we get its bytes.
         token_text = _container_read("/config/daemon/tokens/auto.json")
         if token_text is None:
@@ -693,7 +703,7 @@ class LogoscoreDockerDaemon:
         # Point the client at the host-only client dir, NOT the
         # bind-mounted /config (which is owned by root because the
         # container ran as root). _build_host_client_config() above
-        # populated the host dir with a client.json keyed at the
+        # populated the host dir with a client/config.json keyed at the
         # forwarded host ports + a copy of the auto token.
         return LogoscoreClient(
             binary=binary,
@@ -710,9 +720,13 @@ class LogoscoreDockerDaemon:
 
     def _wait_for_conn_file(self) -> bool:
         deadline = time.monotonic() + self.startup_timeout
-        conn_file = self._config_dir / "daemon" / "daemon.json"
+        # state.json appears once transports actually bind. Watching
+        # for it here is the readiness signal — it's the same thing
+        # `LogoscoreDaemon._wait_for_ready` waits on for the
+        # non-docker case.
+        state_file = self._config_dir / "daemon" / "state.json"
         while time.monotonic() < deadline:
-            if conn_file.exists():
+            if state_file.exists():
                 return True
             time.sleep(0.1)
         return False

@@ -110,9 +110,9 @@ def test_docker_ssl_status(ssl_daemon, logoscore_bin):
 
     `rpc_error` must be absent — its presence means `getStatus` never
     actually reached core_service and the client built a fallback status
-    from daemon.json metadata. Without this check the test gives a
+    from state.json metadata. Without this check the test gives a
     false positive: `daemon.status == "running"` is synthesised from
-    the mere existence of a parseable daemon.json, which would pass
+    the mere existence of a parseable state.json, which would pass
     even if TLS were completely broken.
     """
     client = ssl_daemon.client(binary=logoscore_bin)
@@ -120,7 +120,7 @@ def test_docker_ssl_status(ssl_daemon, logoscore_bin):
     assert isinstance(status, dict)
     assert "rpc_error" not in status, (
         "TLS path didn't actually reach core_service — status is "
-        f"synthesised from daemon.json: {status}"
+        f"synthesised from state.json: {status}"
     )
     assert status.get("daemon", {}).get("status") == "running", status
 

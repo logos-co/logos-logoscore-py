@@ -75,10 +75,10 @@ What the helper handles for you:
   and is reached via `-p $host_port:6000`. Same pattern as
   [status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
 - Bind-mounts three host dirs into the container:
-  `/config` (daemon writes `daemon.json`), `/persistence`
+  `/config` (daemon writes `state.json`), `/persistence`
   (`--persistence-path`; pre-seed for session restore, inspect after),
   `/user-modules` (your compiled Qt plugins, read-only).
-- Waits for `daemon.json` to appear before returning.
+- Waits for `state.json` to appear before returning.
 - Returns a `LogoscoreClient` preconfigured with the host port override
   (`LOGOSCORE_CLIENT_TCP_PORT`) so it dials the external endpoint rather
   than the one the daemon wrote into its connection file.
@@ -115,7 +115,7 @@ TLS (`tcp_ssl`) additionally accepts `ssl_cert` / `ssl_key` / `ssl_ca`.
 When talking to a daemon whose advertised host/port differs from the
 reachable one (NAT, port-forwarding, SSH tunnels), use
 `tcp_host` / `tcp_port` on the **client** as overrides — the client
-will dial the overridden endpoint instead of what `daemon.json` says.
+will dial the overridden endpoint instead of what `state.json` says.
 That's exactly how `LogoscoreDockerDaemon` bridges the container boundary.
 
 ## Tokens
@@ -143,7 +143,7 @@ revoke_token(config_dir="/path/to/daemon-cfg", name="alice")
 
 Context manager that spawns `logoscore -D` with an isolated `--config-dir`
 (temp dir by default). Multiple daemons can run concurrently without
-colliding on `~/.logoscore/daemon.json`.
+colliding on `~/.logoscore/daemon/state.json`.
 
 ```python
 LogoscoreDaemon(
@@ -153,7 +153,7 @@ LogoscoreDaemon(
     persistence_path=None,    # --persistence-path
     extra_args=None,          # extra flags to pass to the daemon
     env=None,                 # extra env vars for the daemon process
-    startup_timeout=15.0,     # seconds to wait for daemon.json + status
+    startup_timeout=15.0,     # seconds to wait for state.json + status
     # Transports (see section above)
     transports=None,          # ["tcp"] | ["tcp_ssl"] | ["local", "tcp"] | ...
     tcp_host="127.0.0.1",
@@ -218,7 +218,7 @@ Transport-related kwargs (`transport=`, `tcp_host=`, `tcp_port=`,
 `codec=`, `no_verify_peer=`) set `LOGOSCORE_CLIENT_*` env vars on the
 subprocess invocation — the CLI resolves them through its
 `effectiveClientTransport` path, overriding whatever the daemon wrote
-into `daemon.json`.
+into `state.json`.
 
 ### Events
 

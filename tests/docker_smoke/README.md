@@ -33,7 +33,7 @@ with LogoscoreDockerDaemon(
 
 The helper picks a free host port, bind-mounts everything the daemon
 needs (`/config`, `/persistence`, `/user-modules`), starts the
-container, waits for `daemon.json`, and returns a `LogoscoreClient`
+container, waits for `state.json`, and returns a `LogoscoreClient`
 configured to dial the right port. Optional knobs: `host_port=...` to
 pin a port, `persistence_dir=...` to restore a pre-seeded session,
 `codec="cbor"` to pick a wire codec, `extra_module_dirs=[...]` /
@@ -60,7 +60,7 @@ The three mounts each have a specific purpose:
 
 | Host dir                  | Container path | Read/write | Why                                                                                           |
 |---------------------------|----------------|------------|-----------------------------------------------------------------------------------------------|
-| `./config`                | `/config`      | rw         | Daemon writes `daemon.json` here; your client reads it to discover host/port/instance_id.     |
+| `./config`                | `/config`      | rw         | Daemon writes `state.json` here; your client reads it to discover host/port/instance_id.     |
 | `./persistence`           | `/persistence` | rw         | Module state (`--persistence-path`). Pre-seed to restore a session; read back to inspect it.  |
 | `./my-modules/modules`    | `/user-modules`| ro         | Compiled Qt plugins loaded via `-m`. Read-only because the daemon never mutates these.        |
 
@@ -70,7 +70,7 @@ The container always binds `6000` internally; the host maps a
 dynamically-picked ephemeral port to it (`-p $host_port:6000`). The
 client gets told `tcp_port=$host_port` so it dials `localhost:$host_port`
 rather than the container-internal `6000` the daemon wrote into its
-`daemon.json`. Same pattern as
+`state.json`. Same pattern as
 [status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
 
 Result: parallel container-backed tests don't fight over port 6000 on
@@ -162,7 +162,7 @@ layer cache and nix's content-addressed store.
 
 3. **Two independent daemons** running in two separate containers on two
    host ports, driven from one Python test. Confirms:
-   - distinct instance_ids in each container's `daemon.json`
+   - distinct instance_ids in each container's `state.json`
    - a module loaded on A isn't visible to B
    - a call to A succeeds; the same call to B fails because the module
      isn't loaded there
@@ -180,7 +180,7 @@ layer cache and nix's content-addressed store.
    host-side client dials over TLS with `--no-verify-peer` (because
    self-signed) and runs two scenarios: a `status` round-trip (with a
    `rpc_error not in response` assertion so it doesn't false-positive
-   on the fallback-to-daemon.json path when the RPC actually fails)
+   on the fallback-to-state.json path when the RPC actually fails)
    and a load-module + method-call round-trip (proves the full
    payload path — method args → TLS → RPC → return → TLS → client).
 

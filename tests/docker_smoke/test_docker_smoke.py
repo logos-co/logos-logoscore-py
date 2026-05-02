@@ -223,7 +223,7 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
 
     clients = [d.client(binary=logoscore_bin) for d in daemons]
     instance_ids = [
-        json.loads((d.config_dir / "daemon" / "daemon.json").read_text())["instance_id"]
+        json.loads((d.config_dir / "daemon" / "state.json").read_text())["instance_id"]
         for d in daemons
     ]
 
