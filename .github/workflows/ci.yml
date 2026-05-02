@@ -39,8 +39,28 @@ jobs:
       - name: Run unit tests
         run: nix build '.#checks.${{ matrix.arch }}.unit' --print-build-logs
 
-      - name: Run integration tests
-        run: nix build '.#checks.${{ matrix.arch }}.integration' --print-build-logs
+      # The integration suite is replicated across three transports
+      # (`local`, `tcp`, `tcp_ssl`). Each is its own flake check
+      # (`integration-<transport>`), built sequentially below.
+      # `local` runs first because it's the fastest and exercises the
+      # most code paths (no port allocation, no TLS handshake) — if
+      # that's red, the network paths almost certainly are too.
+      # tcp and tcp_ssl follow so a regression in transport plumbing
+      # surfaces under its own name in the workflow log.
+      #
+      # Why sequential rather than a third matrix axis: the heavy
+      # cost of these jobs is the upstream nix build (logoscore CLI +
+      # test modules). Each matrix entry would re-pull / re-realise
+      # the same closure on a cold runner. Running all three transports
+      # in one job amortises that closure across them.
+      - name: Run integration tests (local)
+        run: nix build '.#checks.${{ matrix.arch }}.integration-local' --print-build-logs
+
+      - name: Run integration tests (tcp)
+        run: nix build '.#checks.${{ matrix.arch }}.integration-tcp' --print-build-logs
+
+      - name: Run integration tests (tcp_ssl)
+        run: nix build '.#checks.${{ matrix.arch }}.integration-tcp_ssl' --print-build-logs
 
       # Docker smoke tests live in their own directory (`tests/docker_smoke/`)
       # rather than under `tests/integration/`, because they can't run

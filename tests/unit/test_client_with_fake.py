@@ -147,3 +147,69 @@ def test_all_module_management_commands(rec: Recorder):
         rec.respond(stdout="{}")
         getattr(client, method)(*args)
         assert rec.calls[-1]["cmd"] == ["logoscore", *expected_subcmd, "--json"]
+
+
+# ── Transport-override env propagation ───────────────────────────────────────
+#
+# The CLI side has matching `--client-*` flags + `LOGOSCORE_CLIENT_*` env-var
+# fallbacks; these tests pin the wrapper-side contract. If a kwarg is unset
+# the corresponding env var must be absent (so the CLI falls through to the
+# disk-side dial spec); when set the env var carries the value verbatim.
+
+def test_no_transport_kwargs_means_no_client_env(rec: Recorder):
+    rec.respond(stdout="{}")
+    client = LogoscoreClient()
+    client.status()
+    env = rec.calls[0]["env"] or {}
+    for var in (
+        "LOGOSCORE_CLIENT_TRANSPORT",
+        "LOGOSCORE_CLIENT_TCP_HOST",
+        "LOGOSCORE_CLIENT_TCP_PORT",
+        "LOGOSCORE_CLIENT_NO_VERIFY_PEER",
+        "LOGOSCORE_CLIENT_CODEC",
+    ):
+        assert var not in env, f"unexpected {var}={env.get(var)!r}"
+
+
+def test_transport_kwarg_propagates(rec: Recorder):
+    rec.respond(stdout="{}")
+    LogoscoreClient(transport="tcp_ssl").status()
+    assert rec.calls[0]["env"]["LOGOSCORE_CLIENT_TRANSPORT"] == "tcp_ssl"
+
+
+def test_tcp_host_and_port_propagate(rec: Recorder):
+    rec.respond(stdout="{}")
+    LogoscoreClient(tcp_host="daemon.example.com", tcp_port=51823).status()
+    env = rec.calls[0]["env"]
+    assert env["LOGOSCORE_CLIENT_TCP_HOST"] == "daemon.example.com"
+    assert env["LOGOSCORE_CLIENT_TCP_PORT"] == "51823"
+
+
+def test_no_verify_peer_propagates_only_when_true(rec: Recorder):
+    # Default (no_verify_peer=False): env var absent → CLI uses disk
+    # value (verify by default).
+    rec.respond(stdout="{}")
+    LogoscoreClient(no_verify_peer=False).status()
+    env = rec.calls[0]["env"] or {}
+    assert "LOGOSCORE_CLIENT_NO_VERIFY_PEER" not in env
+
+    # Explicit True: env var set to "1" — CLI applies it as a flag.
+    # This is the typical smoke-test path with a self-signed cert.
+    rec.respond(stdout="{}")
+    LogoscoreClient(no_verify_peer=True).status()
+    assert rec.calls[1]["env"]["LOGOSCORE_CLIENT_NO_VERIFY_PEER"] == "1"
+
+
+def test_codec_propagates(rec: Recorder):
+    rec.respond(stdout="{}")
+    LogoscoreClient(codec="cbor").status()
+    assert rec.calls[0]["env"]["LOGOSCORE_CLIENT_CODEC"] == "cbor"
+
+
+def test_tcp_port_zero_still_propagates(rec: Recorder):
+    # Edge case: 0 is a meaningful value (auto-pick), not "unset". The
+    # wrapper distinguishes None from 0 — a user passing `tcp_port=0`
+    # gets the env var set to "0", not omitted.
+    rec.respond(stdout="{}")
+    LogoscoreClient(tcp_port=0).status()
+    assert rec.calls[0]["env"]["LOGOSCORE_CLIENT_TCP_PORT"] == "0"

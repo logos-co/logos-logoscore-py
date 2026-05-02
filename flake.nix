@@ -170,6 +170,14 @@
       # ── Checks ────────────────────────────────────────────────────────────
       # `nix flake check` runs the unit tests (no daemon required) and the
       # integration test suite against a real logoscore + test modules.
+      #
+      # The integration suite is replicated across three transports so a
+      # regression in tcp framing or tcp_ssl handshaking surfaces at the
+      # same layer the test names already cover. Three separate flake
+      # outputs (rather than one derivation that loops) so:
+      #   - CI can fan them out across runners in parallel,
+      #   - a tcp_ssl failure doesn't block the local/tcp signal,
+      #   - the build log of any single transport stays focused.
       checks = forAllSystems ({ pkgs, system }:
         let
           python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
@@ -185,6 +193,32 @@
             name = "logoscore-py-test-modules";
             paths = [ testBasicInstall testBasicCppInstall ];
           };
+
+          # Helper: run the integration suite once with the given
+          # `--transport` value. Same env wiring as the unit check
+          # plus openssl (needed by the `self_signed_cert` fixture
+          # for `tcp_ssl`; harmless for `local` / `tcp`).
+          mkIntegration = transport: pkgs.runCommand
+            "logoscore-py-integration-tests-${transport}" {
+              nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+            } ''
+              cp -r ${./.}/. .
+              chmod -R +w .
+              export QT_QPA_PLATFORM=offscreen
+              export QT_FORCE_STDERR_LOGGING=1
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+              ''}
+              export PYTHONPATH=$PWD/src
+              export LOGOSCORE_BIN=${logoscoreBin}/bin/logoscore
+              export LOGOSCORE_TEST_MODULES_DIR=${testModulesInstall}/modules
+              # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
+              export HOME=$PWD/home
+              mkdir -p $HOME
+              ${python}/bin/pytest tests/integration -v --transport=${transport}
+              touch $out
+            '';
         in
         {
           unit = pkgs.runCommand "logoscore-py-unit-tests" {
@@ -197,26 +231,16 @@
             touch $out
           '';
 
-          integration = pkgs.runCommand "logoscore-py-integration-tests" {
-            nativeBuildInputs = [ python logoscoreBin ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
-          } ''
-            cp -r ${./.}/. .
-            chmod -R +w .
-            export QT_QPA_PLATFORM=offscreen
-            export QT_FORCE_STDERR_LOGGING=1
-            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
-            ''}
-            export PYTHONPATH=$PWD/src
-            export LOGOSCORE_BIN=${logoscoreBin}/bin/logoscore
-            export LOGOSCORE_TEST_MODULES_DIR=${testModulesInstall}/modules
-            # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
-            export HOME=$PWD/home
-            mkdir -p $HOME
-            ${python}/bin/pytest tests/integration -v
-            touch $out
-          '';
+          # One check per transport. CI's matrix fans them out; a local
+          # `nix flake check` runs all three sequentially.
+          integration-local   = mkIntegration "local";
+          integration-tcp     = mkIntegration "tcp";
+          integration-tcp_ssl = mkIntegration "tcp_ssl";
+
+          # Back-compat alias — equivalent to `integration-local`. Kept
+          # so anyone with `nix build .#checks.<system>.integration` in
+          # muscle memory still gets a green path.
+          integration = mkIntegration "local";
         }
       );
     };

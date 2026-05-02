@@ -42,19 +42,37 @@ MODULE = "test_basic_module_cpp"
 
 
 @pytest.fixture(scope="module")
-def client(logoscore_bin, test_modules_dir, transport):
+def client(logoscore_bin, test_modules_dir, transport, request):
+    """Build a daemon + client wired to whatever transport the suite is
+    parametrised on. Mirror of `test_basic_module_methods.py::client`
+    — kept duplicated rather than moved to a conftest helper so each
+    test file can be read end-to-end without jumping between files."""
+    import socket
+
+    def _pick_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
     kwargs = {}
+    client_kwargs: dict = {"transport": transport}
     if transport != "local":
         kwargs["transports"] = [transport]
         if transport == "tcp":
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", 0))
-                kwargs["tcp_port"] = s.getsockname()[1]
+            kwargs["tcp_port"] = _pick_free_port()
+        elif transport == "tcp_ssl":
+            cert, key = request.getfixturevalue("self_signed_cert")
+            kwargs["tcp_ssl_port"] = _pick_free_port()
+            kwargs["ssl_cert"] = cert
+            kwargs["ssl_key"] = key
+            # Self-signed cert won't validate against any CA — the
+            # client has to opt out of peer verification or every call
+            # fails the TLS handshake.
+            client_kwargs["no_verify_peer"] = True
     with LogoscoreDaemon(
         modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
     ) as daemon:
-        c = daemon.client(transport=transport)
+        c = daemon.client(**client_kwargs)
         c.load_module(MODULE)
         yield c
 

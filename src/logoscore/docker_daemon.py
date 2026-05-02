@@ -268,6 +268,16 @@ class LogoscoreDockerDaemon:
         transport: str = "tcp",
         ssl_cert: str | Path | None = None,
         ssl_key: str | Path | None = None,
+        # On-disk dial-spec value for `verify_peer` in the host client/
+        # config.json. True = verify the daemon's cert against a CA
+        # (correct default; what a real deployment with a CA-issued
+        # cert would use). False = skip verification (the smoke-test
+        # default — the caller's `ssl_cert` is typically self-signed).
+        # Independent of the per-call `no_verify_peer` knob in
+        # `client()`: that one is an env-var override the CLI applies
+        # over the disk value, so callers can flip from skip-to-verify
+        # at run time without rewriting the disk config.
+        verify_peer: bool = False,
         container_name: str | None = None,
         extra_module_dirs: Sequence[str] | None = None,
         extra_args: Sequence[str] | None = None,
@@ -303,6 +313,7 @@ class LogoscoreDockerDaemon:
         self.transport = transport
         self.ssl_cert = Path(ssl_cert) if ssl_cert else None
         self.ssl_key = Path(ssl_key) if ssl_key else None
+        self.verify_peer = verify_peer
         self.startup_timeout = startup_timeout
         # Additional dirs *inside the container* to scan for modules, on
         # top of `/opt/logoscore/modules` (CLI's built-in) and
@@ -646,7 +657,17 @@ class LogoscoreDockerDaemon:
         # trust self.codec because the docker run command pinned it.
         if self.transport == "tcp_ssl":
             transport_kind = "tcp_ssl"
-            extra: dict = {"verify_peer": False}
+            # Reflect the constructor's `verify_peer` setting on disk
+            # rather than hardcoding False. Callers that want to
+            # exercise the verification path can pass
+            # `verify_peer=True` (and supply a cert that actually
+            # validates against a CA); the default stays False
+            # because the typical smoke setup runs with a self-signed
+            # cert that wouldn't validate. The per-call
+            # `no_verify_peer` knob on `client()` still lets callers
+            # flip this at run time via the CLI's env-var override
+            # without rewriting the disk config.
+            extra: dict = {"verify_peer": self.verify_peer}
         else:
             transport_kind = "tcp"
             extra = {}
@@ -741,9 +762,12 @@ class LogoscoreDockerDaemon:
 
         `no_verify_peer`: for `tcp_ssl` daemons this defaults to True so
         self-signed certs work out of the box (the common case for smoke
-        tests). Set to False to exercise the verification path once
-        you're feeding the client a real CA. Ignored when transport is
-        plain `tcp`.
+        tests). When True, sets the `LOGOSCORE_CLIENT_NO_VERIFY_PEER`
+        env override which the CLI applies on top of the disk-side
+        `verify_peer` value. Set to False to exercise the verification
+        path — the disk-side `verify_peer` (controlled by
+        `LogoscoreDockerDaemon(verify_peer=...)`) then takes effect.
+        Ignored when transport is plain `tcp`.
         """
         if self._container_id is None:
             raise LogoscoreError(
