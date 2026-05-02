@@ -371,13 +371,84 @@ class LogoscoreDockerDaemon:
 
     @property
     def config_dir(self) -> Path:
-        """Host path of the daemon's config directory. Contains
-        `daemon/state.json` (live runtime state),
-        `daemon/tokens.json` (hashed-at-rest tokens), and
-        `daemon/tokens/<name>.json` (raw operator-copyable tokens)
-        after startup. `daemon/config.json` is only present if the
-        daemon was launched with `--persist-config`."""
+        """Host path of the daemon's config directory. The container
+        runs as root and writes `daemon/state.json`, `daemon/config.json`
+        (only with `--persist-config`), `daemon/tokens.json`, and
+        `daemon/tokens/<name>.json` here as root-owned + 0600. The
+        host process generally can't read these files directly even
+        though it owns the surrounding dir — the container's daemon
+        sets restrictive perms on every credential-adjacent file.
+        Use `read_container_file()` (which goes through `docker exec
+        ... cat`) or the higher-level helpers (`state_json`,
+        `instance_id`) to extract content; reaching into this path
+        with `read_text()` will hit a PermissionError."""
         return self._config_dir
+
+    # ── Container-side reads ─────────────────────────────────────────────
+    #
+    # Anything the daemon writes inside the bind-mounted /config tree
+    # is owned by root with restrictive perms. Don't widen those on
+    # disk (that would leave the whole daemon/tokens/ dir
+    # world-readable on the host for the lifetime of the bind-mount).
+    # Instead, pipe content out via `docker exec ... cat` — the
+    # container is root inside, can read its own files, and we capture
+    # bytes on stdout without touching on-disk permissions.
+
+    def read_container_file(self, container_path: str) -> str | None:
+        """Read a file from inside the running container as root.
+        Returns the file's text content, or None if the file is
+        missing / the container isn't running / the read fails.
+
+        Use this for any host-side inspection of files the daemon
+        writes under `/config/` — the host process can't read them
+        directly. Examples: `state.json` (instance_id, resolved
+        transport endpoints), `tokens.json` (hashed token list),
+        `tokens/<name>.json` (raw tokens, when needed for testing)."""
+        if self._container_id is None:
+            return None
+        r = subprocess.run(
+            ["docker", "exec", self._container_id, "cat", container_path],
+            capture_output=True, text=True,
+        )
+        return r.stdout if r.returncode == 0 else None
+
+    def container_file_exists(self, container_path: str) -> bool:
+        """True iff `container_path` exists inside the running
+        container. Used to poll for files the daemon emits as root,
+        since the host-side `Path.exists()` can race the perms model
+        on some filesystems and is harder to reason about than a
+        direct `test -f` inside the container."""
+        if self._container_id is None:
+            return False
+        r = subprocess.run(
+            ["docker", "exec", self._container_id, "test", "-f", container_path],
+            capture_output=True, text=True,
+        )
+        return r.returncode == 0
+
+    def state_json(self) -> dict | None:
+        """Parsed contents of `/config/daemon/state.json` (the live
+        runtime state file). Returns `None` if the daemon hasn't
+        produced it yet, the container isn't running, or the JSON is
+        malformed — every call site handles these the same way
+        (treat the daemon as not-yet-ready). Source of truth for
+        `instance_id` and the actually-bound transport ports."""
+        import json as _json
+        text = self.read_container_file("/config/daemon/state.json")
+        if text is None:
+            return None
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            return None
+
+    @property
+    def instance_id(self) -> str | None:
+        """The daemon's 12-char instance ID, or None if state.json
+        isn't readable yet. Convenience wrapper over `state_json()`
+        for the most common access pattern."""
+        s = self.state_json()
+        return s.get("instance_id") if isinstance(s, dict) else None
 
     @property
     def persistence_dir(self) -> Path:
@@ -547,44 +618,23 @@ class LogoscoreDockerDaemon:
         """Populate the host-only client config dir with a config.json
         that points at the host-side forwarded ports + a copy of the
         daemon-emitted raw auto token. Called once after the daemon
-        has come up and published state.json."""
+        has come up and published state.json.
+
+        Both the source state.json (for instance_id) and the raw auto
+        token are pulled out of the container via `docker exec cat`
+        rather than read off the host bind-mount — see
+        `read_container_file` for the rationale (root-owned 0600
+        files don't widen on disk; we just pipe bytes out)."""
         import json as _json
 
-        # The daemon emitted /config/daemon/{state,tokens}.json +
-        # tokens/auto.json as root inside the container, with restrictive
-        # perms (daemon/tokens is 0700, the token file 0600). The
-        # host-side process can't `os.stat()` into those directly. We
-        # need two bytes of content from there: the daemon's
-        # instance_id (for the LocalSocket dial path, even though we
-        # use TCP for the network listener) and the raw auto-token.
-        #
-        # Don't widen `/config` permissions on disk: that would leave
-        # the entire daemon/tokens/ directory (any operator-issued
-        # tokens included) world-readable on the host filesystem for
-        # the lifetime of the container's bind-mount, surviving the
-        # daemon if it leaves anything behind. Instead, pipe the two
-        # files we need through `docker exec ... cat` — the container
-        # is root inside, can read its own files, and we capture the
-        # content on stdout without touching disk permissions.
         if self._container_id is None:
             return
-
-        def _container_read(path: str) -> str | None:
-            r = subprocess.run(
-                ["docker", "exec", self._container_id, "cat", path],
-                capture_output=True, text=True,
-            )
-            return r.stdout if r.returncode == 0 else None
 
         # state.json is the source of truth for instance_id (and the
         # resolved transport endpoints, though we override them with
         # the host-forwarded ports below).
-        daemon_state_text = _container_read("/config/daemon/state.json")
-        if daemon_state_text is None:
-            return
-        try:
-            daemon_state = _json.loads(daemon_state_text)
-        except _json.JSONDecodeError:
+        daemon_state = self.state_json()
+        if daemon_state is None:
             return
 
         instance_id = daemon_state.get("instance_id", "")
@@ -629,7 +679,7 @@ class LogoscoreDockerDaemon:
         # Pipe the auto token's content out of the container the same
         # way we did state.json above — the bind-mounted file on
         # disk stays mode 0600 root-owned, but we get its bytes.
-        token_text = _container_read("/config/daemon/tokens/auto.json")
+        token_text = self.read_container_file("/config/daemon/tokens/auto.json")
         if token_text is None:
             return
         (client_dir / "auto.json").write_text(token_text)
@@ -720,13 +770,14 @@ class LogoscoreDockerDaemon:
 
     def _wait_for_conn_file(self) -> bool:
         deadline = time.monotonic() + self.startup_timeout
-        # state.json appears once transports actually bind. Watching
-        # for it here is the readiness signal — it's the same thing
-        # `LogoscoreDaemon._wait_for_ready` waits on for the
-        # non-docker case.
-        state_file = self._config_dir / "daemon" / "state.json"
+        # state.json appears once transports actually bind. Poll for
+        # it through `docker exec ... test -f` rather than the host
+        # bind-mount: the daemon writes the file as root with
+        # restrictive perms, so a host-side `Path.exists()` is at
+        # best fragile and at worst depends on filesystem-specific
+        # behavior. Asking the container directly is unambiguous.
         while time.monotonic() < deadline:
-            if state_file.exists():
+            if self.container_file_exists("/config/daemon/state.json"):
                 return True
             time.sleep(0.1)
         return False

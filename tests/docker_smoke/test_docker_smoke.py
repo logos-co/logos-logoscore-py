@@ -29,7 +29,6 @@ is missing the suite skips cleanly rather than failing.
 """
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -222,10 +221,15 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
     assert len(daemons) == 2
 
     clients = [d.client(binary=logoscore_bin) for d in daemons]
-    instance_ids = [
-        json.loads((d.config_dir / "daemon" / "state.json").read_text())["instance_id"]
-        for d in daemons
-    ]
+    # Read state.json out of each container via `docker exec cat`
+    # rather than off the host bind-mount. The daemon writes
+    # state.json as root with restrictive perms, so the host process
+    # can't read it directly even though it owns the surrounding dir.
+    instance_ids = [d.instance_id for d in daemons]
+    assert all(instance_ids), (
+        f"daemon didn't expose an instance_id (state.json unreadable?): "
+        f"{instance_ids}"
+    )
 
     # Distinct instances (these are UUID-derived, collision is negligible).
     assert instance_ids[0] != instance_ids[1], (
