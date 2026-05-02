@@ -45,7 +45,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from .client import LogoscoreClient
 from .errors import LogoscoreError
@@ -349,9 +349,9 @@ class LogoscoreDockerDaemon:
         # Capability_module's host-side port. Picked alongside
         # `_host_port` in start() so the container's stable
         # CONTAINER_CAP_TCP_PORT can be forwarded to a known host port.
-        # Tracked separately so the post-startup client/config.json rewrite
-        # (see _rewrite_client_json) knows what to point the host
-        # client at for capability_module.
+        # Tracked separately so the post-startup client/config.json
+        # build (see `_build_host_client_config`) knows what to point
+        # the host client at for capability_module.
         self._host_cap_port: int | None = None
         self._container_name = (
             container_name
@@ -483,8 +483,9 @@ class LogoscoreDockerDaemon:
         if self._host_port is None:
             self._host_port = pick_free_port()
         # Capability_module rides its own host:container port pair.
-        # Pick eagerly here so the docker `-p` mapping (and the
-        # daemon's `--module-tcp-port` flag below) line up.
+        # Pick eagerly here so the docker `-p` mapping and the
+        # daemon's `--module-transport capability_module=...port=N...`
+        # spec below line up.
         if self._host_cap_port is None:
             self._host_cap_port = pick_free_port()
 

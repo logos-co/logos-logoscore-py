@@ -13,8 +13,6 @@ openssl is missing.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Iterator
 
@@ -53,35 +51,6 @@ def _require_docker_and_image(flavor: str) -> None:
             f"docker image '{image}' not built — run "
             f"FLAVOR={flavor} tests/docker_smoke/build_smoke_image.sh first"
         )
-
-
-@pytest.fixture(scope="module")
-def self_signed_cert(tmp_path_factory) -> tuple[Path, Path]:
-    """Generate a throwaway self-signed cert+key for CN=localhost.
-
-    Module-scoped so every test in this file shares the same cert —
-    generation takes a noticeable fraction of a second and there's no
-    isolation reason to do it per-test.
-    """
-    if not shutil.which("openssl"):
-        pytest.skip("openssl not on PATH; can't generate self-signed cert")
-
-    d = tmp_path_factory.mktemp("tls")
-    cert = d / "cert.pem"
-    key = d / "key.pem"
-    subprocess.run(
-        [
-            "openssl", "req", "-x509",
-            "-newkey", "rsa:2048",
-            "-keyout", str(key),
-            "-out", str(cert),
-            "-days", "1",
-            "-nodes",
-            "-subj", "/CN=localhost",
-        ],
-        check=True, capture_output=True,
-    )
-    return cert, key
 
 
 @pytest.fixture

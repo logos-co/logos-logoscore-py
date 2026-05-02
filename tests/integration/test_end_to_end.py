@@ -14,14 +14,33 @@ from logoscore import LogoscoreDaemon
 
 
 @pytest.fixture
-def daemon(logoscore_bin, test_modules_dir, transport, tcp_port):
-    # transport == "local" uses today's QLocalSocket path (zero extra flags).
-    # transport == "tcp" adds a --transport=tcp listener + picks it client-side.
+def daemon(
+    logoscore_bin,
+    test_modules_dir,
+    transport,
+    tcp_port,
+    tcp_ssl_port,
+    request,
+):
+    # transport == "local"   — QLocalSocket; zero extra flags.
+    # transport == "tcp"     — adds a `--module-transport ...=tcp...`
+    #                          listener pinned to `tcp_port`.
+    # transport == "tcp_ssl" — same shape, plus the daemon needs
+    #                          ssl_cert / ssl_key. We pull those from
+    #                          the session-scoped `self_signed_cert`
+    #                          fixture, but only request it when
+    #                          actually needed so tcp / local runs
+    #                          don't pay the openssl cost.
     kwargs = {}
     if transport != "local":
         kwargs["transports"] = [transport]
         if transport == "tcp":
             kwargs["tcp_port"] = tcp_port
+        elif transport == "tcp_ssl":
+            cert, key = request.getfixturevalue("self_signed_cert")
+            kwargs["tcp_ssl_port"] = tcp_ssl_port
+            kwargs["ssl_cert"] = cert
+            kwargs["ssl_key"] = key
     with LogoscoreDaemon(
         modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
     ) as d:
@@ -33,9 +52,18 @@ def client(daemon, transport):
     """Return a callable that builds a daemon client wired to the
     transport being tested. Replaces an earlier import-time monkeypatch
     of ``LogoscoreDaemon.client`` that leaked across the whole test
-    session and could break tests depending on import order."""
+    session and could break tests depending on import order.
+
+    For `tcp_ssl`, defaults `no_verify_peer=True` — the daemon is
+    using the throwaway self-signed cert from the `self_signed_cert`
+    fixture, which won't validate against a real CA. Tests that want
+    to exercise the verification path can override by passing
+    `no_verify_peer=False` and pointing at a CA bundle.
+    """
     def _make(**kw):
         kw.setdefault("transport", transport)
+        if transport == "tcp_ssl":
+            kw.setdefault("no_verify_peer", True)
         return daemon.client(**kw)
     return _make
 
