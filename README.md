@@ -91,7 +91,34 @@ modules are always bind-mounted at runtime.
 
 Knobs: `host_port=`, `persistence_dir=` (pre-seeded + not cleaned up on
 exit), `codec="cbor"`, `extra_module_dirs=[...]`, `extra_args=[...]`,
-`container_name=`. See `help(LogoscoreDockerDaemon)` for the full list.
+`container_name=`, `network=` (attach to a caller-managed docker
+network). See `help(LogoscoreDockerDaemon)` for the full list.
+
+### Multiple daemons in a shared docker network
+
+Pass `network=<name>` to attach each container to an EXISTING docker
+network. The daemon never creates or removes networks — caller manages
+the lifecycle. Use this when daemon containers need to discover each
+other by container name via docker's embedded DNS:
+
+```python
+import subprocess
+from logoscore import LogoscoreDockerDaemon
+
+subprocess.run(["docker", "network", "create", "my-net"], check=True)
+try:
+    a = LogoscoreDockerDaemon(image="logoscore:smoke-portable",
+                              modules_dir="./my-module/result/modules",
+                              container_name="alice", network="my-net")
+    b = LogoscoreDockerDaemon(image="logoscore:smoke-portable",
+                              modules_dir="./my-module/result/modules",
+                              container_name="bob", network="my-net")
+    with a, b:
+        # alice resolves "bob" via docker DNS, and vice versa
+        ...
+finally:
+    subprocess.run(["docker", "network", "rm", "my-net"])
+```
 
 ## Transports
 
@@ -180,6 +207,7 @@ LogoscoreDockerDaemon(
     host_port=None,           # None → pick_free_port()
     codec="json",             # "json" | "cbor"
     container_name=None,
+    network=None,             # attach to existing caller-managed docker network
     extra_module_dirs=None,   # extra -m paths *inside* the container
     extra_args=None,          # extra daemon args
     startup_timeout=20.0,

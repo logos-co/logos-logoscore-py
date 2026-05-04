@@ -29,9 +29,12 @@ is missing the suite skips cleanly rather than failing.
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import threading
 import time
+import uuid
 from typing import Iterator
 
 import pytest
@@ -272,3 +275,126 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
     # from logoscore.errors import MethodError, ModuleError
     # with pytest.raises((MethodError, ModuleError)):
     #     clients[1].call(MODULE, "echo", "two-daemon")
+
+
+# ── Shared docker network: two daemons on a caller-managed network ────────
+
+@pytest.fixture(scope="module")
+def shared_docker_network(docker_flavor) -> Iterator[str]:
+    """Create a docker network for the duration of the module, then remove
+    it. Network is owned by the fixture, NOT by LogoscoreDockerDaemon —
+    daemon just attaches via the `network=` kwarg.
+
+    Depends on `docker_flavor` so `--docker-flavor=both` gets a fresh
+    network per flavor parametrisation. Without that, the second flavor
+    would reuse the first's network name and a leaked-attached
+    container from the previous run could keep `docker network rm`
+    from succeeding."""
+    # Both checks together — symmetric with every other fixture in this
+    # file. Skipping at the network layer when the image isn't built
+    # avoids a no-op create/rm round-trip that would otherwise happen
+    # before the downstream daemon fixture also skipped.
+    _require_docker_and_image(docker_flavor)
+
+    name = f"logoscore-test-{docker_flavor}-{uuid.uuid4().hex[:8]}"
+    r = subprocess.run(
+        ["docker", "network", "create", name],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        pytest.fail(
+            f"failed to create docker network {name!r}: {r.stderr.strip()}"
+        )
+    try:
+        yield name
+    finally:
+        # Intentional non-raise on teardown: a leaked attached container
+        # from a previous run can keep `docker network rm` from
+        # succeeding, but we don't want fixture cleanup to mask actual
+        # test failures. capture_output swallows the error.
+        subprocess.run(["docker", "network", "rm", name], capture_output=True)
+
+
+@pytest.fixture(scope="module")
+def two_dockerized_daemons_in_shared_network(
+    docker_flavor, linux_test_modules_dir, shared_docker_network,
+) -> Iterator[list[LogoscoreDockerDaemon]]:
+    """Spin up two daemon containers attached to the same docker network."""
+    _require_docker_and_image(docker_flavor)
+    daemons: list[LogoscoreDockerDaemon] = []
+    try:
+        for label in ("alpha", "beta"):
+            d = LogoscoreDockerDaemon(
+                image=_docker_image_for(docker_flavor),
+                modules_dir=linux_test_modules_dir,
+                container_name=f"logoscore-net-{docker_flavor}-{label}",
+                network=shared_docker_network,
+            )
+            d.start()
+            daemons.append(d)
+        yield daemons
+    finally:
+        for d in daemons:
+            d.stop()
+
+
+def test_two_daemons_share_docker_network(
+    two_dockerized_daemons_in_shared_network, shared_docker_network,
+):
+    """Both daemons appear as members of the shared docker network."""
+    a, b = two_dockerized_daemons_in_shared_network
+    r = subprocess.run(
+        [
+            "docker", "network", "inspect", shared_docker_network,
+            "--format", "{{json .Containers}}",
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    containers = json.loads(r.stdout)
+    member_names = {c["Name"] for c in containers.values()}
+    assert a.container_name in member_names, (
+        f"daemon alpha {a.container_name!r} not in network "
+        f"{shared_docker_network!r}; members={member_names!r}"
+    )
+    assert b.container_name in member_names, (
+        f"daemon beta {b.container_name!r} not in network "
+        f"{shared_docker_network!r}; members={member_names!r}"
+    )
+
+
+def test_daemons_can_resolve_peer_by_container_name(
+    two_dockerized_daemons_in_shared_network,
+):
+    """Daemon A can resolve daemon B's container name via docker DNS.
+    Skips when `getent` isn't in the image (minimal builds)."""
+    a, b = two_dockerized_daemons_in_shared_network
+    r = subprocess.run(
+        ["docker", "exec", a.container_name,
+         "getent", "hosts", b.container_name],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        pytest.skip(
+            f"`getent` not available in {a.container_name!r} or peer not "
+            f"resolvable; stderr={r.stderr!r}"
+        )
+    assert b.container_name in r.stdout
+
+
+def test_nonexistent_network_raises(docker_flavor, linux_test_modules_dir):
+    """Pre-flight validation: missing network surfaces as LogoscoreError
+    with a readable message, not the raw docker stderr."""
+    _require_docker_and_image(docker_flavor)
+    from logoscore.errors import LogoscoreError
+
+    fake = f"logoscore-nonexistent-{uuid.uuid4().hex[:8]}"
+    d = LogoscoreDockerDaemon(
+        image=_docker_image_for(docker_flavor),
+        modules_dir=linux_test_modules_dir,
+        network=fake,
+    )
+    with pytest.raises(LogoscoreError, match="does not exist"):
+        d.start()
+    # Defensive: if start() somehow created a container before raising,
+    # clean it up. stop() is safe on a never-started daemon.
+    d.stop()

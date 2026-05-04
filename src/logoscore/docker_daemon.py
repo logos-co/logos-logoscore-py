@@ -279,6 +279,11 @@ class LogoscoreDockerDaemon:
         # at run time without rewriting the disk config.
         verify_peer: bool = False,
         container_name: str | None = None,
+        # Name of an EXISTING docker network to attach the container to.
+        # Caller-managed: the daemon never creates or removes networks.
+        # Use to make multiple daemon containers discover each other by
+        # container name via docker's embedded DNS.
+        network: str | None = None,
         extra_module_dirs: Sequence[str] | None = None,
         extra_args: Sequence[str] | None = None,
         startup_timeout: float = 20.0,
@@ -368,6 +373,7 @@ class LogoscoreDockerDaemon:
             container_name
             or f"logoscore-{uuid.uuid4().hex[:12]}"
         )
+        self.network = network
         self._container_id: str | None = None
 
     # ── Public properties ───────────────────────────────────────────────
@@ -569,6 +575,12 @@ class LogoscoreDockerDaemon:
         cmd: list[str] = [
             "docker", "run", "-d",
             "--name", self._container_name,
+            # Attach to a caller-managed docker network so multiple
+            # daemon containers can discover each other by name via
+            # docker's embedded DNS. No-op when network is None — the
+            # splat injects nothing and `docker run` uses the default
+            # bridge, byte-equivalent to the pre-feature command.
+            *(["--network", self.network] if self.network else []),
             # Two host:container port mappings. core_service binds
             # CONTAINER_TCP_PORT inside the container; capability_module
             # binds CONTAINER_CAP_TCP_PORT. Each is forwarded to its
@@ -593,6 +605,22 @@ class LogoscoreDockerDaemon:
         for d in self.extra_module_dirs:
             cmd += ["-m", d]
         cmd += list(self.extra_args)
+
+        # Pre-flight: catch a missing network with a readable error
+        # rather than the raw `Error response from daemon: network NAME
+        # not found.` that `docker run` would emit. Same idea as the
+        # modules_dir validation in __init__ — fail fast with a hint.
+        if self.network:
+            inspect = subprocess.run(
+                ["docker", "network", "inspect", self.network],
+                capture_output=True, text=True,
+            )
+            if inspect.returncode != 0:
+                raise LogoscoreError(
+                    f"docker network {self.network!r} does not exist; "
+                    "create it before starting the daemon "
+                    f"(stderr: {inspect.stderr.strip()})"
+                )
 
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
