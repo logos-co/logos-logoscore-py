@@ -7,8 +7,8 @@ it runs `logoscore stop`, then terminates/kills the child process as a
 fallback, and removes any temp state directory it created.
 
 The isolated config dir means multiple daemons can run concurrently in
-the same test process without colliding on `~/.logoscore/daemon.json`,
-and nothing the wrapper does leaks into the developer's global state.
+the same test process without colliding on `~/.logoscore/daemon/`, and
+nothing the wrapper does leaks into the developer's global state.
 """
 from __future__ import annotations
 
@@ -39,6 +39,50 @@ class LogoscoreDaemon:
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
         startup_timeout: float = 15.0,
+        # Per-module transport list applied to BOTH `core_service` and
+        # `capability_module` — i.e. every protocol named here becomes
+        # one `--module-transport <module>=<protocol>[,k=v...]` flag
+        # per module on the daemon command line.
+        #
+        # If you want a LocalSocket listener alongside `tcp` / `tcp_ssl`,
+        # include `local` in this list explicitly: e.g.
+        # `transports=["local", "tcp"]`. Omitting this argument is
+        # different — it makes the wrapper emit no `--module-transport`
+        # flags at all, in which case the daemon falls back to its own
+        # default (a single `local` listener per well-known module).
+        # The mid-ground (`transports=["tcp"]`) deliberately drops
+        # local-socket listeners so a same-host client can't accidentally
+        # rely on a path that wouldn't exist for a remote client.
+        transports: list[str] | None = None,
+        tcp_host: str = "127.0.0.1",
+        # `tcp_port` is core_service's port. `tcp_cap_port` is
+        # capability_module's. They MUST be distinct: each module
+        # opens its own listener, and two QTcpServers can't share an
+        # address:port pair. Default 0 on both → daemon auto-allocates
+        # ephemerals via PortAllocator (always distinct). Tests that
+        # need the host to know the port up front pre-pick two free
+        # ports and pass both.
+        tcp_port: int = 0,
+        tcp_cap_port: int = 0,
+        tcp_codec: str = "json",        # "json" | "cbor"
+        tcp_ssl_host: str = "127.0.0.1",
+        tcp_ssl_port: int = 0,
+        # Same dual-port story for tcp_ssl — capability_module's
+        # tcp_ssl listener needs its own port when both are bound.
+        tcp_ssl_cap_port: int = 0,
+        tcp_ssl_codec: str = "json",    # "json" | "cbor"
+        ssl_cert: str | Path | None = None,
+        ssl_key: str | Path | None = None,
+        ssl_ca: str | Path | None = None,
+        # On-disk dial-spec value for `verify_peer` in the host
+        # client/config.json that the wrapper rewrites for tcp_ssl
+        # after startup. False (default) suits the typical test
+        # setup where ssl_cert is self-signed and wouldn't validate
+        # against any CA. Override to True with a CA-issued cert if
+        # you want the full verification path. The CLI's run-time
+        # `--no-verify-peer` flag (or `LOGOSCORE_CLIENT_NO_VERIFY_PEER`
+        # env) overrides this on a per-call basis.
+        verify_peer: bool = False,
     ) -> None:
         if isinstance(modules_dir, (str, Path)):
             self.modules_dirs: list[Path] = [Path(modules_dir)]
@@ -52,6 +96,19 @@ class LogoscoreDaemon:
         self.extra_args = list(extra_args or [])
         self.extra_env = dict(env or {})
         self.startup_timeout = startup_timeout
+        self.transports = list(transports or [])
+        self.tcp_host = tcp_host
+        self.tcp_port = tcp_port
+        self.tcp_cap_port = tcp_cap_port
+        self.tcp_codec = tcp_codec
+        self.tcp_ssl_host = tcp_ssl_host
+        self.tcp_ssl_port = tcp_ssl_port
+        self.tcp_ssl_cap_port = tcp_ssl_cap_port
+        self.tcp_ssl_codec = tcp_ssl_codec
+        self.ssl_cert = Path(ssl_cert) if ssl_cert else None
+        self.ssl_key = Path(ssl_key) if ssl_key else None
+        self.ssl_ca = Path(ssl_ca) if ssl_ca else None
+        self.verify_peer = verify_peer
 
         if config_dir is None:
             self._config_dir = Path(tempfile.mkdtemp(prefix="logoscore-"))
@@ -72,8 +129,30 @@ class LogoscoreDaemon:
         return self._config_dir
 
     @property
+    def state_file(self) -> Path:
+        # Path to the daemon's live runtime-state file. Created at boot
+        # (after transports actually bind) and removed at clean
+        # shutdown. Carries instance_id, pid, started_at, and the
+        # resolved transport endpoints (post-bind, with real ports).
+        # Persistent state (tokens.json) and operator preferences
+        # (config.json, written only on --persist-config) live in
+        # their own files.
+        return self._config_dir / "daemon" / "state.json"
+
+    @property
     def connection_file(self) -> Path:
-        return self._config_dir / "daemon.json"
+        # Backwards-compatible alias for state_file. Existing call sites
+        # use this name (it predates the config/state split); kept so
+        # downstream code doesn't have to migrate in lockstep.
+        return self.state_file
+
+    @property
+    def client_token_file(self) -> Path:
+        # Path to the daemon-emitted local-client raw-token file. The
+        # daemon writes this at boot from its in-memory raw value;
+        # subsequent CLI invocations can reuse it without going
+        # through env vars.
+        return self._config_dir / "client" / "auto.json"
 
     @property
     def pid(self) -> int | None:
@@ -88,6 +167,44 @@ class LogoscoreDaemon:
             cmd.extend(["-m", str(d)])
         if self.persistence_path is not None:
             cmd.extend(["--persistence-path", str(self.persistence_path)])
+        # Per-module transport flags. The daemon expects
+        # `--module-transport NAME=PROTOCOL[,k=v...]` (repeatable). We
+        # emit one entry per requested protocol for both well-known
+        # modules (`core_service` and `capability_module`).
+        #
+        # Crucially, each module gets its OWN port — `tcp_port` /
+        # `tcp_ssl_port` for core_service, `tcp_cap_port` /
+        # `tcp_ssl_cap_port` for capability_module. Reusing a single
+        # port across both fails the second listener's bind because
+        # QTcpServer can't share an address:port pair. Default 0
+        # makes the daemon auto-allocate distinct ephemerals.
+        port_for = {
+            ("tcp",     "core_service"):      self.tcp_port,
+            ("tcp",     "capability_module"): self.tcp_cap_port,
+            ("tcp_ssl", "core_service"):      self.tcp_ssl_port,
+            ("tcp_ssl", "capability_module"): self.tcp_ssl_cap_port,
+        }
+        for proto in self.transports:
+            for module in ("core_service", "capability_module"):
+                spec = f"{module}={proto}"
+                if proto == "tcp":
+                    spec += (f",host={self.tcp_host}"
+                             f",port={port_for[(proto, module)]}"
+                             f",codec={self.tcp_codec}")
+                elif proto == "tcp_ssl":
+                    if not (self.ssl_cert and self.ssl_key):
+                        raise LogoscoreError(
+                            "transports includes 'tcp_ssl' but "
+                            "ssl_cert/ssl_key not set"
+                        )
+                    spec += (f",host={self.tcp_ssl_host}"
+                             f",port={port_for[(proto, module)]}"
+                             f",codec={self.tcp_ssl_codec}"
+                             f",cert={self.ssl_cert}"
+                             f",key={self.ssl_key}")
+                    if self.ssl_ca:
+                        spec += f",ca={self.ssl_ca}"
+                cmd.extend(["--module-transport", spec])
         cmd.extend(self.extra_args)
 
         env = os.environ.copy()
@@ -147,7 +264,16 @@ class LogoscoreDaemon:
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
 
-    def client(self, *, timeout: float | None = 30.0) -> LogoscoreClient:
+    def client(
+        self,
+        *,
+        timeout: float | None = 30.0,
+        transport: str | None = None,
+        tcp_host: str | None = None,
+        tcp_port: int | None = None,
+        no_verify_peer: bool = False,
+        codec: str | None = None,
+    ) -> LogoscoreClient:
         if self._process is None:
             raise LogoscoreError(
                 "daemon is not running — call start() or use the context manager"
@@ -157,6 +283,11 @@ class LogoscoreDaemon:
             config_dir=self._config_dir,
             token=self._read_token(),
             timeout=timeout,
+            transport=transport,
+            tcp_host=tcp_host,
+            tcp_port=tcp_port,
+            no_verify_peer=no_verify_peer,
+            codec=codec,
         )
 
     def logs(self) -> tuple[str, str]:
@@ -180,7 +311,12 @@ class LogoscoreDaemon:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _read_token(self) -> str | None:
-        path = self.connection_file
+        # Tokens live in <configDir>/client/auto.json (the
+        # daemon-emitted local-client raw token). The hashed-at-rest
+        # token list is in <configDir>/daemon/tokens.json — that file
+        # is what the daemon validates against, but the raw token
+        # we use for client RPC comes from client/auto.json.
+        path = self.client_token_file
         if not path.exists():
             return None
         try:
@@ -190,11 +326,11 @@ class LogoscoreDaemon:
 
     def _wait_for_ready(self) -> None:
         deadline = time.monotonic() + self.startup_timeout
-        conn = self.connection_file
+        conn = self.state_file
         proc = self._process
         assert proc is not None
 
-        # Phase 1: wait for daemon.json to exist.
+        # Phase 1: wait for daemon/state.json to exist.
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 _, err = self.logs()
@@ -206,9 +342,35 @@ class LogoscoreDaemon:
                 break
             time.sleep(0.05)
         else:
-            raise LogoscoreError(
-                f"daemon did not write {conn} within {self.startup_timeout}s"
-            )
+            # Process is still alive but state.json never appeared.
+            # Surface whatever it logged so the diagnostic is more
+            # useful than "did not write" — silent hangs almost
+            # always have *something* on stdout (the daemon's normal
+            # progress messages) or stderr (qDebug/qWarning) that
+            # explains why bind / token / module load got stuck.
+            out, err = self.logs()
+            out_tail = out.strip().splitlines()[-50:] if out.strip() else []
+            err_tail = err.strip().splitlines()[-50:] if err.strip() else []
+            sections = [
+                f"daemon did not write {conn} within {self.startup_timeout}s",
+            ]
+            if out_tail:
+                sections.append(
+                    f"--- daemon stdout (last {len(out_tail)} lines) ---\n"
+                    + "\n".join(out_tail))
+            if err_tail:
+                sections.append(
+                    f"--- daemon stderr (last {len(err_tail)} lines) ---\n"
+                    + "\n".join(err_tail))
+            raise LogoscoreError("\n".join(sections))
+
+        # Phase 1.5: rewrite client/config.json from state.json. The
+        # daemon's auto-emitted config always advertises LocalSocket
+        # for the same-host client; for `tcp` / `tcp_ssl` runs the
+        # daemon binds different transports and the LocalSocket entry
+        # is wrong. We patch in the actual resolved per-module
+        # endpoints before the next phase tries to call `status`.
+        self._rewrite_client_config_from_state()
 
         # Phase 2: verify we can talk to it via `status`.
         remaining = max(1.0, deadline - time.monotonic())
@@ -221,3 +383,75 @@ class LogoscoreDaemon:
             )
         except LogoscoreError as e:
             raise LogoscoreError(f"daemon status check failed: {e}") from e
+
+    def _rewrite_client_config_from_state(self) -> None:
+        """For `tcp` / `tcp_ssl` runs, replace the daemon's auto-emitted
+        `client/config.json` (which only knows about LocalSocket) with
+        per-module entries pointing at the actually-bound network
+        endpoints from `state.json`.
+
+        No-op for `local` (the auto-emit already matches reality) and
+        when the wrapper isn't configuring transports at all (the
+        daemon defaults to LocalSocket-only for the well-knowns)."""
+        if not self.transports or self.transports == ["local"]:
+            return  # daemon's auto-emit is already correct
+
+        # Pick the first non-local protocol the wrapper requested.
+        # Tests pass exactly one of {tcp, tcp_ssl}; if a future caller
+        # passes ["local", "tcp"] we still surface the network listener
+        # in client/config.json so the tcp path is reachable.
+        target_proto: str | None = None
+        for p in self.transports:
+            if p in ("tcp", "tcp_ssl"):
+                target_proto = p
+                break
+        if target_proto is None:
+            return
+
+        try:
+            state = json.loads(self.state_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            raise LogoscoreError(
+                f"daemon state.json unreadable: {e}"
+            ) from e
+
+        modules = state.get("resolved", {}).get("modules", {})
+        daemon_block: dict = {}
+        for module_name in ("core_service", "capability_module"):
+            transports = modules.get(module_name, {}).get("transports", [])
+            match = next(
+                (t for t in transports if t.get("protocol") == target_proto),
+                None,
+            )
+            if match is None:
+                raise LogoscoreError(
+                    f"daemon state.json doesn't advertise '{target_proto}' "
+                    f"for module '{module_name}' — wrapper transports "
+                    f"setup is out of sync with the running daemon"
+                )
+
+            entry: dict = {"transport": target_proto}
+            host = match.get("host", "127.0.0.1")
+            # Daemons that bind 0.0.0.0 are reachable via 127.0.0.1
+            # for same-host clients. Any host-side dial that goes
+            # through the bind address would refuse on platforms
+            # that don't auto-route 0.0.0.0 → loopback.
+            entry["host"] = "127.0.0.1" if host == "0.0.0.0" else host
+            entry["port"] = match.get("port", 0)
+            entry["codec"] = match.get("codec", "json")
+            if target_proto == "tcp_ssl":
+                entry["verify_peer"] = self.verify_peer
+            daemon_block[module_name] = entry
+
+        cfg_path = self._config_dir / "client" / "config.json"
+        existing: dict = {}
+        if cfg_path.exists():
+            try:
+                existing = json.loads(cfg_path.read_text())
+            except json.JSONDecodeError:
+                existing = {}
+        existing["version"] = 2
+        existing.setdefault("token_file", "auto.json")
+        existing["daemon"] = daemon_block
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(existing, indent=4) + "\n")
