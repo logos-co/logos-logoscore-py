@@ -120,6 +120,40 @@ finally:
     subprocess.run(["docker", "network", "rm", "my-net"])
 ```
 
+## Connect to an already-running daemon
+
+If a `logoscore` daemon is already running on the host (started with
+`logoscore -D` from a shell, by a service manager, by another tool,
+etc.), drop in a `LogoscoreClient` directly — no `LogoscoreDaemon`
+needed.
+
+```python
+from logoscore import LogoscoreClient
+
+# Daemon at the default ~/.logoscore — no args.
+client = LogoscoreClient()
+print(client.status())
+client.load_module("chat")
+
+# Call a Q_INVOKABLE method on a loaded module.
+result = client.call("chat", "send_message", "hello world")
+print(result)
+
+# Daemon launched with --config-dir /custom/path.
+client = LogoscoreClient(config_dir="/custom/path")
+```
+
+Every method spawns a `logoscore <subcommand> --json` subprocess and
+parses its output. The wrapper only sets `LOGOSCORE_CONFIG_DIR` on
+that subprocess; the CLI reads `<config_dir>/client/config.json` for
+the daemon endpoint and `<config_dir>/client/auto.json` for the
+local-client token (both auto-emitted by the daemon at boot), so you
+don't have to pass a token explicitly for a same-host, same-user daemon.
+
+Cross-host or different-user setups need the [Tokens](#tokens) flow
+plus `transport=` / `tcp_host=` / `tcp_port=` matching whatever the
+daemon bound — see [Transports](#transports).
+
 ## Transports
 
 By default the daemon listens on a local Unix socket and the client
