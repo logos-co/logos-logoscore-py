@@ -527,16 +527,16 @@ class LogoscoreDockerDaemon:
         # Per-module transport flags. The daemon takes
         # `--module-transport NAME=PROTOCOL[,k=v...]` and uses each
         # module's set independently — there's no implicit
-        # core_service/capability_module inheritance any more. We
-        # configure both modules explicitly with a `local` listener
-        # plus one network listener, and pin distinct container ports
-        # so the host-side `-p` mappings stay deterministic.
+        # core_service/capability_module inheritance any more. We pin
+        # one network listener per module plus distinct container
+        # ports so the host-side `-p` mappings stay deterministic.
         #
         # core_service rides CONTAINER_TCP_PORT, capability_module
-        # rides CONTAINER_CAP_TCP_PORT. The `local` listener satisfies
-        # in-process module-to-module traffic (module-host spawns
-        # inherit the daemon's transport config; if tcp_ssl were the
-        # only option, they'd try to bind TLS with no cert and abort).
+        # rides CONTAINER_CAP_TCP_PORT. The daemon implicitly adds a
+        # LocalSocket listener to every configured module (see
+        # `logoscore-cli/docs/spec.md` "Local is always present"), so
+        # in-process module-to-module traffic uses the local socket
+        # without any explicit flag here.
         if self.transport == "tcp":
             # `--insecure-tcp` is the daemon's explicit opt-in for
             # binding plaintext tcp on a non-loopback host. The whole
@@ -546,21 +546,17 @@ class LogoscoreDockerDaemon:
             # tcp_ssl below doesn't trip the guard — SSL is exactly
             # the production-shaped alternative the guard recommends.
             transport_flags = [
-                "--module-transport", "core_service=local",
                 "--module-transport",
                 f"core_service=tcp,host=0.0.0.0,port={CONTAINER_TCP_PORT},codec={self.codec}",
-                "--module-transport", "capability_module=local",
                 "--module-transport",
                 f"capability_module=tcp,host=0.0.0.0,port={CONTAINER_CAP_TCP_PORT},codec={self.codec}",
                 "--insecure-tcp",
             ]
         else:  # tcp_ssl
             transport_flags = [
-                "--module-transport", "core_service=local",
                 "--module-transport",
                 f"core_service=tcp_ssl,host=0.0.0.0,port={CONTAINER_TCP_PORT}"
                 f",codec={self.codec},cert=/certs/cert.pem,key=/certs/key.pem",
-                "--module-transport", "capability_module=local",
                 "--module-transport",
                 f"capability_module=tcp_ssl,host=0.0.0.0,port={CONTAINER_CAP_TCP_PORT}"
                 f",codec={self.codec},cert=/certs/cert.pem,key=/certs/key.pem",

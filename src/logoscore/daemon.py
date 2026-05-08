@@ -44,15 +44,16 @@ class LogoscoreDaemon:
         # one `--module-transport <module>=<protocol>[,k=v...]` flag
         # per module on the daemon command line.
         #
-        # If you want a LocalSocket listener alongside `tcp` / `tcp_ssl`,
-        # include `local` in this list explicitly: e.g.
-        # `transports=["local", "tcp"]`. Omitting this argument is
-        # different — it makes the wrapper emit no `--module-transport`
-        # flags at all, in which case the daemon falls back to its own
-        # default (a single `local` listener per well-known module).
-        # The mid-ground (`transports=["tcp"]`) deliberately drops
-        # local-socket listeners so a same-host client can't accidentally
-        # rely on a path that wouldn't exist for a remote client.
+        # The daemon ALWAYS adds an implicit LocalSocket listener for
+        # each module regardless of what's in this list — so
+        # `transports=["tcp"]` actually binds `[local, tcp]` per
+        # module, and a same-host client can still dial via
+        # LocalSocket. The list controls what *additional*
+        # outside-facing listeners get bound. Naming `local` here is
+        # a no-op (idempotent with the implicit one). Omitting this
+        # argument entirely emits no `--module-transport` flags and
+        # the daemon's default (a single `local` listener per
+        # well-known module) applies.
         transports: list[str] | None = None,
         tcp_host: str = "127.0.0.1",
         # `tcp_port` is core_service's port. `tcp_cap_port` is

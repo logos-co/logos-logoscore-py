@@ -252,9 +252,10 @@ with LogoscoreDockerDaemon(
 
 The helper bind-mounts the two PEM files as individual files into
 `/certs/cert.pem` and `/certs/key.pem` (so they can live in different
-host dirs) and flags the daemon with `--transport=local --transport=tcp_ssl
---tcp-ssl-port=<internal> --ssl-cert=... --ssl-key=...`. `local` is kept
-alongside `tcp_ssl` so module-to-module traffic inside the daemon process
-group still uses the local socket; without it, spawned module-host
-processes would inherit the tcp_ssl default and abort with "TLS bind
-failed" (they have no cert to bind with).
+host dirs) and flags the daemon with `--transport=tcp_ssl
+--tcp-ssl-port=<internal> --ssl-cert=... --ssl-key=...`. The daemon
+itself always binds an additional LocalSocket listener for each module
+on top of whatever the operator named, so module-to-module traffic
+inside the daemon process group still uses the local socket — no
+explicit `local` flag needed (and module-host subprocesses don't try
+to bind a TLS listener with no cert).
