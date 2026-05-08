@@ -39,11 +39,44 @@ class LogoscoreClient:
         config_dir: Path | None = None,
         token: str | None = None,
         timeout: float | None = 30.0,
+        transport: str | None = None,
+        tcp_host: str | None = None,
+        tcp_port: int | None = None,
+        no_verify_peer: bool = False,
+        codec: str | None = None,
     ) -> None:
         self.binary = binary
         self.config_dir = Path(config_dir) if config_dir is not None else None
         self.token = token
         self.timeout = timeout
+        self.transport = transport
+        self.tcp_host = tcp_host
+        # `tcp_port` overrides the daemon-advertised port. Needed when
+        # the reachable port differs from the one the daemon bound —
+        # e.g. a docker `-p 8080:6000` maps host 8080 to container
+        # 6000, or an SSH tunnel forwards through a different port.
+        self.tcp_port = tcp_port
+        self.no_verify_peer = no_verify_peer
+        # Optional pin of the wire codec. When set, the client insists the
+        # picked transport uses this codec — mismatch aborts connect. When
+        # unset, the client accepts whatever the daemon advertised.
+        self.codec = codec
+
+    def _env_overrides(self) -> dict[str, str] | None:
+        """Env vars the CLI reads to pick a client-side transport. Kept out
+        of the public API — the user sees kwargs, the CLI sees env vars."""
+        out: dict[str, str] = {}
+        if self.transport:
+            out["LOGOSCORE_CLIENT_TRANSPORT"] = self.transport
+        if self.tcp_host:
+            out["LOGOSCORE_CLIENT_TCP_HOST"] = self.tcp_host
+        if self.tcp_port is not None:
+            out["LOGOSCORE_CLIENT_TCP_PORT"] = str(self.tcp_port)
+        if self.no_verify_peer:
+            out["LOGOSCORE_CLIENT_NO_VERIFY_PEER"] = "1"
+        if self.codec:
+            out["LOGOSCORE_CLIENT_CODEC"] = self.codec
+        return out or None
 
     # ── Daemon-wide commands ────────────────────────────────────────────────
 
@@ -51,12 +84,14 @@ class LogoscoreClient:
         return _proc.run_json(
             self.binary, ["status"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     def stats(self) -> Any:
         return _proc.run_json(
             self.binary, ["stats"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     def stop(self) -> None:
@@ -64,6 +99,7 @@ class LogoscoreClient:
         _proc.run_json(
             self.binary, ["stop"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     # ── Module management ───────────────────────────────────────────────────
@@ -75,6 +111,7 @@ class LogoscoreClient:
         result = _proc.run_json(
             self.binary, args,
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
         return result if isinstance(result, list) else []
 
@@ -82,24 +119,28 @@ class LogoscoreClient:
         return _proc.run_json(
             self.binary, ["module-info", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     def load_module(self, name: str) -> dict:
         return _proc.run_json(
             self.binary, ["load-module", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     def unload_module(self, name: str) -> dict:
         return _proc.run_json(
             self.binary, ["unload-module", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     def reload_module(self, name: str) -> dict:
         return _proc.run_json(
             self.binary, ["reload-module", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
+            env=self._env_overrides(),
         )
 
     # ── Method calls ────────────────────────────────────────────────────────
@@ -121,6 +162,7 @@ class LogoscoreClient:
             self.binary, cli_args,
             config_dir=self.config_dir, token=self.token,
             timeout=timeout if timeout is not None else self.timeout,
+            env=self._env_overrides(),
         )
         # On success, the CLI prints {"status":"success", "result": ...} — but
         # non-success paths are already raised by run_json (exit code 3 or 4).
@@ -158,6 +200,7 @@ class LogoscoreClient:
             token=self.token,
             callback=callback,
             error_callback=error_callback,
+            extra_env=self._env_overrides(),
         )
 
     # ── Internal ────────────────────────────────────────────────────────────
