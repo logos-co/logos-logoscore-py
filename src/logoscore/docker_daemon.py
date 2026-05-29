@@ -649,8 +649,14 @@ class LogoscoreDockerDaemon:
         # copied out of the daemon's /config/daemon/tokens). The
         # `client(...)` factory below points the LogoscoreClient at
         # `host_client_dir` so it reads from this host-owned tree
-        # instead of the container-owned bind-mount.
-        self._build_host_client_config()
+        # instead of the container-owned bind-mount. Tear the container
+        # down if seeding fails (e.g. the auto token never showed up) so
+        # a failed start() doesn't leak a running container.
+        try:
+            self._build_host_client_config()
+        except Exception:
+            self.stop()
+            raise
 
         return self
 
@@ -672,6 +678,11 @@ class LogoscoreDockerDaemon:
 
         `verify` is only serialized for `tcp_ssl` (DaemonEndpoint drops it
         for plain tcp)."""
+        if self._host_port is None or self._host_cap_port is None:
+            raise LogoscoreError(
+                "forwarded host ports not assigned — call start() first "
+                "(both core_service and capability_module need a port)"
+            )
         transport_kind = "tcp_ssl" if self.transport == "tcp_ssl" else "tcp"
         return {
             "core_service": DaemonEndpoint(
@@ -700,18 +711,40 @@ class LogoscoreDockerDaemon:
         endpoints = self._client_endpoints(
             "localhost", self.codec, self.verify_peer)
 
-        # The token file is `{"token": "..."}`; pull the raw token so
-        # write_config can re-emit it (defensive in case the shape drifts).
-        token_text = self.read_container_file("/config/daemon/tokens/auto.json")
-        raw_token: str | None = None
-        if token_text is not None:
-            try:
-                raw_token = json.loads(token_text).get("token")
-            except (json.JSONDecodeError, AttributeError):
-                raw_token = None
+        # The daemon emits daemon/tokens/auto.json at boot; it can lag
+        # state.json slightly, so poll for it. The file is `{"token":
+        # "..."}` — pull the raw token so write_config can re-emit it.
+        # Fail fast if it never shows up or can't be parsed: a config.json
+        # that references a missing token file surfaces later as an opaque
+        # auth error.
+        raw_token = self._wait_for_auto_token()
+        if not raw_token:
+            raise LogoscoreError(
+                "daemon did not emit a readable auto token at "
+                "/config/daemon/tokens/auto.json within "
+                f"{self.startup_timeout}s — cannot wire up an authenticated "
+                "client"
+            )
 
         LogoscoreClient.write_config(
             self._host_client_dir, endpoints, token=raw_token)
+
+    def _wait_for_auto_token(self) -> str | None:
+        """Poll the container for daemon/tokens/auto.json and return the
+        raw token string, or None if it never appears / can't be parsed
+        within `startup_timeout`."""
+        deadline = time.monotonic() + self.startup_timeout
+        while time.monotonic() < deadline:
+            text = self.read_container_file("/config/daemon/tokens/auto.json")
+            if text is not None:
+                try:
+                    token = json.loads(text).get("token")
+                except (json.JSONDecodeError, AttributeError):
+                    token = None
+                if token:
+                    return token
+            time.sleep(0.1)
+        return None
 
     def stop(self) -> None:
         """Kill the container. Idempotent; safe to call even if start()

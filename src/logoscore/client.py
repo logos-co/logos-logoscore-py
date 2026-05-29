@@ -123,9 +123,10 @@ class LogoscoreClient:
         (see `connect`) all funnel through here.
 
         `token`, when given, is the RAW token string; it's wrapped as
-        `{"token": token}` and written to `<config_dir>/client/auto.json`
-        (referenced from config.json via `token_file`). Omit it when the
-        token file already exists (e.g. a daemon emitted it).
+        `{"token": token}` and written to the file named by `token_file`
+        (default `auto.json`) under `<config_dir>/client/`, so the token
+        always lands where config.json points. Omit it when the token
+        file already exists (e.g. a daemon emitted it).
 
         `instance_id`, when not None (including ""), is recorded in
         config.json. `merge=True` preserves any pre-existing keys in
@@ -144,6 +145,15 @@ class LogoscoreClient:
                 cfg = {}
         cfg["version"] = 2
         cfg.setdefault("token_file", "auto.json")
+        if token is not None:
+            # The token must land where config.json points. A merged
+            # config may carry a custom `token_file`; honor it, but only
+            # if it's a plain filename directly under client/ (no abs
+            # path, no traversal) — otherwise fall back to auto.json.
+            token_file = cfg["token_file"]
+            if Path(token_file).name != token_file or Path(token_file).is_absolute():
+                token_file = "auto.json"
+                cfg["token_file"] = token_file
         if instance_id is not None:
             cfg["instance_id"] = instance_id
         cfg["daemon"] = {
@@ -152,7 +162,7 @@ class LogoscoreClient:
         cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
 
         if token is not None:
-            (client_dir / "auto.json").write_text(
+            (client_dir / cfg["token_file"]).write_text(
                 json.dumps({"token": token}, indent=4) + "\n")
 
     @classmethod

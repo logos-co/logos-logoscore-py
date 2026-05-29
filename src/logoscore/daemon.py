@@ -433,13 +433,17 @@ class LogoscoreDaemon:
                 continue
             if transport is not None:
                 entry["transport"] = transport
-            # host/codec are meaningless for a local socket — the CLI
-            # ignores them there (see transportToJson in the CLI).
-            if entry.get("transport") != "local":
-                if tcp_host is not None:
-                    entry["host"] = tcp_host
-                if codec is not None:
-                    entry["codec"] = codec
+            if entry.get("transport") == "local":
+                # Local sockets carry no network fields — drop any stale
+                # ones so the entry matches the minimal local shape and
+                # doesn't leave a misleading host/port/codec behind.
+                for k in ("host", "port", "codec", "ca", "verify_peer"):
+                    entry.pop(k, None)
+                continue
+            if tcp_host is not None:
+                entry["host"] = tcp_host
+            if codec is not None:
+                entry["codec"] = codec
             if no_verify_peer and entry.get("transport") == "tcp_ssl":
                 entry["verify_peer"] = False
         cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")

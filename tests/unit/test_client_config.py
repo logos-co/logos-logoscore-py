@@ -10,6 +10,7 @@ binary or docker.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -482,3 +483,101 @@ def test_daemon_client_rejects_tcp_port_kwarg(tmp_path: Path):
     # tcp_port is gone: it could only clobber capability_module's port.
     with pytest.raises(TypeError):
         d.client(tcp_port=6000)
+
+
+def test_daemon_client_transport_to_local_strips_network_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    _Recorder(monkeypatch)
+    d = _fake_local_daemon(tmp_path, {
+        "core_service": {"transport": "tcp", "host": "127.0.0.1",
+                         "port": 6000, "codec": "json"},
+        "capability_module": {"transport": "tcp", "host": "127.0.0.1",
+                              "port": 6001, "codec": "json"},
+    })
+    d.client(transport="local")
+    daemon = json.loads(
+        (tmp_path / "client" / "config.json").read_text())["daemon"]
+    # Stale host/port/codec dropped — minimal local shape.
+    assert daemon["core_service"] == {"transport": "local"}
+    assert daemon["capability_module"] == {"transport": "local"}
+
+
+# ── write_config: token_file consistency (merge) ─────────────────────────────
+
+
+def test_write_config_token_honors_existing_token_file(tmp_path: Path):
+    # A merged config with a custom token_file must get the token written
+    # to THAT file, not a hardcoded auto.json — else config + token diverge.
+    client_dir = tmp_path / "client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "config.json").write_text(_dumped({
+        "version": 2, "token_file": "custom.json",
+        "daemon": {"core_service": {"transport": "local"}},
+    }))
+    LogoscoreClient.write_config(
+        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
+        token="tok", merge=True)
+
+    cfg = json.loads((client_dir / "config.json").read_text())
+    assert cfg["token_file"] == "custom.json"
+    assert json.loads((client_dir / "custom.json").read_text()) == {"token": "tok"}
+    assert not (client_dir / "auto.json").exists()
+
+
+@pytest.mark.parametrize("bad", ["../evil.json", "sub/dir.json", "/abs.json"])
+def test_write_config_token_file_traversal_falls_back(tmp_path: Path, bad: str):
+    client_dir = tmp_path / "client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "config.json").write_text(_dumped({
+        "version": 2, "token_file": bad,
+        "daemon": {"core_service": {"transport": "local"}},
+    }))
+    LogoscoreClient.write_config(
+        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
+        token="tok", merge=True)
+
+    cfg = json.loads((client_dir / "config.json").read_text())
+    # Unsafe token_file is rejected → falls back to auto.json.
+    assert cfg["token_file"] == "auto.json"
+    assert json.loads((client_dir / "auto.json").read_text()) == {"token": "tok"}
+
+
+# ── docker daemon: fail-fast guards ──────────────────────────────────────────
+
+
+def test_client_endpoints_raises_before_start(tmp_path: Path):
+    from logoscore import LogoscoreDockerDaemon, LogoscoreError
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
+    # Ports are assigned in start(); building endpoints before that must
+    # fail loudly rather than emit a portless config.
+    with pytest.raises(LogoscoreError):
+        d._client_endpoints("localhost", "json", None)
+
+
+def test_build_host_client_config_raises_when_token_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from logoscore import LogoscoreDockerDaemon, LogoscoreError
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    d = LogoscoreDockerDaemon(image="img", modules_dir=mods, startup_timeout=0.1)
+    try:
+        d._container_id = "fake"
+        d._host_port = 7000
+        d._host_cap_port = 7001
+        # Token never readable → fail fast instead of writing a config that
+        # references a missing auto.json.
+        monkeypatch.setattr(d, "read_container_file", lambda _p: None)
+        with pytest.raises(LogoscoreError):
+            d._build_host_client_config()
+    finally:
+        d._container_id = None
+        # _host_client_dir is a real tmpdir; clean it up.
+        shutil.rmtree(d._host_client_dir, ignore_errors=True)
+        shutil.rmtree(d._config_dir, ignore_errors=True)
+        shutil.rmtree(d._persistence_dir, ignore_errors=True)
