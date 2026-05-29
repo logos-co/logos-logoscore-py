@@ -71,17 +71,21 @@ with LogoscoreDockerDaemon(
 
 What the helper handles for you:
 
-- Picks a free host TCP port; the container always binds `6000` internally
-  and is reached via `-p $host_port:6000`. Same pattern as
+- Picks a free host TCP port per module; the container binds `6000`
+  (`core_service`) and `6001` (`capability_module`) internally, reached
+  via `-p $host_core:6000 -p $host_cap:6001`. Same pattern as
   [status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
 - Bind-mounts three host dirs into the container:
   `/config` (daemon writes `state.json`), `/persistence`
   (`--persistence-path`; pre-seed for session restore, inspect after),
   `/user-modules` (your compiled Qt plugins, read-only).
 - Waits for `state.json` to appear before returning.
-- Returns a `LogoscoreClient` preconfigured with the host port override
-  (`LOGOSCORE_CLIENT_TCP_PORT`) so it dials the external endpoint rather
-  than the one the daemon wrote into its connection file.
+- Returns a `LogoscoreClient` whose `client/config.json` carries both
+  modules' distinct forwarded host ports (written via
+  `LogoscoreClient.write_config`), so it dials the external endpoints —
+  not what the daemon wrote into its own connection file. Each module
+  needs its own port, so this is config-file-driven rather than relying
+  on the single-endpoint `LOGOSCORE_CLIENT_TCP_PORT` override.
 
 Building the image: the logoscore CLI repo produces a reusable base
 image via
@@ -150,9 +154,61 @@ the daemon endpoint and `<config_dir>/client/auto.json` for the
 local-client token (both auto-emitted by the daemon at boot), so you
 don't have to pass a token explicitly for a same-host, same-user daemon.
 
-Cross-host or different-user setups need the [Tokens](#tokens) flow
-plus `transport=` / `tcp_host=` / `tcp_port=` matching whatever the
-daemon bound — see [Transports](#transports).
+Cross-host or different-user setups need the [Tokens](#tokens) flow. For
+a daemon on **another host** — or any daemon whose two well-known modules
+(`core_service` and `capability_module`) bound **different ports** — the
+single `transport=` / `tcp_host=` / `tcp_port=` overrides aren't enough
+(they describe one endpoint). Use `LogoscoreClient.connect(...)` instead:
+see [Connect to a daemon on a remote host](#connect-to-a-daemon-on-a-remote-host).
+
+## Connect to a daemon on a remote host
+
+`LogoscoreClient.connect(...)` builds a client from explicit per-module
+endpoints, so you can reach a daemon that isn't on `localhost` (or whose
+`core_service` / `capability_module` bound separate ports — two
+`QTcpServer`s can't share an address:port). Each `DaemonEndpoint` is one
+module's dial spec; pass the raw token the daemon issued for this client
+(see [Tokens](#tokens)).
+
+```python
+from logoscore import LogoscoreClient, DaemonEndpoint
+
+client = LogoscoreClient.connect(
+    {
+        "core_service":      DaemonEndpoint(transport="tcp", host="daemon.example.com", port=6000),
+        "capability_module": DaemonEndpoint(transport="tcp", host="daemon.example.com", port=6001),
+    },
+    token="<raw-token-issued-for-this-client>",
+)
+print(client.status())
+client.load_module("chat")
+```
+
+`connect()` materializes a `client/config.json` (plus an `auto.json`
+holding the token) in a private temp dir that is cleaned up when the
+client is garbage-collected. Pass `config_dir=...` to write it somewhere
+you control and keep it around. Unlike the `transport=` / `tcp_*=`
+constructor kwargs, `connect()` sets **no** `LOGOSCORE_CLIENT_*` env
+overrides — the on-disk config is authoritative, which is exactly what
+lets it express two modules on two ports.
+
+For TLS, use `transport="tcp_ssl"` and set `verify_peer=` per endpoint
+(only honoured for `tcp_ssl`):
+
+```python
+client = LogoscoreClient.connect(
+    {
+        "core_service":      DaemonEndpoint("tcp_ssl", "daemon.example.com", 6000, verify_peer=True),
+        "capability_module": DaemonEndpoint("tcp_ssl", "daemon.example.com", 6001, verify_peer=True),
+    },
+    token="...",
+)
+```
+
+Need the config file without a client? `LogoscoreClient.write_config(
+config_dir, endpoints, token=...)` writes the same `client/config.json`
+into a dir you own — the lower-level primitive `connect()` (and the
+daemon helpers) are built on.
 
 ## Transports
 
@@ -169,15 +225,28 @@ with LogoscoreDaemon(
     tcp_port=6000,
     tcp_codec="json",            # or "cbor"
 ) as daemon:
-    client = daemon.client(transport="tcp", tcp_host="localhost", tcp_port=6000)
+    client = daemon.client()     # reads the per-module tcp dial spec the
+                                 # daemon wrote into client/config.json
 ```
 
-TLS (`tcp_ssl`) additionally accepts `ssl_cert` / `ssl_key` / `ssl_ca`.
-When talking to a daemon whose advertised host/port differs from the
-reachable one (NAT, port-forwarding, SSH tunnels), use
-`tcp_host` / `tcp_port` on the **client** as overrides — the client
-will dial the overridden endpoint instead of what `state.json` says.
-That's exactly how `LogoscoreDockerDaemon` bridges the container boundary.
+`daemon.client()` needs no transport args: on startup the daemon writes a
+`client/config.json` with the actual per-module endpoints (`core_service`
+and `capability_module` each on their own bound port), and the client
+dials from that. TLS (`tcp_ssl`) additionally accepts `ssl_cert` /
+`ssl_key` / `ssl_ca`.
+
+`client(transport=, tcp_host=, codec=, no_verify_peer=)` accepts uniform
+overrides (host/transport/codec/verify are shared by both modules); they're
+merged **into** the per-module `client/config.json` on disk, each module's
+own port left intact — never via `LOGOSCORE_CLIENT_*` env vars. There is
+deliberately **no per-call port override**: the CLI applies a single port
+to every module uniformly, which would clobber `capability_module` onto
+`core_service`'s port. So to reach a daemon whose modules sit on different
+ports at a host you specify (the general remote case, including a remote
+host), use [`LogoscoreClient.connect(...)`](#connect-to-a-daemon-on-a-remote-host),
+which writes a full per-module config. That's how `LogoscoreDockerDaemon`
+bridges the container boundary: it forwards each module to its own host
+port and hands back a client wired to a per-module `client/config.json`.
 
 ## Tokens
 
@@ -257,8 +326,11 @@ Also exported: `docker_available()`, `image_present(image)`,
 
 ### `LogoscoreClient`
 
-Obtained via `daemon.client(...)`. Every method returns parsed JSON (dict
-or list) on success and raises on failure:
+Obtained via `daemon.client(...)`, `LogoscoreClient.connect(endpoints,
+token=...)` (a remote daemon — see
+[Connect to a daemon on a remote host](#connect-to-a-daemon-on-a-remote-host)),
+or constructed directly for a same-host daemon. Every method returns
+parsed JSON (dict or list) on success and raises on failure:
 
 | Method | CLI equivalent |
 |---|---|

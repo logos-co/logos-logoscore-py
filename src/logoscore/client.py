@@ -7,12 +7,53 @@ file, not the user's global `~/.logoscore/`.
 """
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
+import weakref
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import _proc
 from .errors import MethodError
 from .events import Subscription
+
+
+@dataclass(frozen=True)
+class DaemonEndpoint:
+    """One well-known module's dial spec for a logoscore daemon.
+
+    Serialized into a single entry of the `daemon` block of
+    `<config_dir>/client/config.json` (schema version 2). A daemon serves
+    each well-known module (`core_service`, `capability_module`) on its
+    own listener, so a full connection needs one `DaemonEndpoint` per
+    module — which is exactly what the single-endpoint `LOGOSCORE_CLIENT_*`
+    env overrides cannot express.
+
+    `verify_peer` is only emitted for `tcp_ssl` transports; leave it None
+    to omit it (the typical case for plain `tcp`).
+    """
+
+    transport: str               # "tcp" | "tcp_ssl" | "local"
+    host: str | None = None
+    port: int | None = None
+    codec: str = "json"
+    verify_peer: bool | None = None
+
+    def _to_config_block(self) -> dict:
+        # Built explicitly (not dataclasses.asdict) so key order and the
+        # tcp_ssl-only `verify_peer` match what the daemon helpers wrote
+        # by hand before this was centralized — see write_config.
+        block: dict = {"transport": self.transport}
+        if self.host is not None:
+            block["host"] = self.host
+        if self.port is not None:
+            block["port"] = self.port
+        block["codec"] = self.codec
+        if self.transport == "tcp_ssl" and self.verify_peer is not None:
+            block["verify_peer"] = self.verify_peer
+        return block
 
 
 def _arg_to_str(arg: Any) -> str:
@@ -61,6 +102,112 @@ class LogoscoreClient:
         # picked transport uses this codec — mismatch aborts connect. When
         # unset, the client accepts whatever the daemon advertised.
         self.codec = codec
+
+    # ── Construction helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def write_config(
+        config_dir: str | Path,
+        endpoints: Mapping[str, DaemonEndpoint],
+        *,
+        token: str | None = None,
+        instance_id: str | None = None,
+        merge: bool = False,
+    ) -> None:
+        """Write a `<config_dir>/client/config.json` dial spec (schema
+        version 2) with one entry per well-known module, so the CLI can
+        reach a daemon whose modules live on distinct listeners.
+
+        This is the single source of truth for the on-disk client config —
+        `LogoscoreDaemon`, `LogoscoreDockerDaemon`, and standalone callers
+        (see `connect`) all funnel through here.
+
+        `token`, when given, is the RAW token string; it's wrapped as
+        `{"token": token}` and written to the file named by `token_file`
+        (default `auto.json`) under `<config_dir>/client/`, so the token
+        always lands where config.json points. Omit it when the token
+        file already exists (e.g. a daemon emitted it).
+
+        `instance_id`, when not None (including ""), is recorded in
+        config.json. `merge=True` preserves any pre-existing keys in
+        config.json instead of rebuilding it from scratch — used by the
+        local daemon, which patches the daemon's auto-emitted file.
+        """
+        client_dir = Path(config_dir) / "client"
+        client_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = client_dir / "config.json"
+
+        cfg: dict = {}
+        if merge and cfg_path.exists():
+            try:
+                cfg = json.loads(cfg_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                cfg = {}
+        cfg["version"] = 2
+        cfg.setdefault("token_file", "auto.json")
+        if token is not None:
+            # The token must land where config.json points. A merged
+            # config may carry a custom `token_file`; honor it, but only
+            # if it's a plain filename directly under client/ (no abs
+            # path, no traversal) — otherwise fall back to auto.json.
+            token_file = cfg["token_file"]
+            if Path(token_file).name != token_file or Path(token_file).is_absolute():
+                token_file = "auto.json"
+                cfg["token_file"] = token_file
+        if instance_id is not None:
+            cfg["instance_id"] = instance_id
+        cfg["daemon"] = {
+            name: ep._to_config_block() for name, ep in endpoints.items()
+        }
+        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
+
+        if token is not None:
+            (client_dir / cfg["token_file"]).write_text(
+                json.dumps({"token": token}, indent=4) + "\n")
+
+    @classmethod
+    def connect(
+        cls,
+        endpoints: Mapping[str, DaemonEndpoint],
+        *,
+        token: str | None = None,
+        binary: str = "logoscore",
+        config_dir: str | Path | None = None,
+        timeout: float | None = 30.0,
+        instance_id: str | None = None,
+    ) -> "LogoscoreClient":
+        """Build a client that dials a (possibly remote) daemon described
+        by per-module `endpoints`.
+
+        Materializes a `client/config.json` (via `write_config`) and
+        returns a client bound to that config dir with NO env overrides —
+        the on-disk spec is authoritative. This is the only way to reach a
+        daemon whose `core_service` and `capability_module` listen on
+        different ports, which the constructor's single-endpoint
+        `transport=`/`tcp_*=` kwargs can't represent.
+
+        `token` is the raw token string the daemon issued for this client
+        (see `issue_token`). When `config_dir` is None a private temp dir
+        is created and removed when the returned client is garbage
+        collected; pass a `config_dir` to keep the config around (it is
+        never deleted).
+        """
+        owns_dir = config_dir is None
+        cfg_dir = (
+            Path(tempfile.mkdtemp(prefix="logoscore-client-"))
+            if owns_dir
+            else Path(config_dir)
+        )
+        cls.write_config(
+            cfg_dir, endpoints, token=token, instance_id=instance_id)
+        client = cls(binary=binary, config_dir=cfg_dir, timeout=timeout)
+        if owns_dir:
+            # Clean up the temp dir when the client is collected. Stored on
+            # the instance so the finalizer isn't itself collected early;
+            # never registered for a caller-supplied dir.
+            client._config_dir_finalizer = weakref.finalize(
+                client, shutil.rmtree, str(cfg_dir), True)
+        return client
 
     def _env_overrides(self) -> dict[str, str] | None:
         """Env vars the CLI reads to pick a client-side transport. Kept out

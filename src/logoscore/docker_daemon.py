@@ -29,14 +29,19 @@ bind-mounted in — they survive the container):
                     daemon via `-m /user-modules`
 
 Port strategy (status-go `tests-functional` pattern):
-    container-internal TCP port is fixed at `CONTAINER_TCP_PORT` (6000).
-    The host maps an ephemeral `host_port` to it via `-p …:6000`. The
-    client is told to dial `host_port` via `LOGOSCORE_CLIENT_TCP_PORT`
-    so the daemon-written `state.json` (which still advertises 6000)
-    doesn't mislead it.
+    container-internal TCP ports are fixed: `core_service` on
+    `CONTAINER_TCP_PORT` (6000), `capability_module` on
+    `CONTAINER_CAP_TCP_PORT` (6001). The host maps an ephemeral port to
+    each via `-p …:6000` / `-p …:6001`. The client dials those forwarded
+    host ports from a per-module `client/config.json` written by
+    `LogoscoreClient.write_config` — one entry per module, each with its
+    own port. (A single `LOGOSCORE_CLIENT_TCP_PORT` env override can't be
+    used here: the CLI applies it to every module uniformly, which would
+    collapse capability_module onto core_service's port.)
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -47,7 +52,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from .client import LogoscoreClient
+from .client import DaemonEndpoint, LogoscoreClient
 from .errors import LogoscoreError
 
 
@@ -450,13 +455,12 @@ class LogoscoreDockerDaemon:
         malformed — every call site handles these the same way
         (treat the daemon as not-yet-ready). Source of truth for
         `instance_id` and the actually-bound transport ports."""
-        import json as _json
         text = self.read_container_file("/config/daemon/state.json")
         if text is None:
             return None
         try:
-            return _json.loads(text)
-        except _json.JSONDecodeError:
+            return json.loads(text)
+        except json.JSONDecodeError:
             return None
 
     @property
@@ -645,90 +649,102 @@ class LogoscoreDockerDaemon:
         # copied out of the daemon's /config/daemon/tokens). The
         # `client(...)` factory below points the LogoscoreClient at
         # `host_client_dir` so it reads from this host-owned tree
-        # instead of the container-owned bind-mount.
-        self._build_host_client_config()
+        # instead of the container-owned bind-mount. Tear the container
+        # down if seeding fails (e.g. the auto token never showed up) so
+        # a failed start() doesn't leak a running container.
+        try:
+            self._build_host_client_config()
+        except Exception:
+            self.stop()
+            raise
 
         return self
 
+    def _client_endpoints(
+        self,
+        tcp_host: str,
+        wire_codec: str,
+        verify: bool | None,
+    ) -> dict[str, DaemonEndpoint]:
+        """Per-module dial spec for the two well-known modules.
+
+        Each module rides its OWN forwarded host port — `core_service` on
+        `host_port`, `capability_module` on `host_cap_port` — so the two
+        endpoints MUST carry distinct ports. This is the whole reason the
+        client is config-file-driven rather than env-var-driven: the CLI's
+        `LOGOSCORE_CLIENT_TCP_PORT` override is applied to every module
+        uniformly, which would collapse capability_module onto
+        core_service's port and break the SDK's auto-`requestModule` dial.
+
+        `verify` is only serialized for `tcp_ssl` (DaemonEndpoint drops it
+        for plain tcp)."""
+        if self._host_port is None or self._host_cap_port is None:
+            raise LogoscoreError(
+                "forwarded host ports not assigned — call start() first "
+                "(both core_service and capability_module need a port)"
+            )
+        transport_kind = "tcp_ssl" if self.transport == "tcp_ssl" else "tcp"
+        return {
+            "core_service": DaemonEndpoint(
+                transport_kind, tcp_host, self._host_port, wire_codec, verify),
+            "capability_module": DaemonEndpoint(
+                transport_kind, tcp_host, self._host_cap_port, wire_codec, verify),
+        }
+
     def _build_host_client_config(self) -> None:
-        """Populate the host-only client config dir with a config.json
-        that points at the host-side forwarded ports + a copy of the
-        daemon-emitted raw auto token. Called once after the daemon
-        has come up and published state.json.
+        """Seed the host-only client config dir with the daemon's raw auto
+        token (`client/auto.json`) plus a default `client/config.json`
+        pointing at the forwarded host ports. Called once after the daemon
+        comes up; `client()` rewrites config.json with the caller's dial
+        params, but the token written here is what every client reuses.
 
-        Both the source state.json (for instance_id) and the raw auto
-        token are pulled out of the container via `docker exec cat`
-        rather than read off the host bind-mount — see
-        `read_container_file` for the rationale (root-owned 0600
-        files don't widen on disk; we just pipe bytes out)."""
-        import json as _json
-
+        The raw auto token is pulled out of the container via `docker exec
+        cat` rather than read off the host bind-mount — see
+        `read_container_file` for the rationale (root-owned 0600 files
+        don't widen on disk; we just pipe bytes out)."""
         if self._container_id is None:
             return
 
-        # state.json is the source of truth for instance_id (and the
-        # resolved transport endpoints, though we override them with
-        # the host-forwarded ports below).
-        daemon_state = self.state_json()
-        if daemon_state is None:
-            return
+        # Default disk spec (localhost, constructor's verify_peer). The
+        # token is the essential artifact — config.json is a sane default
+        # that client() supersedes with the caller's tcp_host/codec/verify.
+        endpoints = self._client_endpoints(
+            "localhost", self.codec, self.verify_peer)
 
-        instance_id = daemon_state.get("instance_id", "")
+        # The daemon emits daemon/tokens/auto.json at boot; it can lag
+        # state.json slightly, so poll for it. The file is `{"token":
+        # "..."}` — pull the raw token so write_config can re-emit it.
+        # Fail fast if it never shows up or can't be parsed: a config.json
+        # that references a missing token file surfaces later as an opaque
+        # auth error.
+        raw_token = self._wait_for_auto_token()
+        if not raw_token:
+            raise LogoscoreError(
+                "daemon did not emit a readable auto token at "
+                "/config/daemon/tokens/auto.json within "
+                f"{self.startup_timeout}s — cannot wire up an authenticated "
+                "client"
+            )
 
-        # Each module dials localhost:<host_port> — the docker
-        # forwarder routes those into the container's listeners.
-        # Codec must match what the daemon actually advertised; we
-        # trust self.codec because the docker run command pinned it.
-        if self.transport == "tcp_ssl":
-            transport_kind = "tcp_ssl"
-            # Reflect the constructor's `verify_peer` setting on disk
-            # rather than hardcoding False. Callers that want to
-            # exercise the verification path can pass
-            # `verify_peer=True` (and supply a cert that actually
-            # validates against a CA); the default stays False
-            # because the typical smoke setup runs with a self-signed
-            # cert that wouldn't validate. The per-call
-            # `no_verify_peer` knob on `client()` still lets callers
-            # flip this at run time via the CLI's env-var override
-            # without rewriting the disk config.
-            extra: dict = {"verify_peer": self.verify_peer}
-        else:
-            transport_kind = "tcp"
-            extra = {}
+        LogoscoreClient.write_config(
+            self._host_client_dir, endpoints, token=raw_token)
 
-        client_cfg = {
-            "version": 2,
-            "token_file": "auto.json",
-            "instance_id": instance_id,
-            "daemon": {
-                "core_service": {
-                    "transport": transport_kind,
-                    "host":      "localhost",
-                    "port":      self._host_port,
-                    "codec":     self.codec,
-                    **extra,
-                },
-                "capability_module": {
-                    "transport": transport_kind,
-                    "host":      "localhost",
-                    "port":      self._host_cap_port,
-                    "codec":     self.codec,
-                    **extra,
-                },
-            },
-        }
-        client_dir = self._host_client_dir / "client"
-        client_dir.mkdir(parents=True, exist_ok=True)
-        (client_dir / "config.json").write_text(
-            _json.dumps(client_cfg, indent=4) + "\n")
-
-        # Pipe the auto token's content out of the container the same
-        # way we did state.json above — the bind-mounted file on
-        # disk stays mode 0600 root-owned, but we get its bytes.
-        token_text = self.read_container_file("/config/daemon/tokens/auto.json")
-        if token_text is None:
-            return
-        (client_dir / "auto.json").write_text(token_text)
+    def _wait_for_auto_token(self) -> str | None:
+        """Poll the container for daemon/tokens/auto.json and return the
+        raw token string, or None if it never appears / can't be parsed
+        within `startup_timeout`."""
+        deadline = time.monotonic() + self.startup_timeout
+        while time.monotonic() < deadline:
+            text = self.read_container_file("/config/daemon/tokens/auto.json")
+            if text is not None:
+                try:
+                    token = json.loads(text).get("token")
+                except (json.JSONDecodeError, AttributeError):
+                    token = None
+                if token:
+                    return token
+            time.sleep(0.1)
+        return None
 
     def stop(self) -> None:
         """Kill the container. Idempotent; safe to call even if start()
@@ -782,37 +798,51 @@ class LogoscoreDockerDaemon:
         to whatever `logoscore` resolves to on PATH.
 
         `tcp_host` defaults to localhost because the container's port
-        is published there. Override for remote-docker setups.
+        is published there. Override for remote-docker setups — it is
+        baked into BOTH modules' endpoints in the on-disk config.
 
         `no_verify_peer`: for `tcp_ssl` daemons this defaults to True so
         self-signed certs work out of the box (the common case for smoke
-        tests). When True, sets the `LOGOSCORE_CLIENT_NO_VERIFY_PEER`
-        env override which the CLI applies on top of the disk-side
-        `verify_peer` value. Set to False to exercise the verification
-        path — the disk-side `verify_peer` (controlled by
-        `LogoscoreDockerDaemon(verify_peer=...)`) then takes effect.
-        Ignored when transport is plain `tcp`.
+        tests) — it sets the on-disk `verify_peer` to False. Set it to
+        False to exercise the verification path, in which case the
+        constructor's `verify_peer` (controlled by
+        `LogoscoreDockerDaemon(verify_peer=...)`) takes effect. Ignored
+        when transport is plain `tcp`.
+
+        The returned client dials purely from `client/config.json` — with
+        NO `LOGOSCORE_CLIENT_*` env overrides. That's deliberate: the
+        daemon's `core_service` and `capability_module` ride distinct
+        forwarded host ports, and a single env override is applied to
+        every module uniformly, so it could only configure one of them
+        correctly (and would clobber capability_module's port). The
+        per-module config file is the only thing that can express both.
         """
         if self._container_id is None:
             raise LogoscoreError(
                 "daemon is not running — call start() or use the context manager"
             )
-        if no_verify_peer is None:
-            no_verify_peer = (self.transport == "tcp_ssl")
-        # Point the client at the host-only client dir, NOT the
-        # bind-mounted /config (which is owned by root because the
-        # container ran as root). _build_host_client_config() above
-        # populated the host dir with a client/config.json keyed at the
-        # forwarded host ports + a copy of the auto token.
-        return LogoscoreClient(
+        wire_codec = codec or self.codec
+        # On-disk verify_peer (tcp_ssl only): skip by default so a
+        # self-signed smoke cert connects; no_verify_peer=False exercises
+        # the verify path against the constructor's verify_peer base.
+        if self.transport == "tcp_ssl":
+            if no_verify_peer is None:
+                no_verify_peer = True
+            verify: bool | None = False if no_verify_peer else self.verify_peer
+        else:
+            verify = None
+
+        # Rewrite config.json in the host-only client dir (the daemon's
+        # bind-mounted /config is root-owned) with the caller's dial
+        # params + both modules' distinct forwarded ports. The auto token
+        # written by _build_host_client_config() at startup is left in
+        # place. No env overrides — config.json is authoritative.
+        endpoints = self._client_endpoints(tcp_host, wire_codec, verify)
+        return LogoscoreClient.connect(
+            endpoints,
             binary=binary,
             config_dir=self._host_client_dir,
             timeout=timeout,
-            transport=self.transport,
-            tcp_host=tcp_host,
-            tcp_port=self.host_port,   # <-- the critical override
-            codec=codec or self.codec,
-            no_verify_peer=no_verify_peer,
         )
 
     # ── Internals ───────────────────────────────────────────────────────
