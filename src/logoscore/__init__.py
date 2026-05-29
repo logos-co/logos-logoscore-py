@@ -35,7 +35,7 @@ Example (docker):
         print(client.call("my_module", "do_something", 42))
 """
 
-from .client import LogoscoreClient
+from .client import DaemonEndpoint, LogoscoreClient
 from .daemon import LogoscoreDaemon
 from .docker_daemon import (
     CONTAINER_TCP_PORT,
@@ -58,6 +58,7 @@ __all__ = [
     "LogoscoreDaemon",
     "LogoscoreDockerDaemon",
     "LogoscoreClient",
+    "DaemonEndpoint",
     "Subscription",
     "LogoscoreError",
     "DaemonNotRunningError",

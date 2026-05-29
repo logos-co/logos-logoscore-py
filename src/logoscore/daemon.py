@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import IO
 
 from . import _proc
-from .client import LogoscoreClient
+from .client import DaemonEndpoint, LogoscoreClient
 from .errors import LogoscoreError
 
 
@@ -271,24 +271,42 @@ class LogoscoreDaemon:
         timeout: float | None = 30.0,
         transport: str | None = None,
         tcp_host: str | None = None,
-        tcp_port: int | None = None,
         no_verify_peer: bool = False,
         codec: str | None = None,
     ) -> LogoscoreClient:
+        """Build a client wired to this daemon's `client/config.json`.
+
+        The daemon writes a per-module dial spec at startup (auto-emitted
+        for `local`; rewritten from `state.json` for `tcp`/`tcp_ssl` — see
+        `_rewrite_client_config_from_state`), so the default `client()`
+        needs no transport args: `core_service` and `capability_module`
+        each dial their own bound port straight from disk.
+
+        The optional `transport` / `tcp_host` / `codec` / `no_verify_peer`
+        overrides are merged INTO that on-disk spec (uniformly across both
+        modules, since they share host/transport/codec/verify), never via
+        `LOGOSCORE_CLIENT_*` env vars. There is deliberately no per-call
+        port override: the CLI applies a single port to every module
+        uniformly, which would collapse `capability_module` onto
+        `core_service`'s port. Each module's port comes from the daemon's
+        own config and is left untouched.
+        """
         if self._process is None:
             raise LogoscoreError(
                 "daemon is not running — call start() or use the context manager"
             )
+        if (transport is not None or tcp_host is not None
+                or codec is not None or no_verify_peer):
+            self._apply_client_overrides(
+                transport=transport, tcp_host=tcp_host,
+                codec=codec, no_verify_peer=no_verify_peer)
+        # No transport kwargs → no LOGOSCORE_CLIENT_* env overrides; the
+        # per-module client/config.json is authoritative.
         return LogoscoreClient(
             binary=self.binary,
             config_dir=self._config_dir,
             token=self._read_token(),
             timeout=timeout,
-            transport=transport,
-            tcp_host=tcp_host,
-            tcp_port=tcp_port,
-            no_verify_peer=no_verify_peer,
-            codec=codec,
         )
 
     def logs(self) -> tuple[str, str]:
@@ -385,6 +403,47 @@ class LogoscoreDaemon:
         except LogoscoreError as e:
             raise LogoscoreError(f"daemon status check failed: {e}") from e
 
+    def _apply_client_overrides(
+        self,
+        *,
+        transport: str | None,
+        tcp_host: str | None,
+        codec: str | None,
+        no_verify_peer: bool,
+    ) -> None:
+        """Merge uniform dial overrides into `client/config.json` in place.
+
+        Only the explicitly-overridden fields are touched, and the per-module
+        `port` is NEVER changed — that's the whole point: a single
+        `LOGOSCORE_CLIENT_TCP_PORT` env override is applied to every module
+        uniformly by the CLI, which would collapse `capability_module` onto
+        `core_service`'s port. Editing each module entry directly (rather than
+        rebuilding via `write_config`) also preserves any field the daemon
+        emitted that the high-level API doesn't model — e.g. a tcp_ssl `ca`."""
+        cfg_path = self._config_dir / "client" / "config.json"
+        try:
+            cfg = json.loads(cfg_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return  # daemon's own config stands
+        daemon_block = cfg.get("daemon")
+        if not isinstance(daemon_block, dict) or not daemon_block:
+            return
+        for entry in daemon_block.values():
+            if not isinstance(entry, dict):
+                continue
+            if transport is not None:
+                entry["transport"] = transport
+            # host/codec are meaningless for a local socket — the CLI
+            # ignores them there (see transportToJson in the CLI).
+            if entry.get("transport") != "local":
+                if tcp_host is not None:
+                    entry["host"] = tcp_host
+                if codec is not None:
+                    entry["codec"] = codec
+            if no_verify_peer and entry.get("transport") == "tcp_ssl":
+                entry["verify_peer"] = False
+        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
+
     def _rewrite_client_config_from_state(self) -> None:
         """For `tcp` / `tcp_ssl` runs, replace the daemon's auto-emitted
         `client/config.json` (which only knows about LocalSocket) with
@@ -417,7 +476,7 @@ class LogoscoreDaemon:
             ) from e
 
         modules = state.get("resolved", {}).get("modules", {})
-        daemon_block: dict = {}
+        endpoints: dict[str, DaemonEndpoint] = {}
         for module_name in ("core_service", "capability_module"):
             transports = modules.get(module_name, {}).get("transports", [])
             match = next(
@@ -431,28 +490,23 @@ class LogoscoreDaemon:
                     f"setup is out of sync with the running daemon"
                 )
 
-            entry: dict = {"transport": target_proto}
             host = match.get("host", "127.0.0.1")
             # Daemons that bind 0.0.0.0 are reachable via 127.0.0.1
             # for same-host clients. Any host-side dial that goes
             # through the bind address would refuse on platforms
             # that don't auto-route 0.0.0.0 → loopback.
-            entry["host"] = "127.0.0.1" if host == "0.0.0.0" else host
-            entry["port"] = match.get("port", 0)
-            entry["codec"] = match.get("codec", "json")
-            if target_proto == "tcp_ssl":
-                entry["verify_peer"] = self.verify_peer
-            daemon_block[module_name] = entry
+            endpoints[module_name] = DaemonEndpoint(
+                transport=target_proto,
+                host="127.0.0.1" if host == "0.0.0.0" else host,
+                port=match.get("port", 0),
+                codec=match.get("codec", "json"),
+                verify_peer=(
+                    self.verify_peer if target_proto == "tcp_ssl" else None),
+            )
 
-        cfg_path = self._config_dir / "client" / "config.json"
-        existing: dict = {}
-        if cfg_path.exists():
-            try:
-                existing = json.loads(cfg_path.read_text())
-            except json.JSONDecodeError:
-                existing = {}
-        existing["version"] = 2
-        existing.setdefault("token_file", "auto.json")
-        existing["daemon"] = daemon_block
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(json.dumps(existing, indent=4) + "\n")
+        # Merge into the daemon's auto-emitted config.json (keeping any
+        # keys it already wrote, e.g. token_file) — write_config owns the
+        # schema. The daemon emitted its own auto.json token, so no token
+        # is written here.
+        LogoscoreClient.write_config(
+            self._config_dir, endpoints, instance_id=None, merge=True)

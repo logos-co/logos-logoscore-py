@@ -66,11 +66,16 @@ The three mounts each have a specific purpose:
 
 ### Port strategy
 
-The container always binds `6000` internally; the host maps a
-dynamically-picked ephemeral port to it (`-p $host_port:6000`). The
-client gets told `tcp_port=$host_port` so it dials `localhost:$host_port`
-rather than the container-internal `6000` the daemon wrote into its
-`state.json`. Same pattern as
+The container binds `6000` (`core_service`) and `6001`
+(`capability_module`) internally; the host maps a dynamically-picked
+ephemeral port to each (`-p $host_core:6000 -p $host_cap:6001`). The
+client dials those forwarded host ports from a per-module
+`client/config.json` (written via `LogoscoreClient.write_config`) — one
+entry per module, each with its own port — rather than the
+container-internal ports the daemon wrote into its `state.json`. A single
+`tcp_port` env override won't do here: the CLI applies it to every module
+uniformly, which would collapse capability_module onto core_service's
+port. Same pattern as
 [status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
 
 Result: parallel container-backed tests don't fight over port 6000 on
