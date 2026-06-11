@@ -7,6 +7,7 @@ file, not the user's global `~/.logoscore/`.
 """
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import tempfile
@@ -60,14 +61,37 @@ def _arg_to_str(arg: Any) -> str:
     """Convert a Python arg to the string form the CLI expects.
 
     `pathlib.Path` values are read via `@file` so the CLI loads the file
-    content. Strings/numbers/bools are passed as-is for the CLI's own
-    type coercion (see logos-logoscore-cli/src/client/commands/call_command.cpp).
+    content. `bytes`/`bytearray` are passed as raw latin-1 characters —
+    the CLI's historical contract for byte-array parameters (the daemon
+    coerces string args to raw bytes uniformly across transports).
+    Strings/numbers/bools are passed as-is for the CLI's type coercion
+    (see logos-logoscore-cli/src/client/commands/call_command.cpp).
     """
     if isinstance(arg, Path):
         return f"@{arg}"
     if isinstance(arg, bool):
         return "true" if arg else "false"
+    if isinstance(arg, (bytes, bytearray)):
+        return bytes(arg).decode("latin-1")
     return str(arg)
+
+
+def _decode_bytes_tags(value: Any) -> Any:
+    """Decode the protocol's canonical tagged-bytes form into `bytes`.
+
+    Since the logos-protocol extraction, byte arrays cross the JSON
+    boundary as `{"_bytes": "<base64url, unpadded>"}` (NUL-safe, lossless).
+    Consumers decode it exactly once at their boundary — this is ours.
+    Applied recursively so tagged values nested in maps/lists decode too.
+    """
+    if isinstance(value, dict):
+        if set(value.keys()) == {"_bytes"} and isinstance(value["_bytes"], str):
+            s = value["_bytes"]
+            return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+        return {k: _decode_bytes_tags(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode_bytes_tags(v) for v in value]
+    return value
 
 
 class LogoscoreClient:
@@ -319,7 +343,7 @@ class LogoscoreClient:
                 code=envelope.get("code"),
             )
         if isinstance(envelope, dict) and "result" in envelope:
-            return envelope["result"]
+            return _decode_bytes_tags(envelope["result"])
         return envelope
 
     # ── Event subscription ──────────────────────────────────────────────────
