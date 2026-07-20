@@ -24,7 +24,7 @@ from logoscore import (
     image_present,
 )
 
-MODULE = "test_basic_module"
+MODULE = "test_fullapi_cpp"
 
 
 # Same image-tag convention as `test_docker_smoke.py`. Shared so that one
@@ -37,7 +37,7 @@ def _docker_image_for(flavor: str) -> str:
     return DOCKER_IMAGE_FMT.format(flavor=flavor)
 
 
-# Building test_basic_module in the linux container happens once per
+# Building test_fullapi_cpp in the linux container happens once per
 # pytest session via the `linux_test_modules_dir` fixture in
 # conftest.py — see that file for rationale.
 
@@ -99,4 +99,4 @@ def test_docker_ssl_load_and_call(ssl_daemon, logoscore_bin):
     path (method args → TLS → RPC → return value → TLS → client)."""
     client = ssl_daemon.client(binary=logoscore_bin)
     client.load_module(MODULE)
-    assert client.call(MODULE, "echo", "ssl-hello") == "ssl-hello"
+    assert client.call(MODULE, "echoString", "ssl-hello") == "ssl-hello"

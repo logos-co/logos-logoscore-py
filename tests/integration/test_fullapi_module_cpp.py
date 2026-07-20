@@ -3,11 +3,11 @@ universal Logos module — parameters, return values, and events — against
 `test_fullapi_cpp`.
 
 `test_fullapi_cpp` is the C++ provider of the shared `full_api` contract
-(`logos-test-modules/test-fullapi-module-cpp`). Unlike `test_basic_module*`,
-whose events carry only scalars, it declares one echo method **and one
-typed event per event-legal type**, so this file is the end-to-end proof
-that every type the generator + protocol support round-trips through the
-logoscore client — both as a call argument/return and as an event payload.
+(`logos-test-modules/test-fullapi-module-cpp`). It declares one echo method
+**and one typed event per event-legal type**, so this file is the end-to-end
+proof that every type the generator + protocol support round-trips through
+the logoscore client — both as a call argument/return and as an event
+payload.
 
 Type surface covered (each as param, return, and — where legal — event):
 
@@ -52,15 +52,17 @@ import pytest
 
 from logoscore import LogoscoreDaemon
 
+from .._fullapi_module_cases import FULLAPI_EVENT_CASES
+
 MODULE = "test_fullapi_cpp"
 
 
 @pytest.fixture(scope="module")
 def client(logoscore_bin, test_modules_dir, transport, request):
     """Build a daemon + client wired to whatever transport the suite is
-    parametrised on. Mirror of `test_basic_module_methods.py::client` —
-    kept duplicated rather than moved to a conftest helper so each test
-    file can be read end-to-end without jumping between files."""
+    parametrised on. Kept inline (rather than moved to a conftest helper)
+    so each test file can be read end-to-end without jumping between
+    files — mirrors the fixture in `test_end_to_end.py`."""
     import socket
 
     def _pick_free_port() -> int:
@@ -206,7 +208,7 @@ def test_make_result_error(client):
 
 def test_do_void(client):
     # void methods have no value; the CLI reports `true` as the success
-    # sentinel (same as test_basic_module's doNothing).
+    # sentinel.
     assert client.call(MODULE, "doVoid") is True
 
 
@@ -247,26 +249,11 @@ def _capture_event(
     return received[0]
 
 
-EVENT_CASES = [
-    ("stringEvent",     "fireStringEvent",     "hello"),
-    ("bytesEvent",      "fireBytesEvent",      b"\x01\x02\x03\xff"),
-    ("intEvent",        "fireIntEvent",        -42),
-    ("uintEvent",       "fireUintEvent",       7),
-    ("doubleEvent",     "fireDoubleEvent",     2.5),
-    ("boolEvent",       "fireBoolEvent",       True),
-    ("anyEvent",        "fireAnyEvent",        {"k": "v", "n": 1}),
-    ("stringListEvent", "fireStringListEvent", ["p", "q"]),
-    ("intListEvent",    "fireIntListEvent",    [1, 2, 3]),
-    ("uintListEvent",   "fireUintListEvent",   [4, 5]),
-    ("doubleListEvent", "fireDoubleListEvent", [1.5, 2.5]),
-    ("boolListEvent",   "fireBoolListEvent",   [True, False]),
-    ("listEvent",       "fireListEvent",       [1, "two", {"k": 1}]),
-    ("mapEvent",        "fireMapEvent",        {"mk": "mv"}),
-]
-
-
+# The typed-event matrix is shared with the docker-smoke suite so the two
+# stay in lockstep — see tests/_fullapi_module_cases.py::FULLAPI_EVENT_CASES.
 @pytest.mark.parametrize(
-    "event,fire,value", EVENT_CASES, ids=[c[0] for c in EVENT_CASES]
+    "event,fire,value", FULLAPI_EVENT_CASES,
+    ids=[c[0] for c in FULLAPI_EVENT_CASES],
 )
 def test_typed_event(client, event, fire, value):
     evt = _capture_event(client, event, fire, value)

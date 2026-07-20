@@ -148,7 +148,7 @@ def build_modules_in_docker(
     `$out/modules/<name>/...` matches what the daemon's `-m` flag
     expects. The standard logos-module-builder `.install-portable`
     output produces this layout. Examples:
-      * `"modules.x86_64-linux.test_basic_module.install-portable"`
+      * `"modules.x86_64-linux.test_fullapi_cpp.install-portable"`
       * `"packages.aarch64-linux.install-portable"`
 
     `output_dir` is a host directory that'll receive the merged
