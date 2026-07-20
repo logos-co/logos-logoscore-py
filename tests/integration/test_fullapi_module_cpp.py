@@ -215,7 +215,19 @@ def test_do_void(client):
 # bare void trigger would make the CLI exit non-zero). The provider emits
 # the corresponding event with the argument as its single `arg0` payload.
 
-def _capture_event(client, event: str, fire_method: str, value) -> dict:
+def _capture_event(
+    client, event: str, fire_method: str, value, overall_timeout: float = 20.0
+) -> dict:
+    """Subscribe, then fire the trigger and wait — re-firing until the event
+    arrives or `overall_timeout` elapses.
+
+    The watcher subscribes on a background subprocess, so there is an
+    unavoidable race between "watch is live" and "we fire". A single fixed
+    sleep can't cover a slow-to-subscribe watcher on CI: if the first (and
+    only) fire lands before the subscription is live, the event is missed
+    and no later wait can recover it. The `fire<X>Event` triggers are
+    idempotent emits, so re-firing on a short cadence closes the race
+    without hard-coding a settle duration."""
     received: list[dict] = []
     got = threading.Event()
 
@@ -224,9 +236,14 @@ def _capture_event(client, event: str, fire_method: str, value) -> dict:
         got.set()
 
     with client.on_event(MODULE, event, on_event):
-        time.sleep(0.5)  # let the watcher subscribe before firing
-        assert client.call(MODULE, fire_method, value) is True
-        assert got.wait(timeout=10.0), f"{event} not received"
+        deadline = time.monotonic() + overall_timeout
+        while True:
+            assert client.call(MODULE, fire_method, value) is True
+            if got.wait(timeout=1.0):
+                break
+            assert time.monotonic() < deadline, (
+                f"{event} not received within {overall_timeout}s"
+            )
     return received[0]
 
 
