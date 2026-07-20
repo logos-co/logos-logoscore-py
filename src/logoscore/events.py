@@ -16,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Sequence
 
+from . import _proc
+
 _log = logging.getLogger(__name__)
 
 
@@ -127,6 +129,10 @@ class Subscription:
                 except json.JSONDecodeError as e:
                     self._report_error(e)
                     continue
+                # Decode tagged bytes (`{"_bytes": "<b64url>"}`) into real
+                # `bytes` so typed byte-array event payloads reach the
+                # callback in the same shape `client.call` returns them.
+                event = _proc.decode_bytes_tags(event)
                 try:
                     self._callback(event)
                 except Exception as e:  # noqa: BLE001 — user callback is untrusted

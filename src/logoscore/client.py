@@ -7,7 +7,6 @@ file, not the user's global `~/.logoscore/`.
 """
 from __future__ import annotations
 
-import base64
 import json
 import shutil
 import tempfile
@@ -57,41 +56,45 @@ class DaemonEndpoint:
         return block
 
 
+def _json_default(obj: Any) -> Any:
+    """`json.dumps` fallback for values that aren't natively serialisable.
+
+    `bytes`/`bytearray` (top-level or nested in a container arg) are
+    wrapped in the protocol's canonical tagged form so they survive the
+    round-trip losslessly (symmetric with `_proc.decode_bytes_tags` on
+    the way back).
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return _proc.encode_bytes_tag(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serialisable")
+
+
 def _arg_to_str(arg: Any) -> str:
     """Convert a Python arg to the string form the CLI expects.
 
     `pathlib.Path` values are read via `@file` so the CLI loads the file
-    content. `bytes`/`bytearray` are passed as raw latin-1 characters —
-    the CLI's historical contract for byte-array parameters (the daemon
-    coerces string args to raw bytes uniformly across transports).
-    Strings/numbers/bools are passed as-is for the CLI's type coercion
-    (see logos-logoscore-cli/src/client/commands/call_command.cpp).
+    content. `bytes`/`bytearray`, `list`/`tuple`/`dict` are JSON-encoded
+    behind the CLI's `json:` prefix so the daemon reconstructs them
+    losslessly: byte arrays go through the canonical `{"_bytes": …}` tag
+    (NUL- and high-byte-safe — a raw latin-1 string would UTF-8-mangle any
+    byte ≥ 0x80 crossing the argv boundary), and container params
+    (`[tstr]`, `[int]`, `[any]`, `{tstr:any}`) plus non-scalar `any`
+    values pass as natural Python objects. Strings/numbers/bools are
+    passed as-is for the CLI's type coercion (see
+    logos-logoscore-cli/src/client/commands/call_command.cpp).
     """
     if isinstance(arg, Path):
         return f"@{arg}"
     if isinstance(arg, bool):
         return "true" if arg else "false"
-    if isinstance(arg, (bytes, bytearray)):
-        return bytes(arg).decode("latin-1")
+    if isinstance(arg, (bytes, bytearray, list, tuple, dict)):
+        return "json:" + json.dumps(arg, default=_json_default)
     return str(arg)
 
 
-def _decode_bytes_tags(value: Any) -> Any:
-    """Decode the protocol's canonical tagged-bytes form into `bytes`.
-
-    Since the logos-protocol extraction, byte arrays cross the JSON
-    boundary as `{"_bytes": "<base64url, unpadded>"}` (NUL-safe, lossless).
-    Consumers decode it exactly once at their boundary — this is ours.
-    Applied recursively so tagged values nested in maps/lists decode too.
-    """
-    if isinstance(value, dict):
-        if set(value.keys()) == {"_bytes"} and isinstance(value["_bytes"], str):
-            s = value["_bytes"]
-            return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-        return {k: _decode_bytes_tags(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_decode_bytes_tags(v) for v in value]
-    return value
+# Decoding tagged-bytes is shared with the event path; keep one impl in
+# `_proc` (importable by both `client` and `events` without a cycle).
+_decode_bytes_tags = _proc.decode_bytes_tags
 
 
 class LogoscoreClient:

@@ -36,7 +36,7 @@ modules). This package sits at the **frontend edge**, one hop above the CLI:
         │
         ▼
   modules              (logos-test-modules: test_basic_module [Qt],
-                        test_basic_module_cpp [pure-C++], capability_module, …)
+                        test_fullapi_cpp [universal C++], capability_module, …)
 ```
 
 Because the wrapper only ever speaks to the CLI, its sole external runtime requirement
@@ -86,7 +86,7 @@ logos-logoscore-py/
 │   ├── integration/                # spawns real local daemons; parametrised over --transport
 │   │   ├── test_end_to_end.py      #   status / list / load+call+event round-trip
 │   │   ├── test_basic_module_methods.py     #   test_basic_module (Qt) method matrix
-│   │   └── test_basic_module_cpp_methods.py #   test_basic_module_cpp (pure-C++) method matrix
+│   │   └── test_fullapi_module_cpp.py        #   test_fullapi_cpp — full param/return/event type surface
 │   └── docker_smoke/               # docker-required (can't run inside the nix sandbox)
 │       ├── Dockerfile              #   multi-stage; stage 1 runs `nix build` in nixos/nix
 │       ├── build_smoke_image.sh    #   builds logoscore:smoke-{portable,dev} (FLAVOR=…)
@@ -131,7 +131,7 @@ The package declares **zero runtime Python dependencies** (`dependencies = []` i
 |---|---|
 | `logos-nix` | Provides the shared nixpkgs pin (`nixpkgs.follows = "logos-nix/nixpkgs"`) |
 | `logos-logoscore-cli` | The `logoscore` daemon/CLI binary the package wraps. Its `default` package is `propagatedBuildInputs` of the wheel, and `cli-bundle-dir` feeds the portable docker bundle |
-| `logos-test-modules` | `test_basic_module` (Qt) and `test_basic_module_cpp` (pure-C++) plugins used by the integration/smoke suites (via `.install` / `.install-portable`) |
+| `logos-test-modules` | `test_basic_module` (Qt) and `test_fullapi_cpp` (universal C++, full type surface) plugins used by the integration/smoke suites (via `.install` / `.install-portable`) |
 | `nixpkgs` | `python3`, `hatchling`, `openssl`, `qt6.qtbase` for builds and checks |
 
 ---

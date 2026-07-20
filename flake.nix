@@ -111,21 +111,23 @@
         let
           logoscoreBin             = logos-logoscore-cli.packages.${system}.default;
           testBasicInstall         = logos-test-modules.modules.${system}.test_basic_module.install;
-          testBasicCppInstall      = logos-test-modules.modules.${system}.test_basic_module_cpp.install;
+          testFullapiInstall       = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
           testBasicInstallPortable = logos-test-modules.modules.${system}.test_basic_module.install-portable;
-          testBasicCppInstallPortable = logos-test-modules.modules.${system}.test_basic_module_cpp.install-portable;
+          testFullapiInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
 
           # Merge every test module's `.install` output into one dir so a
           # single `-m` flag on the daemon picks them all up. Each module's
           # install output already has the shape `modules/<name>/…`, so
-          # symlinkJoin stacks them without collision.
+          # symlinkJoin stacks them without collision. `test_basic_module`
+          # (Qt) backs the end-to-end + event-lifecycle tests; `test_fullapi_cpp`
+          # (universal C++) backs the full type-surface tests.
           testModulesInstall = pkgs.symlinkJoin {
             name = "logoscore-py-test-modules";
-            paths = [ testBasicInstall testBasicCppInstall ];
+            paths = [ testBasicInstall testFullapiInstall ];
           };
           testModulesInstallPortable = pkgs.symlinkJoin {
             name = "logoscore-py-test-modules-portable";
-            paths = [ testBasicInstallPortable testBasicCppInstallPortable ];
+            paths = [ testBasicInstallPortable testFullapiInstallPortable ];
           };
         in {
         default = pkgs.mkShell {
@@ -177,14 +179,15 @@
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
           # `.install` lays out modules/<name>/<name>_plugin.{so,dylib} +
           # manifest.json — the layout logoscore's `-m` flag expects.
-          # Merge `test_basic_module` (Qt) + `test_basic_module_cpp` (pure-C++)
-          # into one dir so a single `-m` flag loads both — the integration
-          # suite has separate test files per module.
+          # Merge `test_basic_module` (Qt, end-to-end + event lifecycle) +
+          # `test_fullapi_cpp` (universal C++, full param/return/event type
+          # surface) into one dir so a single `-m` flag loads both — the
+          # integration suite has separate test files per module.
           testBasicInstall    = logos-test-modules.modules.${system}.test_basic_module.install;
-          testBasicCppInstall = logos-test-modules.modules.${system}.test_basic_module_cpp.install;
+          testFullapiInstall  = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
           testModulesInstall  = pkgs.symlinkJoin {
             name = "logoscore-py-test-modules";
-            paths = [ testBasicInstall testBasicCppInstall ];
+            paths = [ testBasicInstall testFullapiInstall ];
           };
 
           # Helper: run the integration suite once with the given
