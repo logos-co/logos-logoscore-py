@@ -13,6 +13,7 @@ return) and may include raw tokens from ``issue-token``.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -21,6 +22,38 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .errors import LogoscoreError, from_exit_code
+
+
+def decode_bytes_tags(value: Any) -> Any:
+    """Decode the protocol's canonical tagged-bytes form into `bytes`.
+
+    Since the logos-protocol extraction, byte arrays cross the JSON
+    boundary as ``{"_bytes": "<base64url, unpadded>"}`` (NUL-safe,
+    lossless). Consumers decode it exactly once at their boundary.
+    Applied recursively so tagged values nested in maps/lists decode too.
+
+    Lives here (not in ``client``) so both the call path (``client.call``)
+    and the event path (``events.Subscription``) decode identically
+    without an import cycle — ``events`` imports ``_proc`` but not
+    ``client``.
+    """
+    if isinstance(value, dict):
+        if set(value.keys()) == {"_bytes"} and isinstance(value["_bytes"], str):
+            s = value["_bytes"]
+            return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+        return {k: decode_bytes_tags(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [decode_bytes_tags(v) for v in value]
+    return value
+
+
+def encode_bytes_tag(value: bytes | bytearray) -> dict:
+    """Inverse of :func:`decode_bytes_tags` — wrap raw bytes in the
+    canonical tagged form so they survive a JSON round-trip losslessly
+    (used when packing ``bytes`` nested inside a ``json:`` container arg).
+    """
+    s = base64.urlsafe_b64encode(bytes(value)).decode("ascii").rstrip("=")
+    return {"_bytes": s}
 
 
 def _forward_output_enabled() -> bool:

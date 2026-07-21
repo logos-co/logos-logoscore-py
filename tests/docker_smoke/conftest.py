@@ -50,8 +50,13 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture(scope="session")
 def linux_test_modules_dir(tmp_path_factory) -> Path:
-    """Build test_basic_module inside docker, once per pytest session,
+    """Build the test modules inside docker, once per pytest session,
     shared by every smoke test that needs to mount user modules.
+
+    Builds `test_fullapi_cpp` — the universal-C++ provider whose methods
+    and typed events span the full parameter/return/event surface, so the
+    same module backs the method matrix (over both codecs), the event
+    matrix, the two-daemon isolation checks, and the tcp_ssl smoke.
 
     Why session scope: building takes a noticeable fraction of a
     minute even with a warm nix store; module-scoping per file would
@@ -77,7 +82,7 @@ def linux_test_modules_dir(tmp_path_factory) -> Path:
     out = tmp_path_factory.mktemp("docker-test-modules")
     build_modules_in_docker(
         builds=[
-            (flake_ref, f"modules.{system}.test_basic_module.install-portable"),
+            (flake_ref, f"modules.{system}.test_fullapi_cpp.install-portable"),
             # Add more (flake, attr) pairs here when the suite grows —
             # they all share the one container/nix-store invocation, so
             # the marginal cost of an extra module is just its compile.

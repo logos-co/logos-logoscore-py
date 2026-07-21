@@ -6,6 +6,7 @@ parsing, and exit-code → exception mapping — without needing a real
 """
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -94,6 +95,48 @@ def test_call_path_arg_becomes_at_file(rec: Recorder):
     assert rec.calls[0]["cmd"] == [
         "logoscore", "call", "m", "loadConfig", "@/etc/x.json", "--json",
     ]
+
+
+def _b64url(b: bytes) -> str:
+    """The canonical unpadded urlsafe base64 the client wraps bytes in."""
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def test_call_bytes_arg_uses_canonical_tag(rec: Recorder):
+    # bytes cross the wire as `json:{"_bytes": "<b64url>"}` — NUL/high-byte
+    # safe, unlike a raw latin-1 arg (which UTF-8-mangles bytes >= 0x80).
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    client = LogoscoreClient()
+    client.call("m", "echoBytes", b"\x01\x02\xff")
+    arg = rec.calls[0]["cmd"][4]
+    assert arg.startswith("json:")
+    assert json.loads(arg[len("json:"):]) == {"_bytes": _b64url(b"\x01\x02\xff")}
+
+
+def test_call_container_args_use_json_prefix(rec: Recorder):
+    # list/dict params go behind the CLI's `json:` prefix as natural JSON.
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    client = LogoscoreClient()
+    client.call("m", "echoThings", [1, 2, 3], {"k": "v"})
+    list_arg, map_arg = rec.calls[0]["cmd"][4], rec.calls[0]["cmd"][5]
+    assert list_arg.startswith("json:") and json.loads(list_arg[5:]) == [1, 2, 3]
+    assert map_arg.startswith("json:") and json.loads(map_arg[5:]) == {"k": "v"}
+
+
+def test_call_multi_arg_mixed_types_argv(rec: Recorder):
+    """A multi-argument call mixing every `_arg_to_str` branch — locks in
+    both argument arity (>2 positional args) and the per-arg wire encoding.
+    `test_fullapi_cpp`'s methods are all 0/1-arg, so this unit test is where
+    multi-argument argv construction is pinned."""
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    client = LogoscoreClient()
+    client.call("m", "many", "s", 7, True, b"\x00\xff", [1, "x"], {"k": 1})
+    cmd = rec.calls[0]["cmd"]
+    assert cmd[:7] == ["logoscore", "call", "m", "many", "s", "7", "true"]
+    assert json.loads(cmd[7][5:]) == {"_bytes": _b64url(b"\x00\xff")}
+    assert json.loads(cmd[8][5:]) == [1, "x"]
+    assert json.loads(cmd[9][5:]) == {"k": 1}
+    assert cmd[-1] == "--json"
 
 
 def test_call_error_envelope_raises_method_error(rec: Recorder):

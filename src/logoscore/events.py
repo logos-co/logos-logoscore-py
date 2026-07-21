@@ -16,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Sequence
 
+from . import _proc
+
 _log = logging.getLogger(__name__)
 
 
@@ -125,6 +127,16 @@ class Subscription:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError as e:
+                    self._report_error(e)
+                    continue
+                # Decode tagged bytes (`{"_bytes": "<b64url>"}`) into real
+                # `bytes` so typed byte-array event payloads reach the
+                # callback in the same shape `client.call` returns them. A
+                # malformed tag (e.g. invalid base64) must not tear down the
+                # subscription — report and skip, same as a JSON parse error.
+                try:
+                    event = _proc.decode_bytes_tags(event)
+                except Exception as e:  # noqa: BLE001 — bad tag shouldn't end the pump
                     self._report_error(e)
                     continue
                 try:

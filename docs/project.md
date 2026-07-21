@@ -35,8 +35,8 @@ modules). This package sits at the **frontend edge**, one hop above the CLI:
   logos-cpp-sdk        (LogosAPI, RPC, code generator — pins nixpkgs/Qt 6)
         │
         ▼
-  modules              (logos-test-modules: test_basic_module [Qt],
-                        test_basic_module_cpp [pure-C++], capability_module, …)
+  modules              (logos-test-modules: test_fullapi_cpp [universal C++,
+                        full type surface], capability_module, …)
 ```
 
 Because the wrapper only ever speaks to the CLI, its sole external runtime requirement
@@ -78,15 +78,14 @@ logos-logoscore-py/
 ├── tests/
 │   ├── conftest.py                 # fixtures: logoscore_bin, test_modules_dir, transport,
 │   │                               #   self_signed_cert, tcp_port/tcp_ssl_port; --transport / --docker-flavor
-│   ├── _basic_module_cases.py      # BASIC_MODULE_CASES — shared (method, args, expected) matrix
+│   ├── _fullapi_module_cases.py    # FULLAPI_METHOD_CASES + FULLAPI_EVENT_CASES — shared matrices
 │   ├── unit/                       # no logoscore needed (runs anywhere)
 │   │   ├── test_client_config.py   #   write_config serialization + connect()/client() env contract
 │   │   ├── test_client_with_fake.py#   argv/env construction via monkeypatched subprocess.run
 │   │   └── test_errors.py          #   exit-code → exception mapping
 │   ├── integration/                # spawns real local daemons; parametrised over --transport
 │   │   ├── test_end_to_end.py      #   status / list / load+call+event round-trip
-│   │   ├── test_basic_module_methods.py     #   test_basic_module (Qt) method matrix
-│   │   └── test_basic_module_cpp_methods.py #   test_basic_module_cpp (pure-C++) method matrix
+│   │   └── test_fullapi_module_cpp.py        #   test_fullapi_cpp — full param/return/event type surface
 │   └── docker_smoke/               # docker-required (can't run inside the nix sandbox)
 │       ├── Dockerfile              #   multi-stage; stage 1 runs `nix build` in nixos/nix
 │       ├── build_smoke_image.sh    #   builds logoscore:smoke-{portable,dev} (FLAVOR=…)
@@ -131,7 +130,7 @@ The package declares **zero runtime Python dependencies** (`dependencies = []` i
 |---|---|
 | `logos-nix` | Provides the shared nixpkgs pin (`nixpkgs.follows = "logos-nix/nixpkgs"`) |
 | `logos-logoscore-cli` | The `logoscore` daemon/CLI binary the package wraps. Its `default` package is `propagatedBuildInputs` of the wheel, and `cli-bundle-dir` feeds the portable docker bundle |
-| `logos-test-modules` | `test_basic_module` (Qt) and `test_basic_module_cpp` (pure-C++) plugins used by the integration/smoke suites (via `.install` / `.install-portable`) |
+| `logos-test-modules` | `test_fullapi_cpp` (universal C++, full param/return/event type surface) — the single plugin the integration/smoke suites load (via `.install` / `.install-portable`) |
 | `nixpkgs` | `python3`, `hatchling`, `openssl`, `qt6.qtbase` for builds and checks |
 
 ---
@@ -623,15 +622,15 @@ with LogoscoreDockerDaemon(image="logoscore:smoke-portable", modules_dir=modules
 
 ### LogosResult / method matrix
 
-`tests/_basic_module_cases.py::BASIC_MODULE_CASES` is the shared `(method, args,
-expected)` matrix exercised against `test_basic_module` over every transport and codec.
-It pins, among others, that a `LogosResult` round-trips as `{"success", "value",
-"error"}`:
+`tests/_fullapi_module_cases.py::FULLAPI_METHOD_CASES` is the shared `(method, args,
+expected)` matrix exercised against `test_fullapi_cpp` over every transport and codec
+(its sibling `FULLAPI_EVENT_CASES` does the same for one typed event per type). It
+pins, among others, that a `LogosResult` round-trips as `{"success", "value",
+"error"}` (absent side is `null`):
 
 ```python
-("successResult", (),         {"success": True,  "value": "operation succeeded", "error": None})
-("errorResult",   (),         {"success": False, "value": None, "error": "deliberate error for testing"})
-("validateInput", ("hello",), {"success": True,  "value": {"input": "hello", "length": 5}, "error": None})
+("makeResult", (True,),  {"success": True,  "value": {"ok": True, "provider": "test_fullapi_cpp"}, "error": None})
+("makeResult", (False,), {"success": False, "value": None, "error": "deliberate error for testing"})
 ```
 
 ---

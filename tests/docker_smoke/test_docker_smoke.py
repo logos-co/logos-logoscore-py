@@ -2,11 +2,11 @@
 
 Three scenarios:
 
-1. **Single-container, full API** — one daemon in docker; every Q_INVOKABLE
-   in `test_basic_module` and both of its events are exercised. The fixture
+1. **Single-container, full API** — one daemon in docker; every echo method
+   and every typed event on `test_fullapi_cpp` is exercised. The fixture
    parametrises over codec (`json`, `cbor`) so the same matrix is replayed
    through both wire formats; that's the task's end-to-end confirmation
-   that the codec pipeline handles every parameter/return type cleanly.
+   that the codec pipeline handles every parameter/return/event type cleanly.
 
 2. **Two-container smoke** — two daemons in separate containers, one TCP
    conversation apiece from the same test, and a sanity-check that each
@@ -45,14 +45,14 @@ from logoscore import (
     image_present,
 )
 
-from .._basic_module_cases import BASIC_MODULE_CASES
+from .._fullapi_module_cases import FULLAPI_METHOD_CASES, FULLAPI_EVENT_CASES
 
 
 # Docker image tag convention: logoscore:smoke-<flavor>, where <flavor>
 # is `dev` or `portable`. Override for one-off images via the env var.
 DOCKER_IMAGE_FMT = os.environ.get(
     "LOGOSCORE_DOCKER_IMAGE_FMT", "logoscore:smoke-{flavor}")
-MODULE = "test_basic_module"
+MODULE = "test_fullapi_cpp"
 
 
 def _docker_image_for(flavor: str) -> str:
@@ -109,18 +109,24 @@ def test_docker_tcp_load_and_call(dockerized_daemon, logoscore_bin):
     client = dockerized_daemon.client(binary=logoscore_bin)
     modules = client.list_modules()
     names = {m.get("name") for m in modules if isinstance(m, dict)}
-    assert any("test_basic" in (n or "") for n in names), names
+    assert any("test_fullapi" in (n or "") for n in names), names
     client.load_module(MODULE)
-    assert client.call(MODULE, "echo", "hello") is not None
+    assert client.call(MODULE, "echoString", "hello") is not None
 
 
-# ── Matrix fixture: one daemon per codec, reused across the full test set ─
+# ── Full-API matrix: every type as param/return/event, over both codecs ──
+# test_fullapi_cpp declares one echo method per supported type and one typed
+# event per event-legal type. Replaying the whole surface over the docker
+# daemon on BOTH json and cbor is the end-to-end proof that each codec
+# marshals every type — scalars, bytes (canonical {"_bytes"} tag), typed
+# arrays, [any]/LogosList, {tstr:any}/LogosMap, result, void — cleanly.
 
 @pytest.fixture(scope="module", params=["json", "cbor"])
 def docker_matrix_client(request, logoscore_bin, docker_flavor, linux_test_modules_dir):
     """Yield a LogoscoreClient connected over TCP to a fresh docker daemon
-    running with the requested wire codec + flavor. Module-scoped so the
-    ~40-case matrix below doesn't spin up a container per test."""
+    running with the requested wire codec + flavor, with `test_fullapi_cpp`
+    loaded. Module-scoped so the ~40-case matrix below reuses one container
+    per codec rather than spinning one up per test."""
     _require_docker_and_image(docker_flavor)
     codec = request.param
 
@@ -135,57 +141,44 @@ def docker_matrix_client(request, logoscore_bin, docker_flavor, linux_test_modul
 
 
 @pytest.mark.parametrize(
-    "method,args,expected", BASIC_MODULE_CASES,
-    ids=[f"{m}{args!r}" for m, args, _ in BASIC_MODULE_CASES],
+    "method,args,expected", FULLAPI_METHOD_CASES,
+    ids=[f"{m}{args!r}" for m, args, _ in FULLAPI_METHOD_CASES],
 )
-def test_docker_basic_module_method(docker_matrix_client, method, args, expected):
-    """Every Q_INVOKABLE on test_basic_module round-trips cleanly through
-    the docker-hosted daemon. Runs twice (once per codec parameter on the
-    fixture) so the same matrix is validated on both JSON and CBOR."""
+def test_docker_fullapi_method(docker_matrix_client, method, args, expected):
+    """Every full-api echo method round-trips through the docker-hosted
+    daemon, on both JSON and CBOR (the fixture's codec parameter)."""
     got = docker_matrix_client.call(MODULE, method, *args)
     if expected is None:
-        # Dispatched cleanly — we just wanted the RPC to not raise.
         return
     assert got == expected, f"{method}{args!r} -> {got!r}, expected {expected!r}"
 
 
-def test_docker_basic_module_emit_test_event(docker_matrix_client):
-    """Event: emitTestEvent(payload) fires a `testEvent` on the module; the
-    payload must arrive through `logoscore watch` and back to the client."""
+@pytest.mark.parametrize(
+    "event,fire_method,value", FULLAPI_EVENT_CASES,
+    ids=[c[0] for c in FULLAPI_EVENT_CASES],
+)
+def test_docker_fullapi_event(docker_matrix_client, event, fire_method, value):
+    """Every typed event round-trips through the docker daemon on both
+    codecs. Re-fires the (idempotent) trigger until the event arrives or a
+    deadline, so a slow-to-subscribe watcher can't miss the only emission."""
     received: list[dict] = []
-    evt = threading.Event()
+    got = threading.Event()
 
-    def on_event(event: dict) -> None:
-        received.append(event)
-        evt.set()
+    def on_event(e: dict) -> None:
+        received.append(e)
+        got.set()
 
-    with docker_matrix_client.on_event(MODULE, "testEvent", on_event):
-        time.sleep(0.5)  # let the watcher subscribe before emit
-        docker_matrix_client.call(MODULE, "emitTestEvent", "payload-docker")
-        assert evt.wait(timeout=10.0), "testEvent not received"
+    with docker_matrix_client.on_event(MODULE, event, on_event):
+        deadline = time.monotonic() + 20.0
+        while True:
+            assert docker_matrix_client.call(MODULE, fire_method, value) is True
+            if got.wait(timeout=1.0):
+                break
+            assert time.monotonic() < deadline, f"{event} not received in time"
 
-    assert received, "expected at least one event"
-    assert "payload-docker" in str(received[0])
-
-
-def test_docker_basic_module_emit_multi_arg_event(docker_matrix_client):
-    """Event with two args (QString + int) — verifies both the codec and
-    the event-forwarding chain preserve parameter shapes."""
-    received: list[dict] = []
-    evt = threading.Event()
-
-    def on_event(event: dict) -> None:
-        received.append(event)
-        evt.set()
-
-    with docker_matrix_client.on_event(MODULE, "multiArgEvent", on_event):
-        time.sleep(0.5)
-        docker_matrix_client.call(MODULE, "emitMultiArgEvent", "docker-label", 77)
-        assert evt.wait(timeout=10.0), "multiArgEvent not received"
-
-    flat = str(received[0])
-    assert "docker-label" in flat
-    assert "77" in flat
+    assert received[0]["event"] == event
+    payload = received[0]["data"]["arg0"]
+    assert payload == value, f"{event} payload {payload!r} != {value!r}"
 
 
 # ── Two-daemon test: one client process, two independent containers ──────
@@ -260,7 +253,7 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
     assert not _is_loaded(clients[1]), "B should NOT have the module loaded"
 
     # Call a method on A, confirm it returns what we expect.
-    assert clients[0].call(MODULE, "echo", "two-daemon") == "two-daemon"
+    assert clients[0].call(MODULE, "echoString", "two-daemon") == "two-daemon"
 
     # TODO: re-enable the negative-path check below once core_service
     # short-circuits calls to unloaded modules. Currently

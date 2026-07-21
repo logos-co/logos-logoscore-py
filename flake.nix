@@ -104,29 +104,18 @@
 
       # ── Dev shell ─────────────────────────────────────────────────────────
       # `nix develop` drops you into a shell with python + pytest + logoscore
-      # + a pre-built test_basic_module install tree, so `pytest` just works
+      # + a pre-built test_fullapi_cpp install tree, so `pytest` just works
       # without any extra environment setup. The nix `integration` check
       # sets the same two env vars, so the dev shell matches CI behaviour.
       devShells = forAllSystems ({ pkgs, system }:
         let
           logoscoreBin             = logos-logoscore-cli.packages.${system}.default;
-          testBasicInstall         = logos-test-modules.modules.${system}.test_basic_module.install;
-          testBasicCppInstall      = logos-test-modules.modules.${system}.test_basic_module_cpp.install;
-          testBasicInstallPortable = logos-test-modules.modules.${system}.test_basic_module.install-portable;
-          testBasicCppInstallPortable = logos-test-modules.modules.${system}.test_basic_module_cpp.install-portable;
-
-          # Merge every test module's `.install` output into one dir so a
-          # single `-m` flag on the daemon picks them all up. Each module's
-          # install output already has the shape `modules/<name>/…`, so
-          # symlinkJoin stacks them without collision.
-          testModulesInstall = pkgs.symlinkJoin {
-            name = "logoscore-py-test-modules";
-            paths = [ testBasicInstall testBasicCppInstall ];
-          };
-          testModulesInstallPortable = pkgs.symlinkJoin {
-            name = "logoscore-py-test-modules-portable";
-            paths = [ testBasicInstallPortable testBasicCppInstallPortable ];
-          };
+          # `test_fullapi_cpp` (universal C++) is the single test module the
+          # suite loads — its methods + typed events span the whole
+          # parameter/return/event surface. `.install` lays out
+          # modules/<name>/… ready for the daemon's `-m` flag.
+          testModulesInstall         = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
+          testModulesInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
         in {
         default = pkgs.mkShell {
           packages = [
@@ -177,15 +166,10 @@
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
           # `.install` lays out modules/<name>/<name>_plugin.{so,dylib} +
           # manifest.json — the layout logoscore's `-m` flag expects.
-          # Merge `test_basic_module` (Qt) + `test_basic_module_cpp` (pure-C++)
-          # into one dir so a single `-m` flag loads both — the integration
-          # suite has separate test files per module.
-          testBasicInstall    = logos-test-modules.modules.${system}.test_basic_module.install;
-          testBasicCppInstall = logos-test-modules.modules.${system}.test_basic_module_cpp.install;
-          testModulesInstall  = pkgs.symlinkJoin {
-            name = "logoscore-py-test-modules";
-            paths = [ testBasicInstall testBasicCppInstall ];
-          };
+          # `test_fullapi_cpp` (universal C++) is the single test module the
+          # integration suite loads; its methods + typed events span the
+          # whole parameter/return/event surface.
+          testModulesInstall = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
 
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check

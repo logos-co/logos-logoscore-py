@@ -9,7 +9,7 @@ green on CI runners that don't have docker available.
 
 The `logoscore:smoke-*` image contains **only** the logoscore CLI plus
 the modules the CLI itself ships with (`capability_module`,
-`package_manager_module`). It does NOT bake in `test_basic_module` or
+`package_manager_module`). It does NOT bake in `test_fullapi_cpp` or
 any other user module. User modules — the ones you're writing and
 testing — are bind-mounted in at runtime.
 
@@ -155,15 +155,18 @@ layer cache and nix's content-addressed store.
 
 ## What's covered
 
-1. **Every Q_INVOKABLE on `test_basic_module`** replayed through the full
+1. **Every echo method on `test_fullapi_cpp`** replayed through the full
    wire stack — runs the matrix twice, once with `--tcp-codec=json` and
    once with `--tcp-codec=cbor`, so both codecs see every parameter /
-   return type (void, bool, int, QString, QVariantMap, QJsonArray,
-   QStringList, QByteArray, QUrl, LogosResult).
+   return type: `tstr`, `bstr` (canonical `{"_bytes"}` tag), `int`,
+   `uint`, `float64`, `bool`, `any`, the typed arrays
+   (`[tstr]/[int]/[uint]/[float64]/[bool]`), `[any]` (LogosList),
+   `{tstr:any}` (LogosMap), `result`, and `void`.
 
-2. **Both events** — `testEvent` (single-arg payload) and `multiArgEvent`
-   (QString + int). Under each codec. Also validates the `logoscore
-   watch` subprocess plumbing end-to-end over TCP.
+2. **Every typed event** — one per event-legal type (`stringEvent`,
+   `bytesEvent`, `intEvent`, … `mapEvent`), fired via the module's
+   `fire<X>Event(v)` triggers, under each codec. Also validates the
+   `logoscore watch` subprocess plumbing end-to-end over TCP.
 
 3. **Two independent daemons** running in two separate containers on two
    host ports, driven from one Python test. Confirms:
