@@ -21,6 +21,8 @@ def issue_token(
     binary: str = "logoscore",
     config_dir: str | Path | None = None,
     replace: bool = False,
+    local_only: bool = False,
+    expires: str | None = None,
     timeout: float | None = 30.0,
 ) -> dict[str, Any]:
     """Issue a new token under `name`. Returns `{"name", "token", "file", ...}`.
@@ -28,10 +30,18 @@ def issue_token(
     The raw token is visible here (it's freshly minted). After this call it
     only exists in the returned dict and in the per-client file at
     `file`; the daemon's `tokens.json` stores only a hash.
+
+    `local_only=True` marks the token valid only over the local (QLocalSocket)
+    transport — the daemon rejects it when presented over tcp / tcp_ssl.
+    `expires` accepts a duration the CLI understands (e.g. ``"30d"``).
     """
     args = ["issue-token", "--name", name]
     if replace:
         args.append("--replace")
+    if local_only:
+        args.append("--local-only")
+    if expires:
+        args += ["--expires", expires]
     return _proc.run_json(
         binary, args,
         config_dir=Path(config_dir) if config_dir else None,
