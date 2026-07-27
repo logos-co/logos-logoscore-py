@@ -170,6 +170,10 @@
           # integration suite loads; its methods + typed events span the
           # whole parameter/return/event surface.
           testModulesInstall = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
+          # The conformance matrix replays every case against BOTH providers —
+          # a divergence between them is a finding in its own right, and one
+          # provider must never be able to satisfy an assertion for the other.
+          testModulesRustInstall = logos-test-modules.modules.${system}.test_fullapi_rust.install;
 
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
@@ -206,6 +210,40 @@
             export PYTHONPATH=$PWD/src
             ${python}/bin/pytest tests/unit -v
             touch $out
+          '';
+
+          # The LIDL conformance matrix: every (type x position) in the
+          # `full_api` contract, replayed against BOTH providers, reported as
+          # per-cell coordinates. The case table and the xfail registry live in
+          # logos-test-modules/conformance/ (with the providers they describe);
+          # this repo owns the `py` driver because it owns the client it uses.
+          #
+          # Fails on: a red cell, an `xpass` (a registered known-broken cell
+          # that started passing — the registry has to be updated), or a
+          # (type, position) the contract declares and no case covers.
+          conformance-matrix = pkgs.runCommand "logoscore-py-conformance-matrix" {
+            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+          } ''
+            cp -r ${./.}/. .
+            chmod -R +w .
+            export QT_QPA_PLATFORM=offscreen
+            export QT_FORCE_STDERR_LOGGING=1
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+            ''}
+            export PYTHONPATH=$PWD/src
+            export HOME=$PWD/home
+            mkdir -p $HOME $out
+            ${python}/bin/python conformance/run_matrix.py \
+              --logoscore ${logoscoreBin}/bin/logoscore \
+              --cases   ${logos-test-modules}/conformance/cases.json \
+              --known   ${logos-test-modules}/conformance/known.json \
+              --contract ${logos-test-modules}/test-fullapi-proxy-module-rust/full_api.lidl \
+              --cpp-modules  ${testModulesInstall}/modules \
+              --rust-modules ${testModulesRustInstall}/modules \
+              --jsonl $out/matrix.jsonl \
+              2>&1 | tee $out/matrix.txt
           '';
 
           # One check per transport. CI's matrix fans them out; a local
