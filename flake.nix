@@ -174,6 +174,10 @@
           # a divergence between them is a finding in its own right, and one
           # provider must never be able to satisfy an assertion for the other.
           testModulesRustInstall = logos-test-modules.modules.${system}.test_fullapi_rust.install;
+          # The ext contract (records, bytes at depth, typed maps, nested
+          # composites) has ONE provider today — the C++ cdylib backend cannot
+          # express these types yet — so its table runs without a differential.
+          testModulesExtInstall = logos-test-modules.modules.${system}.test_fullapi_ext_rust.install;
 
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
@@ -244,6 +248,30 @@
               --rust-modules ${testModulesRustInstall}/modules \
               --jsonl $out/matrix.jsonl \
               2>&1 | tee $out/matrix.txt
+          '';
+
+          conformance-matrix-ext = pkgs.runCommand "logoscore-py-conformance-matrix-ext" {
+            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+          } ''
+            cp -r ${./.}/. .
+            chmod -R +w .
+            export QT_QPA_PLATFORM=offscreen
+            export QT_FORCE_STDERR_LOGGING=1
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+            ''}
+            export PYTHONPATH=$PWD/src
+            export HOME=$PWD/home
+            mkdir -p $HOME $out
+            ${python}/bin/python conformance/run_matrix.py \
+              --logoscore ${logoscoreBin}/bin/logoscore \
+              --cases   ${logos-test-modules}/conformance/ext-cases.json \
+              --known   ${logos-test-modules}/conformance/known-ext.json \
+              --contract ${logos-test-modules}/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl \
+              --modules test_fullapi_ext_rust=${testModulesExtInstall}/modules \
+              --jsonl $out/matrix-ext.jsonl \
+              2>&1 | tee $out/matrix-ext.txt
           '';
 
           # One check per transport. CI's matrix fans them out; a local

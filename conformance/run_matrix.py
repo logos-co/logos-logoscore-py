@@ -296,8 +296,14 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cpp-modules", required=True)
-    ap.add_argument("--rust-modules", required=True)
+    # The two full_api providers keep dedicated flags (the flake check and every
+    # existing invocation use them); `--modules NAME=DIR` is the general form, so
+    # a table with a different provider set — full_api_ext has ONE provider —
+    # runs through the same driver instead of a second one.
+    ap.add_argument("--cpp-modules")
+    ap.add_argument("--rust-modules")
+    ap.add_argument("--modules", action="append", default=[],
+                    metavar="NAME=DIR", help="provider module dir; repeatable")
     ap.add_argument("--logoscore", default=os.environ.get("LOGOSCORE_BIN", "logoscore"))
     # The table lives in logos-test-modules/conformance/; the flake points at
     # it through the store path of that input.
@@ -324,7 +330,32 @@ def main() -> int:
             for prov in entry["providers"]:
                 xfail[(cid, prov)] = entry["id"]
 
-    modules = {"test_fullapi_cpp": args.cpp_modules, "test_fullapi_rust": args.rust_modules}
+    modules: dict[str, str] = {}
+    if args.cpp_modules:
+        modules["test_fullapi_cpp"] = args.cpp_modules
+    if args.rust_modules:
+        modules["test_fullapi_rust"] = args.rust_modules
+    for spec in args.modules:
+        name, _, path = spec.partition("=")
+        if not path:
+            print(f"--modules expects NAME=DIR, got {spec!r}")
+            return 2
+        modules[name] = path
+    # The table names the providers it describes; run the intersection so a
+    # driver invoked with more module dirs than the table needs does not invent
+    # cells, and one invoked with fewer fails loudly below rather than silently
+    # reporting a smaller matrix.
+    declared = table.get("providers")
+    if declared:
+        missing = [p for p in declared if p not in modules]
+        if missing:
+            print(f"table declares providers with no module dir given: {missing}")
+            return 2
+        modules = {k: v for k, v in modules.items() if k in declared}
+    if not modules:
+        print("no providers to run")
+        return 2
+
     measured: dict[str, dict[str, Result]] = {}
     for module, mods in modules.items():
         measured[module] = {}
@@ -378,25 +409,28 @@ def main() -> int:
                 row["known"] = xfail[(cid, module)]
             rows.append(row)
 
-    # Differential: the two providers implement the SAME contract, so any case
-    # without a declared per-provider expectation must answer identically. This
-    # catches a divergence nobody predicted (it is how `void` was found).
-    for cid, case in by_case.items():
+    # Differential: providers of the SAME contract must answer identically, so
+    # any case without a declared per-provider expectation is compared across
+    # them independently of `expect`. This catches a divergence nobody predicted
+    # (it is how `void` was found). With a single provider there is nothing to
+    # compare, and the table simply has no differential rows.
+    names = list(modules)
+    for cid, case in (by_case.items() if len(names) >= 2 else []):
         if "expect_by_provider" in case:
             continue  # the divergence IS the expectation; already reported above
-        a = measured["test_fullapi_cpp"].get(cid, Result(error="not-run"))
-        b = measured["test_fullapi_rust"].get(cid, Result(error="not-run"))
+        a = measured[names[0]].get(cid, Result(error="not-run"))
+        b = measured[names[1]].get(cid, Result(error="not-run"))
         agree = (a.error == b.error) and (a.error is not None or same(a.value, b.value))
         # Registered on EITHER side: a defect that only one provider surfaces
         # (because the other's typed decode masks it) still makes the pair
         # disagree, and that disagreement is the same known cell.
-        registered = xfail.get((cid, "test_fullapi_cpp")) or xfail.get((cid, "test_fullapi_rust"))
+        registered = next((xfail[(cid, n)] for n in names if (cid, n) in xfail), None)
         status = "pass" if agree else ("xfail" if registered else "fail")
         counts["differential-" + status] = counts.get("differential-" + status, 0) + 1
         if not agree:
             rows.append({
                 "type": case["type"], "position": case["position"],
-                "provider": "cpp-vs-rust", "consumer": args.consumer, "case": cid,
+                "provider": f"{names[0]}-vs-{names[1]}", "consumer": args.consumer, "case": cid,
                 "status": status, "expected": a.as_report(), "actual": b.as_report(),
                 "known": registered,
                 "note": "providers disagree and the contract declares no divergence",
