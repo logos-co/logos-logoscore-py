@@ -178,6 +178,7 @@
           # composites) has ONE provider today — the C++ cdylib backend cannot
           # express these types yet — so its table runs without a differential.
           testModulesExtInstall = logos-test-modules.modules.${system}.test_fullapi_ext_rust.install;
+          testModulesExtCppInstall = logos-test-modules.modules.${system}.test_fullapi_ext_cpp.install;
 
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
@@ -270,6 +271,7 @@
               --known   ${logos-test-modules}/conformance/known-ext.json \
               --contract ${logos-test-modules}/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl \
               --modules test_fullapi_ext_rust=${testModulesExtInstall}/modules \
+              --modules test_fullapi_ext_cpp=${testModulesExtCppInstall}/modules \
               --jsonl $out/matrix-ext.jsonl \
               2>&1 | tee $out/matrix-ext.txt
           '';

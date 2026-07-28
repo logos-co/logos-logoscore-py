@@ -326,8 +326,14 @@ def main() -> int:
 
     xfail: dict[tuple[str, str], str] = {}
     for entry in known["xfail"]:
+        # `providers` is the entry-wide set; `per_case_providers` narrows an
+        # individual case to the providers that actually fail it. Without that
+        # narrowing a defect present on one provider gets registered for both,
+        # and the OTHER provider — which passes — is then reported as xpass,
+        # i.e. the registry manufactures a failure.
+        narrowed = entry.get("per_case_providers", {})
         for cid in entry["cases"]:
-            for prov in entry["providers"]:
+            for prov in narrowed.get(cid, entry["providers"]):
                 xfail[(cid, prov)] = entry["id"]
 
     modules: dict[str, str] = {}
