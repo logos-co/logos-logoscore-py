@@ -48,10 +48,16 @@ ARG FLAVOR=portable
 # Rosetta layer (on Apple Silicon's linux/amd64 fallback) blocks the
 # seccomp BPF that nix's sandbox wants to install, and we don't need
 # the sandbox anyway — the docker layer already isolates the build.
+# The Logos Attic caches are anonymously readable and hold the CLI
+# closure, so the `nix build` below substitutes instead of compiling;
+# `fallback` keeps the build working when the cache is unreachable.
 RUN mkdir -p /etc/nix && { \
         echo "experimental-features = nix-command flakes"; \
         echo "sandbox = false"; \
         echo "filter-syscalls = false"; \
+        echo "extra-substituters = https://cache.nix.logos.co/public https://cache.nix.logos.co/ci"; \
+        echo "extra-trusted-public-keys = public:l4HrXgL4nw246+LBh2SOJyhz64BoGegOYLheT/iIAPU= ci:aVJqjS4NWX5WfqHO0AEhIScjGu/JyK5FoydPrnEbMvc="; \
+        echo "fallback = true"; \
     } > /etc/nix/nix.conf
 
 WORKDIR /src
