@@ -148,16 +148,23 @@ def contract_cells(lidl_path: Path) -> set[tuple[str, str]]:
         m = _METHOD_RE.match(line)
         if m:
             _, params, ret = m.groups()
-            for p in _split_params(params):
+            parts = _split_params(params)
+            for k, p in enumerate(parts):
                 if ":" in p:
-                    cells.add((norm_type(p.split(":", 1)[1]), "method_arg"))
+                    # An argument in a multi-parameter method is a DIFFERENT
+                    # cell from a sole argument: the sole case cannot catch a
+                    # generator that mixes up positional slots.
+                    pos = "method_arg" if len(parts) == 1 else f"method_arg@{k}"
+                    cells.add((norm_type(p.split(":", 1)[1]), pos))
             cells.add((norm_type(ret), "method_return"))
             continue
         m = _EVENT_RE.match(line)
         if m:
-            for p in _split_params(m.group(2)):
+            parts = _split_params(m.group(2))
+            for k, p in enumerate(parts):
                 if ":" in p:
-                    cells.add((norm_type(p.split(":", 1)[1]), "event_param"))
+                    pos = "event_param" if len(parts) == 1 else f"event_param@{k}"
+                    cells.add((norm_type(p.split(":", 1)[1]), pos))
     return cells
 
 
@@ -232,10 +239,12 @@ def run_events(client, module: str, events: list, timeout: float):
 
     out: dict[str, Result] = {}
     for ev in events:
-        value = materialize(ev["value"])
+        raw = ev.get("raw", False)
+        values = ([materialize(v, raw) for v in ev["values"]] if "values" in ev
+                  else [materialize(ev["value"], raw)])
         try:
             out[ev["id"]] = Result(value=capture_event(
-                client, module, ev["event"], ev["fire"], value, timeout))
+                client, module, ev["event"], ev["fire"], values, timeout))
         except MethodError as e:
             out[ev["id"]] = Result(error=e.code or "MethodError")
         except LogoscoreError as e:
@@ -245,7 +254,7 @@ def run_events(client, module: str, events: list, timeout: float):
     return out
 
 
-def capture_event(client, module: str, event: str, fire: str, value, timeout: float):
+def capture_event(client, module: str, event: str, fire: str, values: list, timeout: float):
     """Subscribe, fire, wait — re-firing until the event lands.
 
     The watcher subscribes on a background subprocess, so "watch is live" and
@@ -268,7 +277,7 @@ def capture_event(client, module: str, event: str, fire: str, value, timeout: fl
     with client.on_event(module, event, on_event):
         deadline = time.monotonic() + timeout
         while True:
-            client.call(module, fire, value, timeout=timeout)
+            client.call(module, fire, *values, timeout=timeout)
             if got.wait(timeout=1.0):
                 break
             if time.monotonic() >= deadline:
@@ -277,7 +286,11 @@ def capture_event(client, module: str, event: str, fire: str, value, timeout: fl
     payload = received[0]
     data = payload.get("data", payload) if isinstance(payload, dict) else payload
     if isinstance(data, dict) and "arg0" in data:
-        data = data["arg0"]
+        # A multi-parameter event arrives as {arg0, arg1, ...}. Return the
+        # ordered list so argument POSITION is part of what is compared — a
+        # single-arg event still reduces to its one value.
+        ordered = [data[f"arg{i}"] for i in range(len(data)) if f"arg{i}" in data]
+        return ordered[0] if len(ordered) == 1 else ordered
     return data
 
 
@@ -338,7 +351,7 @@ def main() -> int:
             got = measured[module].get(cid, Result(error="not-run"))
             want, have_want = (
                 expectation(case, module) if "method" in case
-                else (case["value"], True)
+                else (case["values"] if "values" in case else case["value"], True)
             )
             if not have_want:
                 status = "skip"
@@ -394,6 +407,14 @@ def main() -> int:
     if args.contract:
         covered = set()
         for c in by_case.values():
+            # A multi-argument case covers specific (type, position) PAIRS —
+            # `int` in slot 0, `bstr` in slot 2 — not the cross-product of its
+            # type list and its position list, which would claim cells it never
+            # exercises. Such a case declares them explicitly.
+            if "cells" in c:
+                for ty, pos in c["cells"]:
+                    covered.add((norm_type(ty), pos))
+                continue
             for pos in c["position"].split(","):
                 covered.add((norm_type(c["type"]), pos))
         for ty, pos in sorted(contract_cells(Path(args.contract))):
