@@ -233,7 +233,14 @@ def run_methods(client, module: str, cases: list, timeout: float):
         args = [materialize(a, raw) for a in case.get("args", [])]
         t = case.get("timeout_ms", timeout * 1000) / 1000.0
         try:
-            out[case["id"]] = Result(value=client.call(module, case["method"], *args, timeout=t))
+            # decode_bytes is tied to `raw` for the same reason the ARGUMENT is:
+            # a `raw` case is one where the tagged-bytes form must be observed as
+            # data, not materialized. The client decodes tags unconditionally by
+            # default, so without this the _bytes-collision cells measured the
+            # CLIENT undoing the collision rather than the system producing it —
+            # and no change to any C++ repo could ever have moved them.
+            out[case["id"]] = Result(value=client.call(
+                module, case["method"], *args, timeout=t, decode_bytes=not raw))
         except MethodError as e:
             out[case["id"]] = Result(error=e.code or "MethodError")
         except LogoscoreError as e:

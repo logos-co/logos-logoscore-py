@@ -325,11 +325,23 @@ class LogoscoreClient:
         method: str,
         *args: Any,
         timeout: float | None = None,
+        decode_bytes: bool = True,
     ) -> Any:
         """Call a `Q_INVOKABLE` method on a loaded module.
 
         Returns the method's result value (the `result` field of the JSON
         envelope). Raises `MethodError` on status == "error".
+
+        `decode_bytes=False` returns the envelope's result verbatim, with any
+        canonical `{"_bytes": "..."}` object left as an object rather than
+        materialized into `bytes`.
+
+        That distinction is not cosmetic. The tagged form is structurally
+        indistinguishable from a one-key user map, and decoding here — inside the
+        client, after the value has crossed every boundary intact — makes the
+        collision look like a platform behaviour when it is this function's. A
+        test that wants to observe what the SYSTEM did with such a value has to
+        turn the decode off, or it is measuring the client.
         """
         cli_args = ["call", module, method, *(_arg_to_str(a) for a in args)]
         envelope = _proc.run_json(
@@ -346,7 +358,8 @@ class LogoscoreClient:
                 code=envelope.get("code"),
             )
         if isinstance(envelope, dict) and "result" in envelope:
-            return _decode_bytes_tags(envelope["result"])
+            result = envelope["result"]
+            return _decode_bytes_tags(result) if decode_bytes else result
         return envelope
 
     # ── Event subscription ──────────────────────────────────────────────────
