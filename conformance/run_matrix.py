@@ -25,8 +25,21 @@ Usage:
 This is the `py` driver. The case table and the xfail registry live with the
 PROVIDERS, in logos-test-modules/conformance/ — the driver lives here because
 it uses this package's client, and logoscore-py already depends on
-logos-test-modules (the reverse would be a cycle). Other consumers (the C++,
-Rust and QML proxies) replay the same cases.json.
+logos-test-modules (the reverse would be a cycle).
+
+WHAT THIS DRIVER DOES NOT COVER. The consumer axis has exactly one point: `py`.
+`--consumer` is a label written into the report, not a driver selector — no C++,
+Rust or QML driver replays cases.json today. That is a real hole, not a
+formality, and it has already hidden a defect: the event bridge failed to decode
+canonical `{"_bytes": ...}` into a QByteArray, which this driver could not see
+because the undecoded map round-trips to JSON and the python client decodes the
+tag itself (see events.py). A Qt/C++ or QML subscriber got the map. A matrix
+with one consumer cannot see a defect that its own consumer happens to undo.
+
+Transport is likewise fixed: the daemon is constructed with no `transports=`, so
+every cell here is measured over LocalSocket/QtRO. The plain (tcp/tcp_ssl) wire
+has its own uint64 defect that this matrix therefore cannot reach — see
+known.json.
 """
 from __future__ import annotations
 
