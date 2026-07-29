@@ -1,20 +1,20 @@
-"""Lifecycle manager for a `logoscore` daemon running inside docker.
+"""Lifecycle manager for a `logosctl` daemon running inside docker.
 
-`LogoscoreDockerDaemon` is to `LogoscoreDaemon` what its name suggests:
+`LogosctlDockerDaemon` is to `LogosctlDaemon` what its name suggests:
 the same context-manager shape, but the daemon runs in a container and
 speaks TCP to the host. Use it when your test setup deliberately
 crosses a container boundary — e.g. you want to smoke-test a real
-distribution of logoscore, or you need the daemon to be reachable from
+distribution of logosctl, or you need the daemon to be reachable from
 multiple processes on the host.
 
 Example:
-    from logoscore import LogoscoreDockerDaemon
+    from logosctl import LogosctlDockerDaemon
 
-    with LogoscoreDockerDaemon(
-        image="logoscore:smoke-portable",
+    with LogosctlDockerDaemon(
+        image="logosctl:smoke-portable",
         modules_dir="./my-module/result/modules",
     ) as daemon:
-        client = daemon.client(binary="./logoscore")
+        client = daemon.client(binary="./logosctl")
         client.load_module("my_module")
         print(client.call("my_module", "do_something", 42))
 
@@ -34,8 +34,8 @@ Port strategy (status-go `tests-functional` pattern):
     `CONTAINER_CAP_TCP_PORT` (6001). The host maps an ephemeral port to
     each via `-p …:6000` / `-p …:6001`. The client dials those forwarded
     host ports from a per-module `client/config.json` written by
-    `LogoscoreClient.write_config` — one entry per module, each with its
-    own port. (A single `LOGOSCORE_CLIENT_TCP_PORT` env override can't be
+    `LogosctlClient.write_config` — one entry per module, each with its
+    own port. (A single `LOGOSCTL_CLIENT_TCP_PORT` env override can't be
     used here: the CLI applies it to every module uniformly, which would
     collapse capability_module onto core_service's port.)
 """
@@ -52,8 +52,8 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from .client import DaemonEndpoint, LogoscoreClient
-from .errors import LogoscoreError
+from .client import DaemonEndpoint, LogosctlClient
+from .errors import LogosctlError
 
 
 # ── Module-level helpers (also re-exported from the package) ──────────────
@@ -104,7 +104,7 @@ def pick_free_port() -> int:
 # so the build closure (glibc, Qt, openssl, boost) lines up with what the
 # daemon image was compiled against. Override via the env var if you've
 # bumped the daemon image's builder base.
-_BUILDER_IMAGE = os.environ.get("LOGOSCORE_BUILDER_IMAGE", "nixos/nix:2.24.9")
+_BUILDER_IMAGE = os.environ.get("LOGOSCTL_BUILDER_IMAGE", "nixos/nix:2.24.9")
 
 
 def build_modules_in_docker(
@@ -116,7 +116,7 @@ def build_modules_in_docker(
 ) -> Path:
     """Build one or more Logos module flakes inside docker and return the
     host-side modules dir, ready to pass as
-    `LogoscoreDockerDaemon(modules_dir=...)`.
+    `LogosctlDockerDaemon(modules_dir=...)`.
 
     Why this exists: a module compiled on your host (macOS dylib,
     Linux-with-different-glibc, etc.) often won't load inside the
@@ -142,7 +142,7 @@ def build_modules_in_docker(
     unpushed branch, push to a fork and reference it via `github:...`,
     or build outside this helper (e.g. `nix build .#install-portable`)
     and pass the resulting `result/modules` directly to
-    `LogoscoreDockerDaemon(modules_dir=...)`.
+    `LogosctlDockerDaemon(modules_dir=...)`.
 
     `attr` is the flake-output path that produces a derivation whose
     `$out/modules/<name>/...` matches what the daemon's `-m` flag
@@ -164,13 +164,13 @@ def build_modules_in_docker(
             ],
             output_dir="./build/modules",
         )
-        with LogoscoreDockerDaemon(
-            image="logoscore:smoke-portable",
+        with LogosctlDockerDaemon(
+            image="logosctl:smoke-portable",
             modules_dir=modules_dir,
         ) as daemon:
             ...
 
-    Raises LogoscoreError on docker / nix build failure (the offending
+    Raises LogosctlError on docker / nix build failure (the offending
     flake_ref#attr is included in the message).
     """
     if not builds:
@@ -239,7 +239,7 @@ def build_modules_in_docker(
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
-        raise LogoscoreError(
+        raise LogosctlError(
             f"Module build failed (exit {r.returncode}):\n"
             f"  builds: {builds}\n"
             f"  image:  {image}\n"
@@ -250,8 +250,8 @@ def build_modules_in_docker(
 
 # ── The helper ────────────────────────────────────────────────────────────
 
-class LogoscoreDockerDaemon:
-    """Spawn a logoscore daemon inside a docker container and drive it
+class LogosctlDockerDaemon:
+    """Spawn a logosctl daemon inside a docker container and drive it
     from the host over TCP.
 
     Construction stores config only. `start()` actually runs the
@@ -265,7 +265,7 @@ class LogoscoreDockerDaemon:
         image: str,
         modules_dir: str | Path,
         # Optional bits — sane defaults mean you can do
-        # `LogoscoreDockerDaemon(image=..., modules_dir=...)`.
+        # `LogosctlDockerDaemon(image=..., modules_dir=...)`.
         config_dir: str | Path | None = None,
         persistence_dir: str | Path | None = None,
         host_port: int | None = None,
@@ -326,7 +326,7 @@ class LogoscoreDockerDaemon:
         self.verify_peer = verify_peer
         self.startup_timeout = startup_timeout
         # Additional dirs *inside the container* to scan for modules, on
-        # top of `/opt/logoscore/modules` (CLI's built-in) and
+        # top of `/opt/logosctl/modules` (CLI's built-in) and
         # `/user-modules` (the host `modules_dir` bind-mount). For most
         # callers empty.
         self.extra_module_dirs = list(extra_module_dirs or [])
@@ -342,20 +342,20 @@ class LogoscoreDockerDaemon:
         self._owns_config_dir = config_dir is None
         if config_dir is None:
             self._config_dir = Path(
-                tempfile.mkdtemp(prefix="logoscore-docker-cfg-"))
+                tempfile.mkdtemp(prefix="logosctl-docker-cfg-"))
         else:
             self._config_dir = Path(config_dir)
             self._config_dir.mkdir(parents=True, exist_ok=True)
         self._owns_persistence_dir = persistence_dir is None
         if persistence_dir is None:
             self._persistence_dir = Path(
-                tempfile.mkdtemp(prefix="logoscore-docker-pers-"))
+                tempfile.mkdtemp(prefix="logosctl-docker-pers-"))
         else:
             self._persistence_dir = Path(persistence_dir)
             self._persistence_dir.mkdir(parents=True, exist_ok=True)
 
         # Host-only client config dir. The daemon's view of /config
-        # (and the LogoscoreClient's `config_dir` argument when this
+        # (and the LogosctlClient's `config_dir` argument when this
         # daemon hands one out) are NOT the same on disk — the
         # container writes /config/{daemon,client}/* as root, and the
         # host process can't overwrite root-owned files in there. The
@@ -364,7 +364,7 @@ class LogoscoreDockerDaemon:
         # daemon's raw auto-token. Cleaned up on stop() alongside
         # _config_dir.
         self._host_client_dir = Path(
-            tempfile.mkdtemp(prefix="logoscore-docker-client-"))
+            tempfile.mkdtemp(prefix="logosctl-docker-client-"))
 
         self._host_port = host_port  # may be None until start()
         # Capability_module's host-side port. Picked alongside
@@ -376,7 +376,7 @@ class LogoscoreDockerDaemon:
         self._host_cap_port: int | None = None
         self._container_name = (
             container_name
-            or f"logoscore-{uuid.uuid4().hex[:12]}"
+            or f"logosctl-{uuid.uuid4().hex[:12]}"
         )
         self.network = network
         self._container_id: str | None = None
@@ -388,7 +388,7 @@ class LogoscoreDockerDaemon:
         """Dynamic host port mapped to the container's TCP listener.
         Only valid once `start()` has completed."""
         if self._host_port is None:
-            raise LogoscoreError("daemon hasn't started yet")
+            raise LogosctlError("daemon hasn't started yet")
         return self._host_port
 
     @property
@@ -481,7 +481,7 @@ class LogoscoreDockerDaemon:
     @property
     def container_id(self) -> str:
         if self._container_id is None:
-            raise LogoscoreError("daemon hasn't started yet")
+            raise LogosctlError("daemon hasn't started yet")
         return self._container_id
 
     @property
@@ -490,16 +490,16 @@ class LogoscoreDockerDaemon:
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
-    def start(self) -> "LogoscoreDockerDaemon":
+    def start(self) -> "LogosctlDockerDaemon":
         """`docker run` the daemon and block until it writes state.json.
 
-        Raises LogoscoreError on docker failure / startup timeout. Does
+        Raises LogosctlError on docker failure / startup timeout. Does
         NOT check `docker_available()` or `image_present()` up front —
         callers that care about environmental skips should do so before
         calling start().
         """
         if self._container_id is not None:
-            raise LogoscoreError("daemon is already started")
+            raise LogosctlError("daemon is already started")
 
         if self._host_port is None:
             self._host_port = pick_free_port()
@@ -538,7 +538,7 @@ class LogoscoreDockerDaemon:
         # core_service rides CONTAINER_TCP_PORT, capability_module
         # rides CONTAINER_CAP_TCP_PORT. The daemon implicitly adds a
         # LocalSocket listener to every configured module (see
-        # `logoscore-cli/docs/spec.md` "Local is always present"), so
+        # `logosctl-cli/docs/spec.md` "Local is always present"), so
         # in-process module-to-module traffic uses the local socket
         # without any explicit flag here.
         if self.transport == "tcp":
@@ -594,12 +594,12 @@ class LogoscoreDockerDaemon:
             "--config-dir", "/config",
             "--persistence-path", "/persistence",
             *transport_flags,
-            # -m is repeatable. /opt/logoscore/modules is the CLI's own
+            # -m is repeatable. /opt/logosctl/modules is the CLI's own
             # built-in modules (capability_module et al., populated in
             # the portable flavor; empty-but-harmless in dev). The
             # user's plugins come in via /user-modules. Extra dirs are
             # appended last.
-            "-m", "/opt/logoscore/modules",
+            "-m", "/opt/logosctl/modules",
             "-m", "/user-modules",
         ]
         for d in self.extra_module_dirs:
@@ -616,7 +616,7 @@ class LogoscoreDockerDaemon:
                 capture_output=True, text=True,
             )
             if inspect.returncode != 0:
-                raise LogoscoreError(
+                raise LogosctlError(
                     f"docker network {self.network!r} does not exist; "
                     "create it before starting the daemon "
                     f"(stderr: {inspect.stderr.strip()})"
@@ -624,7 +624,7 @@ class LogoscoreDockerDaemon:
 
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            raise LogoscoreError(
+            raise LogosctlError(
                 f"docker run failed (exit {r.returncode}):\n"
                 f"  stderr: {r.stderr.strip()}\n"
                 f"  cmd: {' '.join(cmd)}"
@@ -636,7 +636,7 @@ class LogoscoreDockerDaemon:
             # `--rm` container takes them with it and debugging is blind.
             logs = self._capture_logs()
             self.stop()
-            raise LogoscoreError(
+            raise LogosctlError(
                 f"daemon never wrote state.json within "
                 f"{self.startup_timeout}s. Container logs:\n{logs}"
             )
@@ -647,7 +647,7 @@ class LogoscoreDockerDaemon:
         # `<host_client_dir>/client/config.json` (host-correct ports)
         # and `<host_client_dir>/client/auto.json` (the raw token,
         # copied out of the daemon's /config/daemon/tokens). The
-        # `client(...)` factory below points the LogoscoreClient at
+        # `client(...)` factory below points the LogosctlClient at
         # `host_client_dir` so it reads from this host-owned tree
         # instead of the container-owned bind-mount. Tear the container
         # down if seeding fails (e.g. the auto token never showed up) so
@@ -672,14 +672,14 @@ class LogoscoreDockerDaemon:
         `host_port`, `capability_module` on `host_cap_port` — so the two
         endpoints MUST carry distinct ports. This is the whole reason the
         client is config-file-driven rather than env-var-driven: the CLI's
-        `LOGOSCORE_CLIENT_TCP_PORT` override is applied to every module
+        `LOGOSCTL_CLIENT_TCP_PORT` override is applied to every module
         uniformly, which would collapse capability_module onto
         core_service's port and break the SDK's auto-`requestModule` dial.
 
         `verify` is only serialized for `tcp_ssl` (DaemonEndpoint drops it
         for plain tcp)."""
         if self._host_port is None or self._host_cap_port is None:
-            raise LogoscoreError(
+            raise LogosctlError(
                 "forwarded host ports not assigned — call start() first "
                 "(both core_service and capability_module need a port)"
             )
@@ -719,14 +719,14 @@ class LogoscoreDockerDaemon:
         # auth error.
         raw_token = self._wait_for_auto_token()
         if not raw_token:
-            raise LogoscoreError(
+            raise LogosctlError(
                 "daemon did not emit a readable auto token at "
                 "/config/daemon/tokens/auto.json within "
                 f"{self.startup_timeout}s — cannot wire up an authenticated "
                 "client"
             )
 
-        LogoscoreClient.write_config(
+        LogosctlClient.write_config(
             self._host_client_dir, endpoints, token=raw_token)
 
     def _wait_for_auto_token(self) -> str | None:
@@ -754,11 +754,11 @@ class LogoscoreDockerDaemon:
             # before tearing down — symmetric with _proc.py's CLI
             # forwarding, so a single env flag dumps both sides of the
             # CLI ↔ daemon conversation.
-            if os.environ.get("LOGOSCORE_PY_FORWARD_OUTPUT", "").lower() in (
+            if os.environ.get("LOGOSCTL_PY_FORWARD_OUTPUT", "").lower() in (
                 "1", "true", "yes", "on",
             ):
                 logs = self._capture_logs()
-                header = f"[logoscore-py docker-daemon {self._container_name}]"
+                header = f"[logosctl-py docker-daemon {self._container_name}]"
                 import sys
                 print(header, file=sys.stderr, flush=True)
                 for line in logs.splitlines():
@@ -785,17 +785,17 @@ class LogoscoreDockerDaemon:
     def client(
         self,
         *,
-        binary: str = "logoscore",
+        binary: str = "logosctl",
         timeout: float | None = 30.0,
         tcp_host: str = "localhost",
         codec: str | None = None,
         no_verify_peer: bool | None = None,
-    ) -> LogoscoreClient:
-        """Build a LogoscoreClient wired to dial this daemon.
+    ) -> LogosctlClient:
+        """Build a LogosctlClient wired to dial this daemon.
 
-        `binary` is the host-side `logoscore` executable — the client
+        `binary` is the host-side `logosctl` executable — the client
         shells out to it for some operations (e.g. `watch`). Defaults
-        to whatever `logoscore` resolves to on PATH.
+        to whatever `logosctl` resolves to on PATH.
 
         `tcp_host` defaults to localhost because the container's port
         is published there. Override for remote-docker setups — it is
@@ -806,11 +806,11 @@ class LogoscoreDockerDaemon:
         tests) — it sets the on-disk `verify_peer` to False. Set it to
         False to exercise the verification path, in which case the
         constructor's `verify_peer` (controlled by
-        `LogoscoreDockerDaemon(verify_peer=...)`) takes effect. Ignored
+        `LogosctlDockerDaemon(verify_peer=...)`) takes effect. Ignored
         when transport is plain `tcp`.
 
         The returned client dials purely from `client/config.json` — with
-        NO `LOGOSCORE_CLIENT_*` env overrides. That's deliberate: the
+        NO `LOGOSCTL_CLIENT_*` env overrides. That's deliberate: the
         daemon's `core_service` and `capability_module` ride distinct
         forwarded host ports, and a single env override is applied to
         every module uniformly, so it could only configure one of them
@@ -818,7 +818,7 @@ class LogoscoreDockerDaemon:
         per-module config file is the only thing that can express both.
         """
         if self._container_id is None:
-            raise LogoscoreError(
+            raise LogosctlError(
                 "daemon is not running — call start() or use the context manager"
             )
         wire_codec = codec or self.codec
@@ -838,7 +838,7 @@ class LogoscoreDockerDaemon:
         # written by _build_host_client_config() at startup is left in
         # place. No env overrides — config.json is authoritative.
         endpoints = self._client_endpoints(tcp_host, wire_codec, verify)
-        return LogoscoreClient.connect(
+        return LogosctlClient.connect(
             endpoints,
             binary=binary,
             config_dir=self._host_client_dir,
@@ -873,7 +873,7 @@ class LogoscoreDockerDaemon:
 
     # ── Context manager ─────────────────────────────────────────────────
 
-    def __enter__(self) -> "LogoscoreDockerDaemon":
+    def __enter__(self) -> "LogosctlDockerDaemon":
         return self.start()
 
     def __exit__(self, *_exc) -> None:

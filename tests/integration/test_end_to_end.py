@@ -1,4 +1,4 @@
-"""End-to-end integration tests against a real logoscore daemon.
+"""End-to-end integration tests against a real logosctl daemon.
 
 Uses `logos-test-modules` (its `test_basic_module` exposes `emitTestEvent`
 that fires a `testEvent` with the first argument as payload — see the
@@ -10,12 +10,12 @@ import threading
 
 import pytest
 
-from logoscore import LogoscoreDaemon
+from logosctl import LogosctlDaemon
 
 
 @pytest.fixture
 def daemon(
-    logoscore_bin,
+    logosctl_bin,
     test_modules_dir,
     transport,
     tcp_port,
@@ -41,8 +41,8 @@ def daemon(
             kwargs["tcp_ssl_port"] = tcp_ssl_port
             kwargs["ssl_cert"] = cert
             kwargs["ssl_key"] = key
-    with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
+    with LogosctlDaemon(
+        modules_dir=test_modules_dir, binary=logosctl_bin, **kwargs,
     ) as d:
         yield d
 
@@ -51,7 +51,7 @@ def daemon(
 def client(daemon, transport):
     """Return a callable that builds a daemon client wired to the
     transport being tested. Replaces an earlier import-time monkeypatch
-    of ``LogoscoreDaemon.client`` that leaked across the whole test
+    of ``LogosctlDaemon.client`` that leaked across the whole test
     session and could break tests depending on import order.
 
     For `tcp_ssl`, defaults `no_verify_peer=True` — the daemon is
@@ -109,6 +109,6 @@ def test_load_call_and_event_roundtrip(client):
 
 def test_isolated_config_dir_is_used(daemon):
     # The daemon's connection file must live under its isolated config_dir,
-    # not in the user's ~/.logoscore.
+    # not in the user's ~/.logosctl.
     assert daemon.connection_file.exists()
     assert str(daemon.connection_file).startswith(str(daemon.config_dir))

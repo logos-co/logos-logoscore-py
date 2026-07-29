@@ -34,7 +34,7 @@ jobs:
     # https://docs.pypi.org/trusted-publishers/
     environment:
       name: pypi
-      url: https://pypi.org/project/logoscore/
+      url: https://pypi.org/project/logosctl/
     permissions:
       id-token: write
     steps:

@@ -25,7 +25,7 @@ See:
   repos/logos-test-modules/test-basic-module-cpp/src/test_basic_module_cpp_impl.h
   repos/logos-test-modules/test-basic-module-cpp/src/test_basic_module_cpp_impl.cpp
 
-Skipped unless LOGOSCORE_BIN and LOGOSCORE_TEST_MODULES_DIR are set — the
+Skipped unless LOGOSCTL_BIN and LOGOSCTL_TEST_MODULES_DIR are set — the
 Nix `integration` check wires both up (and bundles this module into the
 test modules dir alongside `test_basic_module`).
 """
@@ -36,13 +36,13 @@ import time
 
 import pytest
 
-from logoscore import LogoscoreDaemon
+from logosctl import LogosctlDaemon
 
 MODULE = "test_basic_module_cpp"
 
 
 @pytest.fixture(scope="module")
-def client(logoscore_bin, test_modules_dir, transport, request):
+def client(logosctl_bin, test_modules_dir, transport, request):
     """Build a daemon + client wired to whatever transport the suite is
     parametrised on. Mirror of `test_basic_module_methods.py::client`
     — kept duplicated rather than moved to a conftest helper so each
@@ -69,8 +69,8 @@ def client(logoscore_bin, test_modules_dir, transport, request):
             # client has to opt out of peer verification or every call
             # fails the TLS handshake.
             client_kwargs["no_verify_peer"] = True
-    with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
+    with LogosctlDaemon(
+        modules_dir=test_modules_dir, binary=logosctl_bin, **kwargs,
     ) as daemon:
         c = daemon.client(**client_kwargs)
         c.load_module(MODULE)

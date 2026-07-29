@@ -1,4 +1,4 @@
-"""Thin wrappers around the `logoscore issue-token` / `revoke-token` /
+"""Thin wrappers around the `logosctl issue-token` / `revoke-token` /
 `list-tokens` subcommands.
 
 These are daemon-less operations: they read and write
@@ -18,7 +18,7 @@ from . import _proc
 def issue_token(
     name: str,
     *,
-    binary: str = "logoscore",
+    binary: str = "logosctl",
     config_dir: str | Path | None = None,
     replace: bool = False,
     timeout: float | None = 30.0,
@@ -29,7 +29,7 @@ def issue_token(
     only exists in the returned dict and in the per-client file at
     `file`; the daemon's `tokens.json` stores only a hash.
     """
-    args = ["issue-token", "--name", name]
+    args = ["token", "issue", "--name", name]
     if replace:
         args.append("--replace")
     return _proc.run_json(
@@ -42,14 +42,14 @@ def issue_token(
 def revoke_token(
     name: str,
     *,
-    binary: str = "logoscore",
+    binary: str = "logosctl",
     config_dir: str | Path | None = None,
     timeout: float | None = 30.0,
 ) -> dict[str, Any]:
     """Revoke a previously-issued token by name. Raises ModuleError on
     exit code 3 (no token with that name)."""
     return _proc.run_json(
-        binary, ["revoke-token", name],
+        binary, ["token", "revoke", name],
         config_dir=Path(config_dir) if config_dir else None,
         token=None, timeout=timeout,
     )
@@ -57,13 +57,13 @@ def revoke_token(
 
 def list_tokens(
     *,
-    binary: str = "logoscore",
+    binary: str = "logosctl",
     config_dir: str | Path | None = None,
     timeout: float | None = 30.0,
 ) -> list[dict[str, str]]:
     """List currently-issued tokens. Returns `[{"name", "issued_at"}, ...]`."""
     result = _proc.run_json(
-        binary, ["list-tokens"],
+        binary, ["token", "ls"],
         config_dir=Path(config_dir) if config_dir else None,
         token=None, timeout=timeout,
     )

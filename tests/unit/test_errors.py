@@ -1,6 +1,6 @@
-from logoscore.errors import (
+from logosctl.errors import (
     DaemonNotRunningError,
-    LogoscoreError,
+    LogosctlError,
     MethodError,
     ModuleError,
     from_exit_code,
@@ -12,8 +12,8 @@ def test_exit_code_mapping():
     assert isinstance(from_exit_code(3, "x"), ModuleError)
     assert isinstance(from_exit_code(4, "x"), MethodError)
     # Unknown codes fall back to the base class
-    assert isinstance(from_exit_code(1, "x"), LogoscoreError)
-    assert isinstance(from_exit_code(99, "x"), LogoscoreError)
+    assert isinstance(from_exit_code(1, "x"), LogosctlError)
+    assert isinstance(from_exit_code(99, "x"), LogosctlError)
 
 
 def test_error_attributes():
@@ -25,6 +25,6 @@ def test_error_attributes():
 
 
 def test_error_hierarchy():
-    assert issubclass(DaemonNotRunningError, LogoscoreError)
-    assert issubclass(ModuleError, LogoscoreError)
-    assert issubclass(MethodError, LogoscoreError)
+    assert issubclass(DaemonNotRunningError, LogosctlError)
+    assert issubclass(ModuleError, LogosctlError)
+    assert issubclass(MethodError, LogosctlError)

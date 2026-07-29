@@ -1,4 +1,4 @@
-"""Event subscriptions backed by a `logoscore watch` subprocess.
+"""Event subscriptions backed by a `logosctl watch` subprocess.
 
 Each subscription owns a background thread that reads NDJSON from the
 watcher's stdout and dispatches each parsed event to a user callback.
@@ -20,7 +20,7 @@ _log = logging.getLogger(__name__)
 
 
 class Subscription:
-    """A live event subscription. Returned by `LogoscoreClient.on_event`."""
+    """A live event subscription. Returned by `LogosctlClient.on_event`."""
 
     def __init__(
         self,
@@ -49,9 +49,9 @@ class Subscription:
     ) -> "Subscription":
         env = os.environ.copy()
         if config_dir is not None:
-            env["LOGOSCORE_CONFIG_DIR"] = str(config_dir)
+            env["LOGOSCTL_CONFIG_DIR"] = str(config_dir)
         if token is not None:
-            env["LOGOSCORE_TOKEN"] = token
+            env["LOGOSCTL_TOKEN"] = token
         if extra_env:
             env.update(extra_env)
 
@@ -70,7 +70,7 @@ class Subscription:
         sub = cls(process, None, callback, error_callback)  # type: ignore[arg-type]
         thread = threading.Thread(
             target=sub._pump,
-            name=f"logoscore-watch-{'-'.join(args)}",
+            name=f"logosctl-watch-{'-'.join(args)}",
             daemon=True,
         )
         sub._thread = thread
@@ -141,4 +141,4 @@ class Subscription:
             except Exception:  # noqa: BLE001
                 _log.exception("error_callback itself raised")
         else:
-            _log.warning("logoscore event handler error: %s", exc)
+            _log.warning("logosctl event handler error: %s", exc)

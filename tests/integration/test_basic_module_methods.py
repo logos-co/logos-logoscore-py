@@ -12,7 +12,7 @@ docker smoke suite (`tests/docker_smoke/test_docker_smoke.py`) replays the
 same matrix over TCP in both JSON and CBOR via `tests/_basic_module_cases.py`;
 keep the two in sync when adding methods to `test_basic_module`.
 
-Skipped unless LOGOSCORE_BIN and LOGOSCORE_TEST_MODULES_DIR are set — the
+Skipped unless LOGOSCTL_BIN and LOGOSCTL_TEST_MODULES_DIR are set — the
 Nix `integration` check wires both up.
 """
 from __future__ import annotations
@@ -22,13 +22,13 @@ import time
 
 import pytest
 
-from logoscore import LogoscoreDaemon
+from logosctl import LogosctlDaemon
 
 MODULE = "test_basic_module"
 
 
 @pytest.fixture(scope="module")
-def client(logoscore_bin, test_modules_dir, transport, request):
+def client(logosctl_bin, test_modules_dir, transport, request):
     """Build a daemon + client wired to whatever transport the suite is
     parametrised on.
 
@@ -59,8 +59,8 @@ def client(logoscore_bin, test_modules_dir, transport, request):
             # client has to opt out of peer verification or every call
             # fails the TLS handshake.
             client_kwargs["no_verify_peer"] = True
-    with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
+    with LogosctlDaemon(
+        modules_dir=test_modules_dir, binary=logosctl_bin, **kwargs,
     ) as daemon:
         c = daemon.client(**client_kwargs)
         c.load_module(MODULE)
@@ -70,7 +70,7 @@ def client(logoscore_bin, test_modules_dir, transport, request):
 # ── Return type: void ────────────────────────────────────────────────────────
 # The CLI returns `true` as a success indicator for Q_INVOKABLE methods that
 # return `void` — there's no distinction in the JSON between "true return
-# value" and "void return" (see logoscore's call_executor.cpp path).
+# value" and "void return" (see logosctl's call_executor.cpp path).
 
 def test_do_nothing(client):
     assert client.call(MODULE, "doNothing") is True

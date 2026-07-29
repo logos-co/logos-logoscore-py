@@ -1,8 +1,8 @@
-# logoscore-py Specification
+# logosctl-py Specification
 
 ## Overview
 
-`logoscore-py` is a Python control surface for the **logoscore daemon** — the
+`logosctl-py` is a Python control surface for the **logosctl daemon** — the
 headless runtime that hosts Logos modules and exposes their methods and events
 over RPC. It lets a Python program launch a daemon, load modules into it, call
 methods, subscribe to events, and provision authentication tokens, all without
@@ -13,12 +13,12 @@ need to drive a *real* Logos runtime from Python. A module author wants to smoke
 a freshly built plugin against a genuine distribution of the daemon; a CI pipeline
 wants to exercise the full wire stack (local socket, TCP, TCP+TLS; JSON and CBOR
 codecs) end-to-end; an orchestration script wants several daemons running side by
-side, possibly across container boundaries. `logoscore-py` is the layer that makes
+side, possibly across container boundaries. `logosctl-py` is the layer that makes
 those journeys ordinary Python — context managers, method calls, callbacks, and
 exceptions — instead of shell plumbing.
 
-Conceptually it is a **thin client over the logoscore command surface**: every
-operation it offers corresponds to a logoscore command, and every value it returns
+Conceptually it is a **thin client over the logosctl command surface**: every
+operation it offers corresponds to a logosctl command, and every value it returns
 is the daemon's own structured response. It introduces no new module-management
 semantics of its own — it adopts the daemon's behavior, exit-code contract, and
 data shapes wholesale, and presents them with Python ergonomics. What it adds is
@@ -35,12 +35,12 @@ result conversion at the language boundary).
             │
             ▼
    ┌──────────────────────┐
-   │     logoscore-py     │   launch · load · call · watch · tokens
+   │     logosctl-py     │   launch · load · call · watch · tokens
    └──────────┬───────────┘
               │  drives the command surface, parses structured responses
               ▼
    ┌──────────────────────┐
-   │   logoscore daemon   │   headless module runtime
+   │   logosctl daemon   │   headless module runtime
    └──────────┬───────────┘
               │  hosts Logos modules, RPC over local socket / TCP / TCP+TLS
               ▼
@@ -51,7 +51,7 @@ result conversion at the language boundary).
 
 The daemon (`logos-logoscore-cli`) is the CLI runtime over the Logos core library;
 the modules it hosts are the same process-isolated plugins built across the Logos
-platform. `logoscore-py` is a *frontend-edge* component — it neither links the core
+platform. `logosctl-py` is a *frontend-edge* component — it neither links the core
 nor speaks the RPC protocol itself; it commands the daemon, which does both.
 
 ### Design principles
@@ -72,7 +72,7 @@ nor speaks the RPC protocol itself; it commands the daemon, which does both.
 
 | Term | Definition |
 |------|------------|
-| **logoscore daemon** | The headless runtime process that hosts Logos modules and exposes them over RPC. `logoscore-py` launches and/or dials it; it is the authority for all module operations. |
+| **logosctl daemon** | The headless runtime process that hosts Logos modules and exposes them over RPC. `logosctl-py` launches and/or dials it; it is the authority for all module operations. |
 | **Module** | A process-isolated Logos plugin hosted by the daemon. Its public surface is a set of invokable methods (and the events it emits). |
 | **Well-known modules** | Two modules the daemon always serves — **`core_service`** (the management gateway: load/unload, status, proxied method calls) and **`capability_module`** (the authorization handshake). Each is served on its *own* listener, which is why a connection must be described per module. |
 | **Invokable method** | A method a module exposes for remote invocation. Calling one is the core "do something" operation; arguments are positional and the daemon returns the method's result value. |

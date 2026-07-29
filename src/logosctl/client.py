@@ -1,9 +1,9 @@
-"""Client for a running logoscore daemon.
+"""Client for a running logosctl daemon.
 
-Each method spawns a fresh `logoscore <subcommand> --json` subprocess and
-parses its output. When obtained via `LogoscoreDaemon.client()`, the client
+Each method spawns a fresh `logosctl <subcommand> --json` subprocess and
+parses its output. When obtained via `LogosctlDaemon.client()`, the client
 is bound to a specific `config_dir` so it talks to that daemon's connection
-file, not the user's global `~/.logoscore/`.
+file, not the user's global `~/.logosctl/`.
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ from .events import Subscription
 
 @dataclass(frozen=True)
 class DaemonEndpoint:
-    """One well-known module's dial spec for a logoscore daemon.
+    """One well-known module's dial spec for a logosctl daemon.
 
     Serialized into a single entry of the `daemon` block of
     `<config_dir>/client/config.json` (schema version 2). A daemon serves
     each well-known module (`core_service`, `capability_module`) on its
     own listener, so a full connection needs one `DaemonEndpoint` per
-    module — which is exactly what the single-endpoint `LOGOSCORE_CLIENT_*`
+    module — which is exactly what the single-endpoint `LOGOSCTL_CLIENT_*`
     env overrides cannot express.
 
     `verify_peer` is only emitted for `tcp_ssl` transports; leave it None
@@ -94,12 +94,12 @@ def _decode_bytes_tags(value: Any) -> Any:
     return value
 
 
-class LogoscoreClient:
-    """Thin client around `logoscore` subcommands against a running daemon."""
+class LogosctlClient:
+    """Thin client around `logosctl` subcommands against a running daemon."""
 
     def __init__(
         self,
-        binary: str = "logoscore",
+        binary: str = "logosctl",
         *,
         config_dir: Path | None = None,
         token: str | None = None,
@@ -143,7 +143,7 @@ class LogoscoreClient:
         reach a daemon whose modules live on distinct listeners.
 
         This is the single source of truth for the on-disk client config —
-        `LogoscoreDaemon`, `LogoscoreDockerDaemon`, and standalone callers
+        `LogosctlDaemon`, `LogosctlDockerDaemon`, and standalone callers
         (see `connect`) all funnel through here.
 
         `token`, when given, is the RAW token string; it's wrapped as
@@ -195,11 +195,11 @@ class LogoscoreClient:
         endpoints: Mapping[str, DaemonEndpoint],
         *,
         token: str | None = None,
-        binary: str = "logoscore",
+        binary: str = "logosctl",
         config_dir: str | Path | None = None,
         timeout: float | None = 30.0,
         instance_id: str | None = None,
-    ) -> "LogoscoreClient":
+    ) -> "LogosctlClient":
         """Build a client that dials a (possibly remote) daemon described
         by per-module `endpoints`.
 
@@ -218,7 +218,7 @@ class LogoscoreClient:
         """
         owns_dir = config_dir is None
         cfg_dir = (
-            Path(tempfile.mkdtemp(prefix="logoscore-client-"))
+            Path(tempfile.mkdtemp(prefix="logosctl-client-"))
             if owns_dir
             else Path(config_dir)
         )
@@ -238,29 +238,29 @@ class LogoscoreClient:
         of the public API — the user sees kwargs, the CLI sees env vars."""
         out: dict[str, str] = {}
         if self.transport:
-            out["LOGOSCORE_CLIENT_TRANSPORT"] = self.transport
+            out["LOGOSCTL_CLIENT_TRANSPORT"] = self.transport
         if self.tcp_host:
-            out["LOGOSCORE_CLIENT_TCP_HOST"] = self.tcp_host
+            out["LOGOSCTL_CLIENT_TCP_HOST"] = self.tcp_host
         if self.tcp_port is not None:
-            out["LOGOSCORE_CLIENT_TCP_PORT"] = str(self.tcp_port)
+            out["LOGOSCTL_CLIENT_TCP_PORT"] = str(self.tcp_port)
         if self.no_verify_peer:
-            out["LOGOSCORE_CLIENT_NO_VERIFY_PEER"] = "1"
+            out["LOGOSCTL_CLIENT_NO_VERIFY_PEER"] = "1"
         if self.codec:
-            out["LOGOSCORE_CLIENT_CODEC"] = self.codec
+            out["LOGOSCTL_CLIENT_CODEC"] = self.codec
         return out or None
 
     # ── Daemon-wide commands ────────────────────────────────────────────────
 
     def status(self) -> dict:
         return _proc.run_json(
-            self.binary, ["status"],
+            self.binary, ["daemon", "status"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )
 
     def stats(self) -> Any:
         return _proc.run_json(
-            self.binary, ["stats"],
+            self.binary, ["module", "stats"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )
@@ -268,7 +268,7 @@ class LogoscoreClient:
     def stop(self) -> None:
         """Ask the daemon to shut down cleanly."""
         _proc.run_json(
-            self.binary, ["stop"],
+            self.binary, ["daemon", "stop"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )
@@ -276,7 +276,7 @@ class LogoscoreClient:
     # ── Module management ───────────────────────────────────────────────────
 
     def list_modules(self, *, loaded: bool = False) -> list[dict]:
-        args: list[str] = ["list-modules"]
+        args: list[str] = ["module", "ls"]
         if loaded:
             args.append("--loaded")
         result = _proc.run_json(
@@ -288,28 +288,28 @@ class LogoscoreClient:
 
     def module_info(self, name: str) -> dict:
         return _proc.run_json(
-            self.binary, ["module-info", name],
+            self.binary, ["module", "show", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )
 
     def load_module(self, name: str) -> dict:
         return _proc.run_json(
-            self.binary, ["load-module", name],
+            self.binary, ["module", "load", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )
 
     def unload_module(self, name: str) -> dict:
         return _proc.run_json(
-            self.binary, ["unload-module", name],
+            self.binary, ["module", "unload", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )
 
     def reload_module(self, name: str) -> dict:
         return _proc.run_json(
-            self.binary, ["reload-module", name],
+            self.binary, ["module", "reload", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
             env=self._env_overrides(),
         )

@@ -1,13 +1,13 @@
-"""Lifecycle manager for a `logoscore` daemon process.
+"""Lifecycle manager for a `logosctl` daemon process.
 
-`LogoscoreDaemon` is a context manager: on `__enter__` it spawns
-`logoscore -D` with an isolated `--config-dir`, waits for the daemon's
+`LogosctlDaemon` is a context manager: on `__enter__` it spawns
+`logosctl -D` with an isolated `--config-dir`, waits for the daemon's
 connection file to appear, and verifies liveness with `status`. On exit
-it runs `logoscore stop`, then terminates/kills the child process as a
+it runs `logosctl stop`, then terminates/kills the child process as a
 fallback, and removes any temp state directory it created.
 
 The isolated config dir means multiple daemons can run concurrently in
-the same test process without colliding on `~/.logoscore/daemon/`, and
+the same test process without colliding on `~/.logosctl/daemon/`, and
 nothing the wrapper does leaks into the developer's global state.
 """
 from __future__ import annotations
@@ -22,18 +22,62 @@ from pathlib import Path
 from typing import IO
 
 from . import _proc
-from .client import DaemonEndpoint, LogoscoreClient
-from .errors import LogoscoreError
+from .client import DaemonEndpoint, LogosctlClient
+from .errors import LogosctlError
 
 
-class LogoscoreDaemon:
-    """Context manager that spawns and tears down a logoscore daemon."""
+def _to_yaml(value, indent: int = 0) -> str:
+    """Emit a JSON-ish structure as YAML.
+
+    Hand-rolled rather than pulling in PyYAML: this package has no runtime
+    dependencies, and the config documents it writes are a fixed, shallow
+    shape (scalars, lists of mappings, one nested mapping).
+    """
+    pad = "  " * indent
+    if isinstance(value, dict):
+        if not value:
+            return pad + "{}\n"
+        out = []
+        for k, v in value.items():
+            if isinstance(v, (dict, list)) and v:
+                out.append(f"{pad}{k}:\n{_to_yaml(v, indent + 1)}")
+            else:
+                out.append(f"{pad}{k}: {_scalar(v)}\n")
+        return "".join(out)
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if isinstance(item, dict):
+                body = _to_yaml(item, indent + 1)
+                # Hang the first key off the dash, indent the rest.
+                first, _, rest = body.partition("\n")
+                out.append(f"{pad}- {first.strip()}\n")
+                if rest.strip():
+                    out.append(rest)
+            else:
+                out.append(f"{pad}- {_scalar(item)}\n")
+        return "".join(out)
+    return pad + _scalar(value) + "\n"
+
+
+def _scalar(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, (int, float)):
+        return str(v)
+    return f'"{v}"'
+
+
+class LogosctlDaemon:
+    """Context manager that spawns and tears down a logosctl daemon."""
 
     def __init__(
         self,
         modules_dir: str | Path | list[str | Path],
         *,
-        binary: str = "logoscore",
+        binary: str = "logosctl",
         config_dir: str | Path | None = None,
         persistence_path: str | Path | None = None,
         extra_args: list[str] | None = None,
@@ -81,7 +125,7 @@ class LogoscoreDaemon:
         # setup where ssl_cert is self-signed and wouldn't validate
         # against any CA. Override to True with a CA-issued cert if
         # you want the full verification path. The CLI's run-time
-        # `--no-verify-peer` flag (or `LOGOSCORE_CLIENT_NO_VERIFY_PEER`
+        # `--no-verify-peer` flag (or `LOGOSCTL_CLIENT_NO_VERIFY_PEER`
         # env) overrides this on a per-call basis.
         verify_peer: bool = False,
     ) -> None:
@@ -112,7 +156,7 @@ class LogoscoreDaemon:
         self.verify_peer = verify_peer
 
         if config_dir is None:
-            self._config_dir = Path(tempfile.mkdtemp(prefix="logoscore-"))
+            self._config_dir = Path(tempfile.mkdtemp(prefix="logosctl-"))
             self._owns_config_dir = True
         else:
             self._config_dir = Path(config_dir)
@@ -161,55 +205,78 @@ class LogoscoreDaemon:
 
     def start(self) -> None:
         if self._process is not None:
-            raise LogoscoreError("daemon already started")
+            raise LogosctlError("daemon already started")
 
-        cmd: list[str] = [self.binary, "-D", "--config-dir", str(self._config_dir)]
-        for d in self.modules_dirs:
-            cmd.extend(["-m", str(d)])
+        # logosctl takes its configuration from the session, not from flags:
+        # -m, --persistence-path and --module-transport were removed when the
+        # config moved to <session>/daemon/config.yaml. So build the document
+        # and install it before starting.
+        config: dict = {}
+        if self.modules_dirs:
+            config["modules_dirs"] = [str(d) for d in self.modules_dirs]
         if self.persistence_path is not None:
-            cmd.extend(["--persistence-path", str(self.persistence_path)])
-        # Per-module transport flags. The daemon expects
-        # `--module-transport NAME=PROTOCOL[,k=v...]` (repeatable). We
-        # emit one entry per requested protocol for both well-known
-        # modules (`core_service` and `capability_module`).
-        #
-        # Crucially, each module gets its OWN port — `tcp_port` /
-        # `tcp_ssl_port` for core_service, `tcp_cap_port` /
-        # `tcp_ssl_cap_port` for capability_module. Reusing a single
-        # port across both fails the second listener's bind because
-        # QTcpServer can't share an address:port pair. Default 0
-        # makes the daemon auto-allocate distinct ephemerals.
+            config["persistence_path"] = str(self.persistence_path)
+
+        # Each module gets its OWN port -- `tcp_port` / `tcp_ssl_port` for
+        # core_service, `tcp_cap_port` / `tcp_ssl_cap_port` for
+        # capability_module. Reusing one port across both fails the second
+        # listener's bind, because QTcpServer cannot share an address:port
+        # pair. Default 0 makes the daemon auto-allocate distinct ephemerals.
         port_for = {
             ("tcp",     "core_service"):      self.tcp_port,
             ("tcp",     "capability_module"): self.tcp_cap_port,
             ("tcp_ssl", "core_service"):      self.tcp_ssl_port,
             ("tcp_ssl", "capability_module"): self.tcp_ssl_cap_port,
         }
+        modules: dict[str, list[dict]] = {}
         for proto in self.transports:
             for module in ("core_service", "capability_module"):
-                spec = f"{module}={proto}"
+                entry: dict = {"protocol": proto}
                 if proto == "tcp":
-                    spec += (f",host={self.tcp_host}"
-                             f",port={port_for[(proto, module)]}"
-                             f",codec={self.tcp_codec}")
+                    entry.update({
+                        "host": self.tcp_host,
+                        "port": port_for[(proto, module)],
+                        "codec": self.tcp_codec,
+                    })
                 elif proto == "tcp_ssl":
                     if not (self.ssl_cert and self.ssl_key):
-                        raise LogoscoreError(
+                        raise LogosctlError(
                             "transports includes 'tcp_ssl' but "
                             "ssl_cert/ssl_key not set"
                         )
-                    spec += (f",host={self.tcp_ssl_host}"
-                             f",port={port_for[(proto, module)]}"
-                             f",codec={self.tcp_ssl_codec}"
-                             f",cert={self.ssl_cert}"
-                             f",key={self.ssl_key}")
+                    entry.update({
+                        "host": self.tcp_ssl_host,
+                        "port": port_for[(proto, module)],
+                        "codec": self.tcp_ssl_codec,
+                        "cert": str(self.ssl_cert),
+                        "key": str(self.ssl_key),
+                    })
                     if self.ssl_ca:
-                        spec += f",ca={self.ssl_ca}"
-                cmd.extend(["--module-transport", spec])
+                        entry["ca"] = str(self.ssl_ca)
+                modules.setdefault(module, []).append(entry)
+        if modules:
+            config["modules"] = modules
+            # Plaintext tcp on a non-loopback host is refused unless the
+            # operator opts in; a test harness binding 0.0.0.0 is exactly that
+            # case, so opt in on its behalf rather than failing to boot.
+            if "tcp" in self.transports and self.tcp_host not in ("127.0.0.1", "::1", "localhost"):
+                config["insecure_tcp"] = True
+
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        if config:
+            config_path = self._config_dir / "logosctl-daemon-config.yaml"
+            config_path.write_text(_to_yaml(config))
+            _proc.run_json(
+                self.binary,
+                ["daemon", "config", "set", str(config_path)],
+                config_dir=self._config_dir,
+            )
+
+        cmd: list[str] = [self.binary, "--config-dir", str(self._config_dir), "-D"]
         cmd.extend(self.extra_args)
 
         env = os.environ.copy()
-        env["LOGOSCORE_CONFIG_DIR"] = str(self._config_dir)
+        env["LOGOSCTL_CONFIG_DIR"] = str(self._config_dir)
         env.update(self.extra_env)
 
         self._stdout_file = open(self._config_dir / "daemon.stdout.log", "w")
@@ -237,7 +304,7 @@ class LogoscoreDaemon:
             if proc.poll() is None:
                 try:
                     _proc.run_json(
-                        self.binary, ["stop"],
+                        self.binary, ["daemon", "stop"],
                         config_dir=self._config_dir,
                         timeout=timeout,
                     )
@@ -273,7 +340,7 @@ class LogoscoreDaemon:
         tcp_host: str | None = None,
         no_verify_peer: bool = False,
         codec: str | None = None,
-    ) -> LogoscoreClient:
+    ) -> LogosctlClient:
         """Build a client wired to this daemon's `client/config.json`.
 
         The daemon writes a per-module dial spec at startup (auto-emitted
@@ -285,14 +352,14 @@ class LogoscoreDaemon:
         The optional `transport` / `tcp_host` / `codec` / `no_verify_peer`
         overrides are merged INTO that on-disk spec (uniformly across both
         modules, since they share host/transport/codec/verify), never via
-        `LOGOSCORE_CLIENT_*` env vars. There is deliberately no per-call
+        `LOGOSCTL_CLIENT_*` env vars. There is deliberately no per-call
         port override: the CLI applies a single port to every module
         uniformly, which would collapse `capability_module` onto
         `core_service`'s port. Each module's port comes from the daemon's
         own config and is left untouched.
         """
         if self._process is None:
-            raise LogoscoreError(
+            raise LogosctlError(
                 "daemon is not running — call start() or use the context manager"
             )
         if (transport is not None or tcp_host is not None
@@ -300,9 +367,9 @@ class LogoscoreDaemon:
             self._apply_client_overrides(
                 transport=transport, tcp_host=tcp_host,
                 codec=codec, no_verify_peer=no_verify_peer)
-        # No transport kwargs → no LOGOSCORE_CLIENT_* env overrides; the
+        # No transport kwargs → no LOGOSCTL_CLIENT_* env overrides; the
         # per-module client/config.json is authoritative.
-        return LogoscoreClient(
+        return LogosctlClient(
             binary=self.binary,
             config_dir=self._config_dir,
             token=self._read_token(),
@@ -320,7 +387,7 @@ class LogoscoreDaemon:
 
     # ── Context manager ─────────────────────────────────────────────────────
 
-    def __enter__(self) -> "LogoscoreDaemon":
+    def __enter__(self) -> "LogosctlDaemon":
         self.start()
         return self
 
@@ -353,7 +420,7 @@ class LogoscoreDaemon:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 _, err = self.logs()
-                raise LogoscoreError(
+                raise LogosctlError(
                     f"daemon exited during startup (code {proc.returncode})"
                     + (f"\n{err.strip()}" if err.strip() else "")
                 )
@@ -381,7 +448,7 @@ class LogoscoreDaemon:
                 sections.append(
                     f"--- daemon stderr (last {len(err_tail)} lines) ---\n"
                     + "\n".join(err_tail))
-            raise LogoscoreError("\n".join(sections))
+            raise LogosctlError("\n".join(sections))
 
         # Phase 1.5: rewrite client/config.json from state.json. The
         # daemon's auto-emitted config always advertises LocalSocket
@@ -395,13 +462,13 @@ class LogoscoreDaemon:
         remaining = max(1.0, deadline - time.monotonic())
         try:
             _proc.run_json(
-                self.binary, ["status"],
+                self.binary, ["daemon", "status"],
                 config_dir=self._config_dir,
                 token=self._read_token(),
                 timeout=remaining,
             )
-        except LogoscoreError as e:
-            raise LogoscoreError(f"daemon status check failed: {e}") from e
+        except LogosctlError as e:
+            raise LogosctlError(f"daemon status check failed: {e}") from e
 
     def _apply_client_overrides(
         self,
@@ -415,7 +482,7 @@ class LogoscoreDaemon:
 
         Only the explicitly-overridden fields are touched, and the per-module
         `port` is NEVER changed — that's the whole point: a single
-        `LOGOSCORE_CLIENT_TCP_PORT` env override is applied to every module
+        `LOGOSCTL_CLIENT_TCP_PORT` env override is applied to every module
         uniformly by the CLI, which would collapse `capability_module` onto
         `core_service`'s port. Editing each module entry directly (rather than
         rebuilding via `write_config`) also preserves any field the daemon
@@ -475,7 +542,7 @@ class LogoscoreDaemon:
         try:
             state = json.loads(self.state_file.read_text())
         except (json.JSONDecodeError, OSError) as e:
-            raise LogoscoreError(
+            raise LogosctlError(
                 f"daemon state.json unreadable: {e}"
             ) from e
 
@@ -488,7 +555,7 @@ class LogoscoreDaemon:
                 None,
             )
             if match is None:
-                raise LogoscoreError(
+                raise LogosctlError(
                     f"daemon state.json doesn't advertise '{target_proto}' "
                     f"for module '{module_name}' — wrapper transports "
                     f"setup is out of sync with the running daemon"
@@ -512,5 +579,5 @@ class LogoscoreDaemon:
         # keys it already wrote, e.g. token_file) — write_config owns the
         # schema. The daemon emitted its own auto.json token, so no token
         # is written here.
-        LogoscoreClient.write_config(
+        LogosctlClient.write_config(
             self._config_dir, endpoints, instance_id=None, merge=True)

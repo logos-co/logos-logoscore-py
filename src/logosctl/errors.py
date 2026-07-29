@@ -1,4 +1,4 @@
-"""Exceptions mapped from `logoscore` CLI exit codes.
+"""Exceptions mapped from `logosctl` CLI exit codes.
 
 Exit code contract (from logos-logoscore-cli README):
     0 — success
@@ -10,8 +10,8 @@ Exit code contract (from logos-logoscore-cli README):
 from __future__ import annotations
 
 
-class LogoscoreError(Exception):
-    """Base class for all logoscore CLI failures."""
+class LogosctlError(Exception):
+    """Base class for all logosctl CLI failures."""
 
     def __init__(
         self,
@@ -27,19 +27,19 @@ class LogoscoreError(Exception):
         self.code = code
 
 
-class DaemonNotRunningError(LogoscoreError):
+class DaemonNotRunningError(LogosctlError):
     """No daemon is reachable (exit code 2)."""
 
 
-class ModuleError(LogoscoreError):
+class ModuleError(LogosctlError):
     """Module operation failed: not found, load/unload failed (exit code 3)."""
 
 
-class MethodError(LogoscoreError):
+class MethodError(LogosctlError):
     """Method call failed: not found, timeout, bad arguments (exit code 4)."""
 
 
-_EXIT_CODE_TO_EXC: dict[int, type[LogoscoreError]] = {
+_EXIT_CODE_TO_EXC: dict[int, type[LogosctlError]] = {
     2: DaemonNotRunningError,
     3: ModuleError,
     4: MethodError,
@@ -52,6 +52,6 @@ def from_exit_code(
     *,
     stderr: str | None = None,
     error_code: str | None = None,
-) -> LogoscoreError:
-    cls = _EXIT_CODE_TO_EXC.get(code, LogoscoreError)
+) -> LogosctlError:
+    cls = _EXIT_CODE_TO_EXC.get(code, LogosctlError)
     return cls(message, exit_code=code, stderr=stderr, code=error_code)

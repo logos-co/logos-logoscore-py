@@ -1,10 +1,10 @@
 """Unit tests for the client-config writer / remote-connect API.
 
-`LogoscoreClient.write_config` + `connect` centralize the on-disk
+`LogosctlClient.write_config` + `connect` centralize the on-disk
 `client/config.json` schema that previously lived (hand-written) inside
 the daemon helpers. These tests pin the serialized output byte-for-byte
 (so the daemon paths keep emitting identical files) and the env-override
-contract `connect()` relies on — none of which needs a real `logoscore`
+contract `connect()` relies on — none of which needs a real `logosctl`
 binary or docker.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from logoscore import DaemonEndpoint, LogoscoreClient
+from logosctl import DaemonEndpoint, LogosctlClient
 
 
 def _dumped(obj: dict) -> str:
@@ -33,7 +33,7 @@ def test_write_config_tcp_minimal(tmp_path: Path):
         "core_service": DaemonEndpoint("tcp", "localhost", 8000, "json"),
         "capability_module": DaemonEndpoint("tcp", "localhost", 8001, "json"),
     }
-    LogoscoreClient.write_config(tmp_path, endpoints)
+    LogosctlClient.write_config(tmp_path, endpoints)
 
     cfg_path = tmp_path / "client" / "config.json"
     expected = {
@@ -60,7 +60,7 @@ def test_write_config_tcp_ssl_emits_verify_peer_last(tmp_path: Path):
         "core_service": DaemonEndpoint(
             "tcp_ssl", "remote", 6000, "cbor", verify_peer=True),
     }
-    LogoscoreClient.write_config(tmp_path, endpoints)
+    LogosctlClient.write_config(tmp_path, endpoints)
 
     block = json.loads((tmp_path / "client" / "config.json").read_text())[
         "daemon"]["core_service"]
@@ -76,14 +76,14 @@ def test_write_config_drops_verify_peer_for_plain_tcp(tmp_path: Path):
     # verify_peer only applies to tcp_ssl — a stray value on a tcp
     # endpoint must not leak into the config (matches old `extra={}`).
     endpoints = {"core_service": DaemonEndpoint("tcp", "h", 1, verify_peer=True)}
-    LogoscoreClient.write_config(tmp_path, endpoints)
+    LogosctlClient.write_config(tmp_path, endpoints)
     block = json.loads((tmp_path / "client" / "config.json").read_text())[
         "daemon"]["core_service"]
     assert "verify_peer" not in block
 
 
 def test_write_config_writes_token_file(tmp_path: Path):
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path,
         {"core_service": DaemonEndpoint("tcp", "h", 1)},
         token="raw-secret",
@@ -95,7 +95,7 @@ def test_write_config_writes_token_file(tmp_path: Path):
 
 
 def test_write_config_instance_id_present_when_set_even_if_empty(tmp_path: Path):
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
         instance_id="")
     cfg = json.loads((tmp_path / "client" / "config.json").read_text())
@@ -103,7 +103,7 @@ def test_write_config_instance_id_present_when_set_even_if_empty(tmp_path: Path)
 
 
 def test_write_config_instance_id_absent_when_none(tmp_path: Path):
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)})
     cfg = json.loads((tmp_path / "client" / "config.json").read_text())
     assert "instance_id" not in cfg
@@ -119,7 +119,7 @@ def test_write_config_merge_preserves_existing_keys(tmp_path: Path):
         "daemon": {"old": {"transport": "local"}},
     }))
 
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 9)},
         merge=True)
 
@@ -134,7 +134,7 @@ def test_write_config_merge_preserves_existing_keys(tmp_path: Path):
 
 # ── Docker byte-for-byte regression ──────────────────────────────────────────
 #
-# `LogoscoreDockerDaemon._build_host_client_config` used to hand-write this
+# `LogosctlDockerDaemon._build_host_client_config` used to hand-write this
 # exact dict. Pin that write_config reproduces it byte-for-byte so the
 # refactor is inert on disk.
 
@@ -172,7 +172,7 @@ def test_write_config_matches_legacy_docker_literal(
         "capability_module": DaemonEndpoint(
             transport_kind, "localhost", 7001, "json", verify),
     }
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path, endpoints, token="t", instance_id="abc123")
 
     got = (tmp_path / "client" / "config.json").read_text()
@@ -204,7 +204,7 @@ def test_connect_sets_config_dir_and_no_env_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ):
     rec = _Recorder(monkeypatch)
-    client = LogoscoreClient.connect(
+    client = LogosctlClient.connect(
         {
             "core_service": DaemonEndpoint("tcp", "remote", 6000),
             "capability_module": DaemonEndpoint("tcp", "remote", 6001),
@@ -214,13 +214,13 @@ def test_connect_sets_config_dir_and_no_env_overrides(
     client.status()
 
     env = rec.calls[0]["env"]
-    assert env["LOGOSCORE_CONFIG_DIR"] == str(client.config_dir)
+    assert env["LOGOSCTL_CONFIG_DIR"] == str(client.config_dir)
     for var in (
-        "LOGOSCORE_CLIENT_TRANSPORT",
-        "LOGOSCORE_CLIENT_TCP_HOST",
-        "LOGOSCORE_CLIENT_TCP_PORT",
-        "LOGOSCORE_CLIENT_NO_VERIFY_PEER",
-        "LOGOSCORE_CLIENT_CODEC",
+        "LOGOSCTL_CLIENT_TRANSPORT",
+        "LOGOSCTL_CLIENT_TCP_HOST",
+        "LOGOSCTL_CLIENT_TCP_PORT",
+        "LOGOSCTL_CLIENT_NO_VERIFY_PEER",
+        "LOGOSCTL_CLIENT_CODEC",
     ):
         assert var not in env, f"connect() leaked {var}"
     # Materialized the dial spec + token on disk.
@@ -232,7 +232,7 @@ def test_connect_temp_dir_cleaned_up_by_finalizer(
     monkeypatch: pytest.MonkeyPatch,
 ):
     _Recorder(monkeypatch)
-    client = LogoscoreClient.connect(
+    client = LogosctlClient.connect(
         {"core_service": DaemonEndpoint("tcp", "h", 1)})
     cfg_dir = client.config_dir
     assert cfg_dir.exists()
@@ -246,7 +246,7 @@ def test_connect_explicit_config_dir_is_not_owned(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     _Recorder(monkeypatch)
-    client = LogoscoreClient.connect(
+    client = LogosctlClient.connect(
         {"core_service": DaemonEndpoint("tcp", "h", 1)},
         config_dir=tmp_path,
     )
@@ -256,10 +256,10 @@ def test_connect_explicit_config_dir_is_not_owned(
     assert (tmp_path / "client" / "config.json").exists()
 
 
-# ── LogoscoreDockerDaemon.client(): per-module ports, no env override ─────────
+# ── LogosctlDockerDaemon.client(): per-module ports, no env override ─────────
 #
 # The capability_module rides its OWN forwarded host port. A single
-# LOGOSCORE_CLIENT_TCP_PORT env override is applied to every module
+# LOGOSCTL_CLIENT_TCP_PORT env override is applied to every module
 # uniformly by the CLI, so it would collapse capability_module onto
 # core_service's port. These tests pin that client() is config-file-driven
 # (distinct per-module ports, no transport env overrides).
@@ -268,12 +268,12 @@ def test_connect_explicit_config_dir_is_not_owned(
 def test_docker_client_keeps_distinct_capability_port_and_no_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
-    from logoscore import LogoscoreDockerDaemon
+    from logosctl import LogosctlDockerDaemon
 
     mods = tmp_path / "mods"
     mods.mkdir()
     rec = _Recorder(monkeypatch)
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
+    d = LogosctlDockerDaemon(image="img", modules_dir=mods)
     try:
         # Fake a started container with distinct forwarded ports.
         d._container_id = "fake"
@@ -290,14 +290,14 @@ def test_docker_client_keeps_distinct_capability_port_and_no_env(
         client.status()
         env = rec.calls[0]["env"]
         for var in (
-            "LOGOSCORE_CLIENT_TRANSPORT",
-            "LOGOSCORE_CLIENT_TCP_HOST",
-            "LOGOSCORE_CLIENT_TCP_PORT",
-            "LOGOSCORE_CLIENT_CODEC",
-            "LOGOSCORE_CLIENT_NO_VERIFY_PEER",
+            "LOGOSCTL_CLIENT_TRANSPORT",
+            "LOGOSCTL_CLIENT_TCP_HOST",
+            "LOGOSCTL_CLIENT_TCP_PORT",
+            "LOGOSCTL_CLIENT_CODEC",
+            "LOGOSCTL_CLIENT_NO_VERIFY_PEER",
         ):
             assert var not in env, f"docker client() leaked {var}"
-        assert env["LOGOSCORE_CONFIG_DIR"] == str(d._host_client_dir)
+        assert env["LOGOSCTL_CONFIG_DIR"] == str(d._host_client_dir)
     finally:
         d._container_id = None
         d.stop()
@@ -306,12 +306,12 @@ def test_docker_client_keeps_distinct_capability_port_and_no_env(
 def test_docker_client_tcp_host_baked_into_both_modules(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
-    from logoscore import LogoscoreDockerDaemon
+    from logosctl import LogosctlDockerDaemon
 
     mods = tmp_path / "mods"
     mods.mkdir()
     _Recorder(monkeypatch)
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
+    d = LogosctlDockerDaemon(image="img", modules_dir=mods)
     try:
         d._container_id = "fake"
         d._host_port = 7000
@@ -329,7 +329,7 @@ def test_docker_client_tcp_host_baked_into_both_modules(
 def test_docker_client_tcp_ssl_verify_peer_mapping(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
-    from logoscore import LogoscoreDockerDaemon
+    from logosctl import LogosctlDockerDaemon
 
     mods = tmp_path / "mods"
     mods.mkdir()
@@ -338,7 +338,7 @@ def test_docker_client_tcp_ssl_verify_peer_mapping(
     key = tmp_path / "k.pem"
     key.write_text("y")
     _Recorder(monkeypatch)
-    d = LogoscoreDockerDaemon(
+    d = LogosctlDockerDaemon(
         image="img", modules_dir=mods, transport="tcp_ssl",
         ssl_cert=cert, ssl_key=key, verify_peer=True)
     try:
@@ -363,12 +363,12 @@ def test_docker_client_tcp_ssl_verify_peer_mapping(
         d.stop()
 
 
-# ── LogoscoreDaemon.client(): config-driven, no port clobber ─────────────────
+# ── LogosctlDaemon.client(): config-driven, no port clobber ─────────────────
 #
 # Same lock-down as the docker daemon, applied to the local daemon: dial
 # overrides are merged into the per-module client/config.json in place
 # (preserving each module's own port + unmodeled fields) and the client
-# carries NO LOGOSCORE_CLIENT_* env overrides.
+# carries NO LOGOSCTL_CLIENT_* env overrides.
 
 
 def _seed_client_config(config_dir: Path, daemon_block: dict) -> None:
@@ -382,10 +382,10 @@ def _seed_client_config(config_dir: Path, daemon_block: dict) -> None:
 
 
 def _fake_local_daemon(tmp_path: Path, daemon_block: dict):
-    from logoscore import LogoscoreDaemon
+    from logosctl import LogosctlDaemon
 
     _seed_client_config(tmp_path, daemon_block)
-    d = LogoscoreDaemon(modules_dir=tmp_path / "mods", config_dir=tmp_path)
+    d = LogosctlDaemon(modules_dir=tmp_path / "mods", config_dir=tmp_path)
     d._process = object()  # bypass the "daemon not running" guard
     return d
 
@@ -403,15 +403,15 @@ def test_daemon_client_no_overrides_sets_no_env(
     d.client().status()
     env = rec.calls[0]["env"]
     for var in (
-        "LOGOSCORE_CLIENT_TRANSPORT",
-        "LOGOSCORE_CLIENT_TCP_HOST",
-        "LOGOSCORE_CLIENT_TCP_PORT",
-        "LOGOSCORE_CLIENT_CODEC",
-        "LOGOSCORE_CLIENT_NO_VERIFY_PEER",
+        "LOGOSCTL_CLIENT_TRANSPORT",
+        "LOGOSCTL_CLIENT_TCP_HOST",
+        "LOGOSCTL_CLIENT_TCP_PORT",
+        "LOGOSCTL_CLIENT_CODEC",
+        "LOGOSCTL_CLIENT_NO_VERIFY_PEER",
     ):
         assert var not in env, f"daemon.client() leaked {var}"
-    assert env["LOGOSCORE_CONFIG_DIR"] == str(tmp_path)
-    assert env["LOGOSCORE_TOKEN"] == "t"
+    assert env["LOGOSCTL_CONFIG_DIR"] == str(tmp_path)
+    assert env["LOGOSCTL_TOKEN"] == "t"
 
 
 def test_daemon_client_overrides_preserve_distinct_ports(
@@ -515,7 +515,7 @@ def test_write_config_token_honors_existing_token_file(tmp_path: Path):
         "version": 2, "token_file": "custom.json",
         "daemon": {"core_service": {"transport": "local"}},
     }))
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
         token="tok", merge=True)
 
@@ -533,7 +533,7 @@ def test_write_config_token_file_traversal_falls_back(tmp_path: Path, bad: str):
         "version": 2, "token_file": bad,
         "daemon": {"core_service": {"transport": "local"}},
     }))
-    LogoscoreClient.write_config(
+    LogosctlClient.write_config(
         tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
         token="tok", merge=True)
 
@@ -547,25 +547,25 @@ def test_write_config_token_file_traversal_falls_back(tmp_path: Path, bad: str):
 
 
 def test_client_endpoints_raises_before_start(tmp_path: Path):
-    from logoscore import LogoscoreDockerDaemon, LogoscoreError
+    from logosctl import LogosctlDockerDaemon, LogosctlError
 
     mods = tmp_path / "mods"
     mods.mkdir()
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
+    d = LogosctlDockerDaemon(image="img", modules_dir=mods)
     # Ports are assigned in start(); building endpoints before that must
     # fail loudly rather than emit a portless config.
-    with pytest.raises(LogoscoreError):
+    with pytest.raises(LogosctlError):
         d._client_endpoints("localhost", "json", None)
 
 
 def test_build_host_client_config_raises_when_token_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
-    from logoscore import LogoscoreDockerDaemon, LogoscoreError
+    from logosctl import LogosctlDockerDaemon, LogosctlError
 
     mods = tmp_path / "mods"
     mods.mkdir()
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods, startup_timeout=0.1)
+    d = LogosctlDockerDaemon(image="img", modules_dir=mods, startup_timeout=0.1)
     try:
         d._container_id = "fake"
         d._host_port = 7000
@@ -573,7 +573,7 @@ def test_build_host_client_config_raises_when_token_missing(
         # Token never readable → fail fast instead of writing a config that
         # references a missing auto.json.
         monkeypatch.setattr(d, "read_container_file", lambda _p: None)
-        with pytest.raises(LogoscoreError):
+        with pytest.raises(LogosctlError):
             d._build_host_client_config()
     finally:
         d._container_id = None

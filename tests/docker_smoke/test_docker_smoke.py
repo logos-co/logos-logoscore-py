@@ -18,13 +18,13 @@ Three scenarios:
    matrix fixtures are skipped for environmental reasons.
 
 All the container lifecycle — volume mounts, port mapping, client
-wiring — is handled by the public `LogoscoreDockerDaemon` helper. This
+wiring — is handled by the public `LogosctlDockerDaemon` helper. This
 file is just the pytest glue + test assertions; external consumers
 replicating this shape for their own modules should use the helper
-directly (see `src/logoscore/docker_daemon.py`).
+directly (see `src/logosctl/docker_daemon.py`).
 
 All tests are opt-in: they require docker on the host and a pre-built
-`logoscore:smoke-<flavor>` image (see `build_smoke_image.sh`). If either
+`logosctl:smoke-<flavor>` image (see `build_smoke_image.sh`). If either
 is missing the suite skips cleanly rather than failing.
 """
 from __future__ import annotations
@@ -39,8 +39,8 @@ from typing import Iterator
 
 import pytest
 
-from logoscore import (
-    LogoscoreDockerDaemon,
+from logosctl import (
+    LogosctlDockerDaemon,
     docker_available,
     image_present,
 )
@@ -48,10 +48,10 @@ from logoscore import (
 from .._basic_module_cases import BASIC_MODULE_CASES
 
 
-# Docker image tag convention: logoscore:smoke-<flavor>, where <flavor>
+# Docker image tag convention: logosctl:smoke-<flavor>, where <flavor>
 # is `dev` or `portable`. Override for one-off images via the env var.
 DOCKER_IMAGE_FMT = os.environ.get(
-    "LOGOSCORE_DOCKER_IMAGE_FMT", "logoscore:smoke-{flavor}")
+    "LOGOSCTL_DOCKER_IMAGE_FMT", "logosctl:smoke-{flavor}")
 MODULE = "test_basic_module"
 
 
@@ -86,10 +86,10 @@ def _require_docker_and_image(flavor: str) -> None:
 # ── Legacy single-container fixture (kept for the old fallback tests) ─────
 
 @pytest.fixture(scope="module")
-def dockerized_daemon(docker_flavor, linux_test_modules_dir) -> Iterator[LogoscoreDockerDaemon]:
+def dockerized_daemon(docker_flavor, linux_test_modules_dir) -> Iterator[LogosctlDockerDaemon]:
     _require_docker_and_image(docker_flavor)
     try:
-        with LogoscoreDockerDaemon(
+        with LogosctlDockerDaemon(
             image=_docker_image_for(docker_flavor),
             modules_dir=linux_test_modules_dir,
         ) as daemon:
@@ -98,15 +98,15 @@ def dockerized_daemon(docker_flavor, linux_test_modules_dir) -> Iterator[Logosco
         pytest.fail(f"daemon ({docker_flavor}) failed to start: {e}")
 
 
-def test_docker_tcp_status(dockerized_daemon, logoscore_bin):
-    client = dockerized_daemon.client(binary=logoscore_bin)
+def test_docker_tcp_status(dockerized_daemon, logosctl_bin):
+    client = dockerized_daemon.client(binary=logosctl_bin)
     status = client.status()
     assert isinstance(status, dict)
     assert "daemon" in status or "modules" in status
 
 
-def test_docker_tcp_load_and_call(dockerized_daemon, logoscore_bin):
-    client = dockerized_daemon.client(binary=logoscore_bin)
+def test_docker_tcp_load_and_call(dockerized_daemon, logosctl_bin):
+    client = dockerized_daemon.client(binary=logosctl_bin)
     modules = client.list_modules()
     names = {m.get("name") for m in modules if isinstance(m, dict)}
     assert any("test_basic" in (n or "") for n in names), names
@@ -117,19 +117,19 @@ def test_docker_tcp_load_and_call(dockerized_daemon, logoscore_bin):
 # ── Matrix fixture: one daemon per codec, reused across the full test set ─
 
 @pytest.fixture(scope="module", params=["json", "cbor"])
-def docker_matrix_client(request, logoscore_bin, docker_flavor, linux_test_modules_dir):
-    """Yield a LogoscoreClient connected over TCP to a fresh docker daemon
+def docker_matrix_client(request, logosctl_bin, docker_flavor, linux_test_modules_dir):
+    """Yield a LogosctlClient connected over TCP to a fresh docker daemon
     running with the requested wire codec + flavor. Module-scoped so the
     ~40-case matrix below doesn't spin up a container per test."""
     _require_docker_and_image(docker_flavor)
     codec = request.param
 
-    with LogoscoreDockerDaemon(
+    with LogosctlDockerDaemon(
         image=_docker_image_for(docker_flavor),
         modules_dir=linux_test_modules_dir,
         codec=codec,
     ) as daemon:
-        client = daemon.client(binary=logoscore_bin)
+        client = daemon.client(binary=logosctl_bin)
         client.load_module(MODULE)
         yield client
 
@@ -151,7 +151,7 @@ def test_docker_basic_module_method(docker_matrix_client, method, args, expected
 
 def test_docker_basic_module_emit_test_event(docker_matrix_client):
     """Event: emitTestEvent(payload) fires a `testEvent` on the module; the
-    payload must arrive through `logoscore watch` and back to the client."""
+    payload must arrive through `logosctl watch` and back to the client."""
     received: list[dict] = []
     evt = threading.Event()
 
@@ -197,13 +197,13 @@ def two_dockerized_daemons(docker_flavor, linux_test_modules_dir):
     doesn't accidentally share any global state between daemon handles."""
     _require_docker_and_image(docker_flavor)
 
-    daemons: list[LogoscoreDockerDaemon] = []
+    daemons: list[LogosctlDockerDaemon] = []
     try:
         for label in ("alpha", "beta"):
-            d = LogoscoreDockerDaemon(
+            d = LogosctlDockerDaemon(
                 image=_docker_image_for(docker_flavor),
                 modules_dir=linux_test_modules_dir,
-                container_name=f"logoscore-twopair-{docker_flavor}-{label}",
+                container_name=f"logosctl-twopair-{docker_flavor}-{label}",
             )
             d.start()
             daemons.append(d)
@@ -213,7 +213,7 @@ def two_dockerized_daemons(docker_flavor, linux_test_modules_dir):
             d.stop()
 
 
-def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
+def test_two_daemons_in_docker(two_dockerized_daemons, logosctl_bin):
     """Talk to two containerised daemons from one test process: each client
     is bound to its own config_dir and --tcp-host localhost. Confirm the
     wrapper doesn't leak state between them by (a) reading distinct
@@ -223,7 +223,7 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
     daemons = two_dockerized_daemons
     assert len(daemons) == 2
 
-    clients = [d.client(binary=logoscore_bin) for d in daemons]
+    clients = [d.client(binary=logosctl_bin) for d in daemons]
     # Read state.json out of each container via `docker exec cat`
     # rather than off the host bind-mount. The daemon writes
     # state.json as root with restrictive perms, so the host process
@@ -272,7 +272,7 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
     # behavioural change (consult `logos_core_get_loaded_plugins()`
     # before dispatching) that we don't want to bundle into the
     # current PR.
-    # from logoscore.errors import MethodError, ModuleError
+    # from logosctl.errors import MethodError, ModuleError
     # with pytest.raises((MethodError, ModuleError)):
     #     clients[1].call(MODULE, "echo", "two-daemon")
 
@@ -282,7 +282,7 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logoscore_bin):
 @pytest.fixture(scope="module")
 def shared_docker_network(docker_flavor) -> Iterator[str]:
     """Create a docker network for the duration of the module, then remove
-    it. Network is owned by the fixture, NOT by LogoscoreDockerDaemon —
+    it. Network is owned by the fixture, NOT by LogosctlDockerDaemon —
     daemon just attaches via the `network=` kwarg.
 
     Depends on `docker_flavor` so `--docker-flavor=both` gets a fresh
@@ -296,7 +296,7 @@ def shared_docker_network(docker_flavor) -> Iterator[str]:
     # before the downstream daemon fixture also skipped.
     _require_docker_and_image(docker_flavor)
 
-    name = f"logoscore-test-{docker_flavor}-{uuid.uuid4().hex[:8]}"
+    name = f"logosctl-test-{docker_flavor}-{uuid.uuid4().hex[:8]}"
     r = subprocess.run(
         ["docker", "network", "create", name],
         capture_output=True, text=True,
@@ -318,16 +318,16 @@ def shared_docker_network(docker_flavor) -> Iterator[str]:
 @pytest.fixture(scope="module")
 def two_dockerized_daemons_in_shared_network(
     docker_flavor, linux_test_modules_dir, shared_docker_network,
-) -> Iterator[list[LogoscoreDockerDaemon]]:
+) -> Iterator[list[LogosctlDockerDaemon]]:
     """Spin up two daemon containers attached to the same docker network."""
     _require_docker_and_image(docker_flavor)
-    daemons: list[LogoscoreDockerDaemon] = []
+    daemons: list[LogosctlDockerDaemon] = []
     try:
         for label in ("alpha", "beta"):
-            d = LogoscoreDockerDaemon(
+            d = LogosctlDockerDaemon(
                 image=_docker_image_for(docker_flavor),
                 modules_dir=linux_test_modules_dir,
-                container_name=f"logoscore-net-{docker_flavor}-{label}",
+                container_name=f"logosctl-net-{docker_flavor}-{label}",
                 network=shared_docker_network,
             )
             d.start()
@@ -382,18 +382,18 @@ def test_daemons_can_resolve_peer_by_container_name(
 
 
 def test_nonexistent_network_raises(docker_flavor, linux_test_modules_dir):
-    """Pre-flight validation: missing network surfaces as LogoscoreError
+    """Pre-flight validation: missing network surfaces as LogosctlError
     with a readable message, not the raw docker stderr."""
     _require_docker_and_image(docker_flavor)
-    from logoscore.errors import LogoscoreError
+    from logosctl.errors import LogosctlError
 
-    fake = f"logoscore-nonexistent-{uuid.uuid4().hex[:8]}"
-    d = LogoscoreDockerDaemon(
+    fake = f"logosctl-nonexistent-{uuid.uuid4().hex[:8]}"
+    d = LogosctlDockerDaemon(
         image=_docker_image_for(docker_flavor),
         modules_dir=linux_test_modules_dir,
         network=fake,
     )
-    with pytest.raises(LogoscoreError, match="does not exist"):
+    with pytest.raises(LogosctlError, match="does not exist"):
         d.start()
     # Defensive: if start() somehow created a container before raising,
     # clean it up. stop() is safe on a never-started daemon.

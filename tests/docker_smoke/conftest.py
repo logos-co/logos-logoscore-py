@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from logoscore import build_modules_in_docker, docker_available
+from logosctl import build_modules_in_docker, docker_available
 
 
 def _flavors_to_run(config) -> list[str]:
@@ -61,7 +61,7 @@ def linux_test_modules_dir(tmp_path_factory) -> Path:
     need /nix/store; dev's image happens to have it but doesn't need
     portable bundles' embedded libs).
 
-    Override the source flake via `LOGOSCORE_TEST_MODULES_FLAKE` if
+    Override the source flake via `LOGOSCTL_TEST_MODULES_FLAKE` if
     you've forked test-modules locally.
     """
     if not docker_available():
@@ -71,7 +71,7 @@ def linux_test_modules_dir(tmp_path_factory) -> Path:
     system = "aarch64-linux" if machine in ("arm64", "aarch64") else "x86_64-linux"
 
     flake_ref = os.environ.get(
-        "LOGOSCORE_TEST_MODULES_FLAKE",
+        "LOGOSCTL_TEST_MODULES_FLAKE",
         "github:logos-co/logos-test-modules",
     )
     out = tmp_path_factory.mktemp("docker-test-modules")

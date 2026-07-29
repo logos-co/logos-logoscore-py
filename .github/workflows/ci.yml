@@ -49,7 +49,7 @@ jobs:
       # surfaces under its own name in the workflow log.
       #
       # Why sequential rather than a third matrix axis: the heavy
-      # cost of these jobs is the upstream nix build (logoscore CLI +
+      # cost of these jobs is the upstream nix build (logosctl CLI +
       # test modules). Each matrix entry would re-pull / re-realise
       # the same closure on a cold runner. Running all three transports
       # in one job amortises that closure across them.
@@ -68,14 +68,14 @@ jobs:
       # physically keeps the `integration` nix check clean — no silent
       # skips — and makes this CI step the *only* place they run.
       #
-      # Step 1 builds the `logoscore:smoke-portable` image (a multi-stage
+      # Step 1 builds the `logosctl:smoke-portable` image (a multi-stage
       # `docker build` that internally runs `nix build` inside a
       # `nixos/nix` container — no dependency on the host's nix).
       # Step 2 runs pytest via `nix develop` so python + pytest are on
-      # PATH and PYTHONPATH points at the local `logoscore` source tree.
+      # PATH and PYTHONPATH points at the local `logosctl` source tree.
       # Defaults to FLAVOR=portable / --docker-flavor=portable — that's
       # the self-contained cli-bundle-dir shape that matches how released
-      # logoscore binaries are distributed, so it's the most realistic
+      # logosctl binaries are distributed, so it's the most realistic
       # smoke. `dev` is still available via FLAVOR=dev on the build step
       # and --docker-flavor=dev on pytest.
       #

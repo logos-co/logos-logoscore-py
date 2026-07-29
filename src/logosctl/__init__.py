@@ -1,45 +1,45 @@
-"""Python wrapper for the logoscore CLI.
+"""Python wrapper for the logosctl CLI.
 
-Launch a `logoscore` daemon, load modules, call methods, and subscribe to
-events from Python. Internally spawns `logoscore` subprocesses and parses
+Launch a `logosctl` daemon, load modules, call methods, and subscribe to
+events from Python. Internally spawns `logosctl` subprocesses and parses
 their JSON output.
 
 Two daemon lifecycle flavors:
 
-* `LogoscoreDaemon` — spawns a local `logoscore` subprocess. Use this
+* `LogosctlDaemon` — spawns a local `logosctl` subprocess. Use this
   when you want in-process-parent tests and fast iteration.
 
-* `LogoscoreDockerDaemon` — spawns a logoscore daemon inside a docker
+* `LogosctlDockerDaemon` — spawns a logosctl daemon inside a docker
   container and speaks TCP to it from the host. Use this to smoke-test
-  a real distribution of logoscore (or your own module against one)
+  a real distribution of logosctl (or your own module against one)
   without polluting your dev environment, and for anything that needs
   the daemon to be reachable from multiple processes.
 
 Example (local):
-    from logoscore import LogoscoreDaemon
+    from logosctl import LogosctlDaemon
 
-    with LogoscoreDaemon(modules_dir="./modules") as daemon:
+    with LogosctlDaemon(modules_dir="./modules") as daemon:
         client = daemon.client()
         client.load_module("chat")
         result = client.call("chat", "send_message", "hello")
 
 Example (docker):
-    from logoscore import LogoscoreDockerDaemon
+    from logosctl import LogosctlDockerDaemon
 
-    with LogoscoreDockerDaemon(
-        image="logoscore:smoke-portable",
+    with LogosctlDockerDaemon(
+        image="logosctl:smoke-portable",
         modules_dir="./my-module/result/modules",
     ) as daemon:
-        client = daemon.client(binary="logoscore")
+        client = daemon.client(binary="logosctl")
         client.load_module("my_module")
         print(client.call("my_module", "do_something", 42))
 """
 
-from .client import DaemonEndpoint, LogoscoreClient
-from .daemon import LogoscoreDaemon
+from .client import DaemonEndpoint, LogosctlClient
+from .daemon import LogosctlDaemon
 from .docker_daemon import (
     CONTAINER_TCP_PORT,
-    LogoscoreDockerDaemon,
+    LogosctlDockerDaemon,
     build_modules_in_docker,
     docker_available,
     image_present,
@@ -47,7 +47,7 @@ from .docker_daemon import (
 )
 from .errors import (
     DaemonNotRunningError,
-    LogoscoreError,
+    LogosctlError,
     MethodError,
     ModuleError,
 )
@@ -55,12 +55,12 @@ from .events import Subscription
 from .tokens import issue_token, revoke_token, list_tokens
 
 __all__ = [
-    "LogoscoreDaemon",
-    "LogoscoreDockerDaemon",
-    "LogoscoreClient",
+    "LogosctlDaemon",
+    "LogosctlDockerDaemon",
+    "LogosctlClient",
     "DaemonEndpoint",
     "Subscription",
-    "LogoscoreError",
+    "LogosctlError",
     "DaemonNotRunningError",
     "ModuleError",
     "MethodError",

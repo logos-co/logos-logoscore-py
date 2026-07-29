@@ -1,7 +1,7 @@
 """Smoke test for the `tcp_ssl` transport via docker.
 
 The container runs the daemon with a self-signed cert generated on the
-host at fixture time; `logoscore` on the host dials the daemon over TLS
+host at fixture time; `logosctl` on the host dials the daemon over TLS
 with `--no-verify-peer` (because self-signed). That's the minimal path
 that a real deployment with a proper cert would follow — if this works
 end-to-end, TLS handshake + SDK framing + codec + token auth all work
@@ -18,8 +18,8 @@ from typing import Iterator
 
 import pytest
 
-from logoscore import (
-    LogoscoreDockerDaemon,
+from logosctl import (
+    LogosctlDockerDaemon,
     docker_available,
     image_present,
 )
@@ -30,7 +30,7 @@ MODULE = "test_basic_module"
 # Same image-tag convention as `test_docker_smoke.py`. Shared so that one
 # FLAVOR=... build_smoke_image.sh run covers both suites.
 DOCKER_IMAGE_FMT = os.environ.get(
-    "LOGOSCORE_DOCKER_IMAGE_FMT", "logoscore:smoke-{flavor}")
+    "LOGOSCTL_DOCKER_IMAGE_FMT", "logosctl:smoke-{flavor}")
 
 
 def _docker_image_for(flavor: str) -> str:
@@ -58,13 +58,13 @@ def ssl_daemon(
     docker_flavor: str,
     self_signed_cert: tuple[Path, Path],
     linux_test_modules_dir: Path,
-) -> Iterator[LogoscoreDockerDaemon]:
-    """A logoscore daemon inside docker listening on `tcp_ssl`, using the
+) -> Iterator[LogosctlDockerDaemon]:
+    """A logosctl daemon inside docker listening on `tcp_ssl`, using the
     throwaway cert. Function-scoped: each test gets a clean container."""
     _require_docker_and_image(docker_flavor)
     cert, key = self_signed_cert
 
-    with LogoscoreDockerDaemon(
+    with LogosctlDockerDaemon(
         image=_docker_image_for(docker_flavor),
         modules_dir=linux_test_modules_dir,
         transport="tcp_ssl",
@@ -74,7 +74,7 @@ def ssl_daemon(
         yield daemon
 
 
-def test_docker_ssl_status(ssl_daemon, logoscore_bin):
+def test_docker_ssl_status(ssl_daemon, logosctl_bin):
     """Minimal smoke: TLS handshake + `status` round-trip inside docker.
 
     `rpc_error` must be absent — its presence means `getStatus` never
@@ -84,7 +84,7 @@ def test_docker_ssl_status(ssl_daemon, logoscore_bin):
     the mere existence of a parseable state.json, which would pass
     even if TLS were completely broken.
     """
-    client = ssl_daemon.client(binary=logoscore_bin)
+    client = ssl_daemon.client(binary=logosctl_bin)
     status = client.status()
     assert isinstance(status, dict)
     assert "rpc_error" not in status, (
@@ -94,9 +94,9 @@ def test_docker_ssl_status(ssl_daemon, logoscore_bin):
     assert status.get("daemon", {}).get("status") == "running", status
 
 
-def test_docker_ssl_load_and_call(ssl_daemon, logoscore_bin):
+def test_docker_ssl_load_and_call(ssl_daemon, logosctl_bin):
     """Load a module and call a method over tcp_ssl — the full payload
     path (method args → TLS → RPC → return value → TLS → client)."""
-    client = ssl_daemon.client(binary=logoscore_bin)
+    client = ssl_daemon.client(binary=logosctl_bin)
     client.load_module(MODULE)
     assert client.call(MODULE, "echo", "ssl-hello") == "ssl-hello"
