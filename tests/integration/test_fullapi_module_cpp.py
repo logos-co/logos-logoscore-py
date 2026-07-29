@@ -100,12 +100,21 @@ def test_echo_string(client):
     assert client.call(MODULE, "echoString", "round-trip") == "round-trip"
 
 
-@pytest.mark.parametrize("n", [0, 42, -7, 9007199254740991])
+# 64-bit boundaries belong here specifically. This module is replayed by the
+# local, tcp and tcp_ssl checks, and the highest value it used to carry was
+# 2^53-1 (int) / 2^32-1 (uint) — so the plain wire's 64-bit handling was never
+# exercised at all. It was broken: RpcValue had no unsigned alternative, and a
+# uint above int64max arrived as -1.
+# 2^53+1 is the smallest integer a double cannot hold, which separates
+# "degraded through a float" from "wrapped as an integer".
+@pytest.mark.parametrize(
+    "n", [0, 42, -7, 9007199254740991, 2**53 + 1, 2**63 - 1, -(2**63)]
+)
 def test_echo_int(client, n):
     assert client.call(MODULE, "echoInt", n) == n
 
 
-@pytest.mark.parametrize("n", [0, 7, 4294967295])
+@pytest.mark.parametrize("n", [0, 7, 4294967295, 2**53 + 1, 2**63, 2**64 - 1])
 def test_echo_uint(client, n):
     assert client.call(MODULE, "echoUint", n) == n
 

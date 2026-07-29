@@ -39,6 +39,20 @@ FULLAPI_METHOD_CASES: list[tuple[str, tuple, object]] = [
     ("echoInt",       (-7,),                     -7),
     ("echoUint",      (7,),                      7),
 
+    # 64-bit boundaries. These matter far more than the small values above:
+    # this table is what the tcp / tcp_ssl / json / cbor matrices replay, and it
+    # had NO value outside int32 range, so the plain wire's uint64 handling was
+    # entirely untested. A uint64 above int64max used to arrive as -1 there
+    # (RpcValue had no unsigned alternative), and int64::min/max exercise the
+    # signed edges the double-degradation bugs kept landing on.
+    ("echoUint",      (2**64 - 1,),              2**64 - 1),
+    ("echoUint",      (2**63,),                  2**63),
+    ("echoInt",       (2**63 - 1,),              2**63 - 1),
+    ("echoInt",       (-(2**63),),               -(2**63)),
+    # 2^53+1 is the smallest integer a double cannot represent — it separates
+    # "degraded through a float" from "wrapped as an integer".
+    ("echoInt",       (2**53 + 1,),              2**53 + 1),
+
     # float64 — values MUST stay exactly-representable (dyadic) so a plain
     # `==` holds across json + cbor; the docker matrix compares without approx.
     ("echoDouble",    (2.5,),                    2.5),
@@ -95,6 +109,12 @@ FULLAPI_EVENT_CASES: list[tuple[str, str, object]] = [
     ("bytesEvent",      "fireBytesEvent",      b"\x01\x02\x03\xff"),
     ("intEvent",        "fireIntEvent",        -42),
     ("uintEvent",       "fireUintEvent",       7),
+    # The event path's own 64-bit boundaries — the method cases above do not
+    # cover them, and the two paths have diverged before (see M6: exact as a
+    # method return, degraded to a double as an event).
+    ("uintEvent",       "fireUintEvent",       2**64 - 1),
+    ("intEvent",        "fireIntEvent",        -(2**63)),
+    ("intEvent",        "fireIntEvent",        2**53 + 1),
     ("doubleEvent",     "fireDoubleEvent",     2.5),
     ("boolEvent",       "fireBoolEvent",       True),
     ("anyEvent",        "fireAnyEvent",        {"k": "v", "n": 1}),
