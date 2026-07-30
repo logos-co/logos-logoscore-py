@@ -264,3 +264,128 @@ def test_markdown_table_is_generated_from_the_registry_not_from_prose():
     assert "| K9 | 4 |" in md
     assert "an old defect" in md      # `fixed` entries explain the green guards
     assert "U1" in md
+
+
+# ── a report about types must not blur types ────────────────────────────────
+
+
+def test_a_string_and_a_number_do_not_render_alike():
+    # The whole subject is whether a value keeps its TYPE across a boundary.
+    # `hostile/{tstr:any}/scalar` really answers the number 5 and
+    # `hostile/[any]/scalar` really answers the string "notalist"; rendering a
+    # top-level string bare made those two lines indistinguishable.
+    assert R._short(5) == "5"
+    assert R._short("5") == '"5"'
+    assert R._short("notalist") == '"notalist"'
+
+
+def test_the_call_line_does_not_re_encode_its_arguments():
+    line = R._call_line({"call": "echoBool", "args": [False], "expect": False}, 84)
+    assert line == "echoBool(false) → false"      # not echoBool("false")
+
+
+def test_the_call_line_states_an_identical_per_provider_expectation_once():
+    line = R._call_line({"call": "echoBool", "args": [1], "expect_by_provider": {
+        "test_fullapi_cpp": {"__error__": "dispatch_failed"},
+        "test_fullapi_rust": {"__error__": "dispatch_failed"}}}, 84)
+    assert line.count("dispatch_failed") == 1
+    assert "identical" in line
+
+
+def test_every_case_row_says_what_was_sent():
+    # "what was actually verified" that names only an id verifies an id: a
+    # reader learns `uint/nominal` is green, not what was sent.
+    text = "\n".join(R.render_drilldown(_payload(), color=False))
+    assert "echoUint(1) → 1" in text
+    assert "echoUint(-1) →" in text
+
+
+# ── a declared divergence is not one kind of thing ──────────────────────────
+
+
+IDENTITY_DIFF = {"case": "identity/whoami", "consumer": "py", "declared": True,
+                 "agree": False, "values": {"prov_a": "prov_a", "prov_b": "prov_b"}}
+BEHAVIOUR_DIFF = {"case": "hostile/x", "consumer": "py", "declared": True,
+                  "agree": False,
+                  "values": {"prov_a": 5, "prov_b": {"__error__": "no"}}}
+VESTIGIAL_DIFF = {"case": "hostile/y", "consumer": "py", "declared": True,
+                  "agree": True,
+                  "values": {"prov_a": {"__error__": "no"},
+                             "prov_b": {"__error__": "no"}}}
+
+
+@pytest.mark.parametrize("diff,kind", [
+    (IDENTITY_DIFF, "identity"), (BEHAVIOUR_DIFF, "behaviour"),
+    (VESTIGIAL_DIFF, "agree")])
+def test_a_declared_divergence_knows_why_it_diverges(diff, kind):
+    # Decided from the measured values, not a hand-kept list of case ids, so a
+    # new identity case classifies itself.
+    assert R._divergence_kind(diff, PROVIDERS) == kind
+
+
+def test_a_divergence_true_by_construction_does_not_crowd_out_a_real_one():
+    p = _payload(diffs=[IDENTITY_DIFF, BEHAVIOUR_DIFF])
+    lines = R.render_differential(p, R._Paint(False))
+    text = "\n".join(lines)
+    body = text[text.index("DECLARED DIVERGENCES"):]
+    # The behavioural split leads with its values; the identity one is one
+    # summary line and never its own block.
+    assert body.index("hostile/x") < body.index("identity/whoami")
+    assert "BY IDENTITY" in body
+    assert '"prov_a"' not in body        # its values are not reprinted
+
+
+def test_a_divergence_that_stopped_diverging_is_not_green():
+    p = _payload(diffs=[VESTIGIAL_DIFF])
+    text = "\n".join(R.render_differential(p, R._Paint(False)))
+    # "Both providers now answer the same" is a finding, not good news: the
+    # per-provider split in the table has nothing left to say.
+    assert "NO LONGER DIVERGES" in text and "vestigial" in text
+    assert "AGREE" not in text
+
+
+# ── the sparse columns must not split the dense ones ────────────────────────
+
+
+def test_the_grid_keeps_arg_ret_evt_adjacent():
+    positions = _payload()["axis"]["positions"]
+    slots = [p for p in positions if "@" in p]
+    plain = [p for p in positions if "@" not in p]
+    # Per-slot columns exist for three multi-argument cases and are ~90% empty;
+    # sorted by travel order they sat between `arg` and `ret`.
+    assert positions == plain + slots
+
+
+# ── a registered defect must show its evidence, not only its claim ──────────
+
+
+def test_the_register_prints_what_the_cell_actually_did():
+    text = "\n".join(R.render_register(_payload(), R._Paint(False)))
+    assert "expected" in text and "got" in text and "measured" in text
+    # Identical outcomes on several surfaces are one fact, said once.
+    assert text.count("got      ") == 1
+
+
+# ── the report must not reproduce the defect it reports ─────────────────────
+
+
+def test_the_page_never_renders_a_measured_value_through_javascript():
+    # JSON.parse resolves every number to a double, so a page that reads
+    # cv.expect prints 18446744073709552000 for the case that exists to prove
+    # 18446744073709551615 survives — M1/M5/M6, in the report about them.
+    import re
+    html = R.render_html(_payload())
+    # Comments are allowed to NAME the trap; only executable code is checked.
+    code = re.sub(r"/\*.*?\*/", "", html[html.index("</script>"):], flags=re.S)
+    assert "const short " not in code       # no value-to-text helper in JS
+    for js in ("cv.expect", "cv.args", "e.actual)", "e.expected)"):
+        assert js not in code
+
+
+def test_a_uint64_survives_into_the_page_exactly():
+    case = {"id": "uint/max", "type": "uint", "position": "method_arg",
+            "method": "echoUint", "args": [18446744073709551615],
+            "expect": 18446744073709551615, "tags": ["boundary"]}
+    r = R._render_call(case)
+    assert r["sent"] == "echoUint(18446744073709551615)"
+    assert r["want"] == "18446744073709551615"

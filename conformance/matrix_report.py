@@ -62,14 +62,22 @@ ANSI = {
     "head": "\033[1;36m", "reset": "\033[0m",
 }
 
-# Positions, in the order a value travels: into a call, out of it, out of an
-# event. Unknown positions are appended rather than dropped — nothing may be
-# silently absent from the matrix, and that includes the report.
+# Positions, in the order a value travels — into a call, out of it, out of an
+# event, and inside a container — with the per-ARGUMENT-SLOT columns after
+# them rather than interleaved.
+#
+# Slots exist only because three cases take several arguments, so `a0 a1 a2 e0
+# e1 e2` hold nine tokens between them and 87 dots. Sorted by travel order they
+# sit between `arg` and `ret`, which are the two columns carrying most of the
+# contract, and push them six columns apart. The scan that matters is
+# arg -> ret -> evt, and it should be adjacent.
+#
+# Unknown positions are appended rather than dropped — nothing may be silently
+# absent from the matrix, and that includes the report.
 POSITION_ORDER = [
-    "method_arg", "method_arg@0", "method_arg@1", "method_arg@2",
-    "method_return",
-    "event_param", "event_param@0", "event_param@1", "event_param@2",
-    "nested_in_container",
+    "method_arg", "method_return", "event_param", "nested_in_container",
+    "method_arg@0", "method_arg@1", "method_arg@2",
+    "event_param@0", "event_param@1", "event_param@2",
 ]
 POSITION_ABBR = {
     "method_arg": "arg", "method_arg@0": "a0", "method_arg@1": "a1",
@@ -97,6 +105,74 @@ def _type_rank(t: str) -> tuple:
     next to the other containers rather than next to the `[` character."""
     kind = 2 if t.startswith("[") else (1 if t.startswith("{") else 0)
     return (kind, t)
+
+
+def _render(v) -> str:
+    """A value as display TEXT, decided in python.
+
+    The page must never render a measured value from the parsed payload.
+    `JSON.parse` puts every number in a double, so `uint/boundary/max` — the
+    case whose entire purpose is proving that 18446744073709551615 survives —
+    printed 18446744073709552000, and `uint/boundary/above-2^53` printed
+    ...992 for ...993. The report reproduced M1/M5/M6 while reporting on them.
+
+    The JSON text embedded in the page has the exact digits; only the parse
+    loses them. So every value a surface displays is rendered here, by the
+    interpreter that holds it exactly, and the page prints the string.
+    """
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _render_call(case, kind=None) -> dict:
+    """The `sent` and `want` halves of a case's one-line summary, as text."""
+    if case.get("args") is not None:
+        inner = _render(case["args"])[1:-1]
+        sent = f"{case.get('method') or case.get('event')}({inner})"
+    elif case.get("method") or case.get("event") or case.get("fire"):
+        val = case.get("values", case.get("value"))
+        sent = (f"{case.get('fire') or case.get('event') or case.get('method')}"
+                f"{'' if val is None else ' ' + _render(val)}")
+    else:
+        sent = ""
+    ebp = case.get("expect_by_provider")
+    if ebp:
+        vals = [_render(v) for v in ebp.values()]
+        if len(set(vals)) == 1:
+            return {"sent": sent, "want": vals[0], "want_kind": "identical"}
+        if kind == "identity":
+            return {"sent": sent, "want": "", "want_kind": "identity"}
+        return {"sent": sent, "want": "", "want_kind": "per_provider",
+                "want_pairs": [[_prov(p), _render(v)] for p, v in ebp.items()]}
+    if case.get("expect") is not None:
+        return {"sent": sent, "want": _render(case["expect"]), "want_kind": "one"}
+    return {"sent": sent, "want": "", "want_kind": ""}
+
+
+def _divergence_kind(dd: dict, providers) -> str:
+    """Why a DECLARED divergence diverges: `identity`, `behaviour`, or `agree`.
+
+    Two of the six declared divergences differ because the value carries the
+    provider's own name — `result/ok`'s own `why` says exactly that, and
+    `identity/whoami` returns nothing else. They are true by construction and
+    always will be, so printing them at the same weight as a genuine
+    behavioural split (one provider accepts a hostile value, the other rejects
+    it) buries the split under the boilerplate.
+
+    Decided from the measured values rather than a hand-kept list of case ids:
+    a divergence is `identity` when every provider's answer contains its own
+    name and no other provider's. A new identity case then classifies itself,
+    and one that stops being about identity stops being filed as such.
+    """
+    if dd.get("agree"):
+        return "agree"
+    vals = dd.get("values") or {}
+    if len(vals) < 2 or set(vals) != set(providers):
+        return "behaviour"
+    for name, v in vals.items():
+        blob = json.dumps(v, ensure_ascii=False)
+        if name not in blob or any(o in blob for o in vals if o != name):
+            return "behaviour"
+    return "identity"
 
 
 def _positions_of(case: dict, norm_type) -> list[tuple[str, str]]:
@@ -132,6 +208,13 @@ def build_payload(*, consumer, providers, provider_dirs, by_case, rows, diffs,
             continue  # differential rows and uncovered rows are not cells
         cells[(r["case"], r["provider"], r.get("consumer", consumer))] = r
 
+    # Annotated on a COPY: `diffs` belongs to the driver, and the report is not
+    # allowed to change anything the driver computed.
+    diffs = [dict(d, kind=_divergence_kind(d, providers)) if d.get("declared")
+             else dict(d) for d in diffs]
+    for d in diffs:
+        if d.get("values"):
+            d["values_s"] = {p: _render(v) for p, v in d["values"].items()}
     diff_by_case = {d["case"]: d for d in diffs}
 
     # ── the cases, resolved ──
@@ -155,7 +238,9 @@ def build_payload(*, consumer, providers, provider_dirs, by_case, rows, diffs,
                 if r["status"] != "pass":
                     if "expected" in r:
                         entry["expected"] = r["expected"]
+                        entry["expected_s"] = _render(r["expected"])
                     entry["actual"] = r.get("actual")
+                    entry["actual_s"] = _render(r.get("actual"))
                 results[f"{prov}|{cons}"] = entry
         statuses = [e["status"] for e in results.values()]
         case_views.append({
@@ -172,6 +257,8 @@ def build_payload(*, consumer, providers, provider_dirs, by_case, rows, diffs,
             "value": case.get("values", case.get("value")),
             "expect": case.get("expect"),
             "expect_by_provider": case.get("expect_by_provider"),
+            "render": _render_call(
+                case, (diff_by_case.get(cid) or {}).get("kind")),
             "results": results,
             "rollup": _rollup(statuses),
             "known": sorted({e["known"] for e in results.values()
@@ -406,8 +493,20 @@ def render_differential(payload, paint) -> list[str]:
                 verdict = paint(f"{len(s['differ'])} differ", "fail")
             else:
                 verdict = paint("0 differ", "dim")
-            extra = (f"   +{len(s['declared'])} declared divergences "
-                     f"(expect_by_provider), not compared"
+            # The breakdown, not just the count: "6 declared divergences" reads
+            # as six facts about the system, and two of them are the provider
+            # spelling its own name.
+            kinds: dict[str, int] = {}
+            for dd in payload["diffs"]:
+                if dd.get("declared") and dd.get("consumer", c) == c:
+                    kinds[dd.get("kind", "behaviour")] = kinds.get(
+                        dd.get("kind", "behaviour"), 0) + 1
+            label = {"behaviour": "by behaviour", "agree": "no longer diverging",
+                     "identity": "by identity"}
+            detail = "; ".join(f"{kinds[k]} {label[k]}" for k in
+                               ("behaviour", "agree", "identity") if kinds.get(k))
+            extra = (f"   +{len(s['declared'])} declared, not compared"
+                     f"{f'  ({detail})' if detail else ''}"
                      if s["declared"] else "")
             out.append(f"      on {c:<16}{agree}   {verdict}{paint(extra, 'dim')}")
     if len(cons) < 2:
@@ -425,22 +524,42 @@ def render_differential(payload, paint) -> list[str]:
     declared = [dd for dd in payload["diffs"] if dd.get("declared")]
     if declared:
         out.append("")
-        out.append(paint("    DECLARED DIVERGENCES (expect_by_provider) — not "
-                         "compared by the driver; shown because one that quietly "
-                         "stopped diverging is worth seeing", "dim"))
-        for dd in declared:
-            vals = list((dd.get("values") or {}).items())
-            if dd.get("agree"):
-                # Agreeing is the boring half: one value, said once.
-                one = _short(vals[0][1], 60) if vals else ""
-                out.append(f"      {dd['case']:<34}{paint('AGREE', 'pass')}   "
-                           f"both {one}")
-                continue
-            # Differing is the point, and the difference is usually deep inside
-            # the two values — so they get a line each, at full width.
-            out.append(f"      {dd['case']:<34}{paint('DIFFER', 'xfail')}")
-            for p, v in vals:
+        out.append(paint("    DECLARED DIVERGENCES (expect_by_provider) — the "
+                         "driver does not compare these; the divergence IS the "
+                         "expectation", "dim"))
+        buckets = {k: [dd for dd in declared if dd.get("kind") == k]
+                   for k in ("behaviour", "agree", "identity")}
+
+        # The point of the panel. Two providers of the same contract answering
+        # differently is a fact about the system, and the difference is usually
+        # deep inside the values — so each gets a line, at full width.
+        for dd in buckets["behaviour"]:
+            out.append(f"      {dd['case']:<34}{paint('DIFFER', 'xfail')}"
+                       f"{paint('  by behaviour', 'dim')}")
+            for p, v in (dd.get("values") or {}).items():
                 out.append(paint(f"        {_prov(p):>6}  {_short(v, 88)}", "dim"))
+
+        # Amber, not green. "Both providers now answer the same" reads as good
+        # news and is not: it means the per-provider split in the table has
+        # nothing left to say and should collapse to a plain `expect`. Same
+        # shape of finding as an `xpass`, and it wears the same colour.
+        for dd in buckets["agree"]:
+            vals = list((dd.get("values") or {}).items())
+            one = _short(vals[0][1], 56) if vals else ""
+            out.append(f"      {dd['case']:<34}{paint('NO LONGER DIVERGES', 'xpass')}"
+                       f"  both {one}")
+        if buckets["agree"]:
+            out.append(paint("        ^ the table still declares a per-provider "
+                             "expectation for these; it is now vestigial.", "dim"))
+
+        # True by construction, so said once, in one line, and never again.
+        if buckets["identity"]:
+            ids = ", ".join(dd["case"] for dd in buckets["identity"])
+            for i, line in enumerate(_wrap(
+                    f"{len(buckets['identity'])} more differ BY IDENTITY — each "
+                    f"provider answers with its own name, which is what the case "
+                    f"is for: {ids}", 80)):
+                out.append(paint(("      " if i == 0 else "        ") + line, "dim"))
     return out
 
 
@@ -473,7 +592,13 @@ def render_not_measured(payload, paint) -> list[str]:
     for lim in payload["registry"]["coverage_limits"]:
         empty = False
         out.append(f"    limit  axis={lim['axis']:<10} {lim.get('status', 'OPEN')}")
-        for line in _prose_lines(lim.get("note"), 84, limit=3):
+        # Printed in FULL. These were clipped to three lines, which cut the
+        # consumer-axis note at "This is not hypothetical: the …" — advertising
+        # the evidence and then withholding it. There are two of them, they are
+        # the whole reason the axis is a limit rather than a footnote, and a
+        # reader who has to open known.json to finish the sentence is being
+        # handed the JSON this report exists to replace.
+        for line in _prose_lines(lim.get("note"), 84):
             out.append(paint(f"           {line}", "dim"))
     for entry_id in payload["registry_dead"]:
         empty = False
@@ -481,6 +606,44 @@ def render_not_measured(payload, paint) -> list[str]:
                          f"in this run", "xfail"))
     if empty:
         out.append(paint("    nothing declared out of scope", "dim"))
+    return out
+
+
+_ABSENT = object()
+
+
+def _measured_groups(payload, entry_id):
+    """(expected, actual, status, where) for the cells one registry entry owns.
+
+    Grouped on the outcome, not on the coordinate, so a defect both providers
+    reproduce identically is reported as one line naming both.
+    """
+    groups: dict[str, tuple] = {}
+    order: list[str] = []
+    for cv in payload["cases"]:
+        for key, r in cv["results"].items():
+            if r.get("known") != entry_id or r["status"] == "pass":
+                continue
+            exp = r["expected"] if "expected" in r else _ABSENT
+            sig = json.dumps([r["status"], exp is _ABSENT,
+                              None if exp is _ABSENT else exp, r.get("actual")],
+                             ensure_ascii=False)
+            if sig not in groups:
+                groups[sig] = (exp, r.get("actual"), r["status"], [])
+                order.append(sig)
+            groups[sig][3].append((cv["id"],
+                                   f"{_prov(r['provider'])}/{r['consumer']}"))
+    # The entry line above already names the cases, so a coordinate repeats the
+    # case id once per cell for no gain — `cpp/py, rust/py` is the part that
+    # differs. The case is re-stated only when the group spans several.
+    out = []
+    for sig in order:
+        exp, act, status, keys = groups[sig]
+        cases = {c for c, _ in keys}
+        where = (", ".join(w for _, w in keys) if len(cases) == 1
+                 else ", ".join(f"{c} {w}" for c, w in keys))
+        out.append((exp, act, status,
+                    f"{len(keys)} cells" if len(keys) > 3 else where))
     return out
 
 
@@ -505,6 +668,17 @@ def render_register(payload, paint) -> list[str]:
                    f"{paint('cases: ' + ', '.join(e['cases']), 'dim')}")
         for line in _wrap(e.get("summary", ""), 84):
             out.append(f"          {line}")
+        # What the cell ACTUALLY DID, not only what the registry claims about
+        # it. Without this the default report asserts a defect and shows no
+        # evidence for it — and a registered cell is precisely the cell whose
+        # measurement a reader has most reason to want. Identical outcomes on
+        # several surfaces print once: two providers failing the same way is
+        # one fact.
+        for exp, act, status, where in _measured_groups(payload, e["id"]):
+            if exp is not _ABSENT:
+                out.append(paint(f"          expected {_short(exp, 68)}", "dim"))
+            out.append(paint(f"          got      {_short(act, 68)}   "
+                             f"[{status}] {where}", "dim"))
         if e.get("fix_is"):
             for i, line in enumerate(_wrap("fix is: " + e["fix_is"], 84)):
                 out.append(paint(f"          {line}", "dim"))
@@ -570,6 +744,15 @@ def render_drilldown(payload, color=None) -> list[str]:
                    if cv["known"] else "")
             out.append(f"      {strip:<{(len(provs) + 4) * len(cons)}}"
                        f" {paint(agree.ljust(2), 'dim')} {pos:<9} {cv['id']}{ids}")
+            # What the case SENT and what the table wanted back. Without it the
+            # section titled "what was actually verified" verified an id — a
+            # reader learns that `uint/boundary/max` is green and not what
+            # `max` was, which is the only fact in the row that a count did not
+            # already carry. The HTML has always shown this; the terminal did
+            # not, and that made `--report-text` the weaker of the two.
+            call = _call_line(cv, 96)
+            if call:
+                out.append(paint(f"                    {call}", "dim"))
             interesting = cv["rollup"] != "pass" or bool(
                 {"hostile", "adversarial"} & set(cv["tags"]))
             if cv["why"] and interesting:
@@ -594,6 +777,52 @@ def render_drilldown(payload, color=None) -> list[str]:
                            f"{_short(json.loads(act), 76)}   "
                            f"{paint(f'[{status}] {where}', 'dim')}")
     return out
+
+
+def _call_line(cv, width: int) -> str:
+    """`echoUint(18446744073709551615) -> 18446744073709551615`, on one line.
+
+    The twin of `callHtml` in the page. A green cell has nothing to say beyond
+    "it matched", so the values appear once — as the case's own argument and
+    its own `expect` — rather than per provider; the per-provider values are
+    printed underneath only where something did NOT match.
+    """
+    if cv.get("args") is not None:
+        # Already serialized — `_short` would JSON-encode the encoding and
+        # print echoBool("false") for a boolean argument.
+        inner = json.dumps(cv["args"], ensure_ascii=False)[1:-1]
+        sent = f"{cv['call']}({_clip(inner, width // 2)})"
+    elif cv.get("call") or cv.get("fire"):
+        sent = f"{cv.get('fire') or cv['call']} {_short(cv.get('value'), width // 2)}"
+    else:
+        return ""
+    # The expectation gets whatever the argument did not use, not a fixed half:
+    # `result/err` sends one boolean and answers a three-field record, and an
+    # even split cut the record at the `error` field — the only field the case
+    # is about.
+    room = max(30, width - len(sent))
+    if cv.get("expect_by_provider"):
+        vals = list(cv["expect_by_provider"].values())
+        if all(json.dumps(v, sort_keys=True) == json.dumps(vals[0], sort_keys=True)
+               for v in vals):
+            # A per-provider expectation whose entries are all the same value
+            # is one expectation written N times; printing it N times, each
+            # truncated to fit, spends the whole line saying nothing twice.
+            want = f"{_short(vals[0], room)}  (declared per provider, identical)"
+        elif (cv.get("differential") or {}).get("kind") == "identity":
+            # Two values whose ONLY difference is the provider's own name, deep
+            # inside a record. Truncated side by side they render identically
+            # and the ≠ next to them looks like a lie; the full values are in
+            # the differential panel, which is where a divergence belongs.
+            want = "each provider answers with its own name — see DIFFERENTIAL"
+        else:
+            want = "  |  ".join(f"{_prov(p)} {_short(v, room // len(vals) - 8)}"
+                                for p, v in cv["expect_by_provider"].items())
+    elif cv.get("expect") is not None:
+        want = _short(cv["expect"], room)
+    else:
+        return sent
+    return f"{sent} → {want}"
 
 
 def _cases_by_type(payload) -> dict[str, list]:
@@ -629,7 +858,20 @@ def _pos_label(cells, only_type=None) -> str:
 
 
 def _short(v, width=44) -> str:
-    s = v if isinstance(v, str) else json.dumps(v)
+    """Always JSON, including for a bare string.
+
+    This printed a top-level string unquoted, so the integer `5` and the string
+    `"5"` rendered as the same three characters \u2014 in a report whose entire
+    subject is whether a value keeps its TYPE across a boundary. `hostile/
+    {tstr:any}/scalar` really does answer the number 5 and `hostile/[any]/
+    scalar` really does answer the string "notalist", and the two lines were
+    indistinguishable. Quotes everywhere is noisier and correct.
+    """
+    return _clip(json.dumps(v, ensure_ascii=False), width)
+
+
+def _clip(s: str, width: int) -> str:
+    """Truncate text that is ALREADY the rendering. Never re-encodes."""
     return s if len(s) <= width else s[:width - 1] + "\u2026"
 
 
@@ -963,8 +1205,13 @@ const ABBR  = {method_arg:"arg", "method_arg@0":"a0", "method_arg@1":"a1",
   "method_arg@2":"a2", method_return:"ret", event_param:"evt",
   "event_param@0":"e0", "event_param@1":"e1", "event_param@2":"e2",
   nested_in_container:"nest"};
-const short = (v, n) => { const s = typeof v === "string" ? v : JSON.stringify(v);
-  return s === undefined ? "" : (s.length > n ? s.slice(0, n-1) + "\u2026" : s); };
+/* There is deliberately NO value-to-text helper here. Every measured value is
+   rendered in python (_render) and reaches this page as a string, because
+   JSON.parse resolves numbers to doubles and would silently rewrite
+   18446744073709551615 as ...52000 \u2014 the M1/M5/M6 defect, in the report that
+   reports it. `clip` shortens text that is already the rendering. */
+const clip  = (s, n) => s === undefined || s === null ? ""
+  : (s.length > n ? s.slice(0, n-1) + "\u2026" : s);
 const surfaces = [];
 D.meta.providers.forEach(p => D.meta.consumers.forEach(c => surfaces.push(p + "|" + c)));
 const shortProv = p => p.replace(/^test_fullapi_/, "");
@@ -1039,13 +1286,23 @@ function renderDifferential() {
   } else {
     h += `<div class="card"><h3>provider &nbsp;<code>${esc(d.providers[0])}</code>
       vs <code>${esc(d.providers[1])}</code></h3><table class="flat">`;
+    const KLABEL = {behaviour: "by behaviour", agree: "no longer diverging",
+                    identity: "by identity"};
     d.consumers.forEach(c => {
       const s = d.by_consumer[c];
+      /* The breakdown, not just the count: "6 declared divergences" reads as
+         six facts about the system, and two of them are a provider spelling
+         its own name. */
+      const k = {};
+      D.diffs.filter(x => x.declared && (x.consumer || c) === c)
+        .forEach(x => k[x.kind || "behaviour"] = (k[x.kind || "behaviour"] || 0) + 1);
+      const detail = ["behaviour", "agree", "identity"].filter(x => k[x])
+        .map(x => `${k[x]} ${KLABEL[x]}`).join("; ");
       h += `<tr><td>on ${esc(c)}</td>
         <td class="ok">${s.agree} agree</td>
         <td class="${s.differ.length ? "bad" : "sk"}">${s.differ.length} differ</td>
         <td class="sk">${s.declared.length ? "+" + s.declared.length +
-          " declared divergences (expect_by_provider), not compared" : ""}</td></tr>`;
+          " declared, not compared" + (detail ? ` (${esc(detail)})` : "") : ""}</td></tr>`;
     });
     h += `</table></div>`;
   }
@@ -1070,14 +1327,34 @@ function renderDifferential() {
       the expectation. Shown because a declared divergence that quietly stopped
       diverging is worth seeing, and it carries no verdict and no exit code.</p>
       <table class="flat"><tr><th>case</th><th></th><th>answers</th></tr>`;
-    decl.forEach(x => {
+    /* Behaviour first, then the ones that stopped diverging, then identity.
+       `kind` is decided in python (see _divergence_kind) so the page and the
+       terminal cannot classify the same divergence differently. */
+    const KIND = {behaviour: 0, agree: 1, identity: 2};
+    [...decl].sort((a, b) => (KIND[a.kind] ?? 0) - (KIND[b.kind] ?? 0)).forEach(x => {
       /* One provider per line: the difference between two long values is
-         usually deep inside them, and a side-by-side truncation hides it. */
-      const vals = Object.entries(x.values || {})
-        .map(([p, v]) => `<div><b>${esc(shortProv(p))}</b> ${esc(short(v, 150))}</div>`).join("");
-      h += `<tr><td>${esc(x.case)}</td>
-        <td class="${x.agree ? "ok" : "kn"}">${x.agree ? "AGREE" : "DIFFER"}</td>
-        <td>${vals}</td></tr>`;
+         usually deep inside them, and a side-by-side truncation hides it.
+         When they AGREE there is no difference to place, so the value is
+         stated once. */
+      /* values_s, not values: pre-rendered in python so a uint64 answer is not
+         re-encoded through a double on the way to the screen. */
+      const ents = Object.entries(x.values_s || {});
+      const vals = x.kind === "agree" && ents.length
+        ? `<div><b>both</b> ${esc(clip(ents[0][1], 150))}</div>`
+        : ents.map(([p, v]) =>
+            `<div><b>${esc(shortProv(p))}</b> ${esc(clip(v, 150))}</div>`).join("");
+      /* "Both providers now answer the same" is not good news and is not
+         green: it means the per-provider split in the table is vestigial.
+         Same shape of finding as an xpass, same colour. */
+      const verdict = x.kind === "agree"
+        ? `<span class="xp">NO LONGER DIVERGES</span>
+           <div class="sk" style="font-size:11.5px">the declaration is vestigial</div>`
+        : x.kind === "identity"
+        ? `<span class="sk">DIFFER</span>
+           <div class="sk" style="font-size:11.5px">by identity — true by construction</div>`
+        : `<span class="kn">DIFFER</span>
+           <div class="sk" style="font-size:11.5px">by behaviour</div>`;
+      h += `<tr><td>${esc(x.case)}</td><td>${verdict}</td><td>${vals}</td></tr>`;
     });
     h += `</table>`;
   }
@@ -1102,16 +1379,27 @@ function posLabel(cells, onlyType) {
    "it matched" blobs are what makes a report unreadable. Values appear in full
    only where something did not match. */
 function callHtml(cv) {
-  const sent = cv.args !== undefined && cv.args !== null
-    ? `${esc(cv.call)}(${esc(short(JSON.stringify(cv.args).replace(/^\[|\]$/g, ""), 90))})`
-    : `${esc(cv.fire || cv.call)} ${esc(short(cv.value, 90))}`;
+  /* Every value here comes PRE-RENDERED from python (cv.render). JSON.parse
+     puts numbers in doubles, so reading cv.args/cv.expect would print
+     18446744073709552000 for the case that exists to prove
+     18446744073709551615 survives. clip only — never re-encode. */
+  const r = cv.render || {};
+  if (!r.sent) return "";
+  const sent = esc(clip(r.sent, 100));
   let want = "";
-  if (cv.expect_by_provider) {
-    want = Object.entries(cv.expect_by_provider)
-      .map(([p, v]) => `${esc(shortProv(p))} ${esc(short(v, 46))}`).join(" &nbsp;|&nbsp; ");
-  } else if (cv.expect !== undefined && cv.expect !== null) {
-    want = esc(short(cv.expect, 90));
-  }
+  if (r.want_kind === "identical")
+    /* One expectation written N times is not N expectations. */
+    want = `${esc(clip(r.want, 90))} <span class="where">(declared per provider, identical)</span>`;
+  else if (r.want_kind === "identity")
+    /* Values differing only by the provider's own name render identically
+       once truncated; the full pair lives in the differential panel. */
+    want = `<span class="where">each provider answers with its own name &mdash;
+       see <a href="#differential">differential</a></span>`;
+  else if (r.want_kind === "per_provider")
+    want = (r.want_pairs || []).map(([p, v]) =>
+      `${esc(p)} ${esc(clip(v, 46))}`).join(" &nbsp;|&nbsp; ");
+  else if (r.want_kind === "one")
+    want = esc(clip(r.want, 90));
   return `<span class="call">${sent}${want ? ` <span class="arrow">&rarr;</span> ${want}` : ""}</span>`;
 }
 function valuesHtml(cv) {
@@ -1120,7 +1408,10 @@ function valuesHtml(cv) {
   const groups = new Map();
   Object.entries(cv.results).forEach(([k, e]) => {
     if (e.status === "pass") return;
-    const sig = JSON.stringify([e.status, e.expected === undefined, e.expected, e.actual]);
+    /* Grouped and displayed on the PRE-RENDERED text, for the same reason
+       callHtml is: two values that differ only above 2^53 are one value once
+       JSON.parse has been through them. */
+    const sig = JSON.stringify([e.status, e.expected_s === undefined, e.expected_s, e.actual_s]);
     (groups.get(sig) || groups.set(sig, {e, keys: []}).get(sig)).keys.push(k);
   });
   let h = "";
@@ -1128,8 +1419,8 @@ function valuesHtml(cv) {
     const where = keys.length === Object.keys(cv.results).length
       ? "all surfaces" : keys.join(", ");
     let t = `<b>${esc(e.status)}</b> <span class="where">${esc(where)}</span>`;
-    if (e.expected !== undefined) t += `\n<b>expected</b> ${esc(short(e.expected, 300))}`;
-    t += `\n<b>got     </b> ${esc(short(e.actual, 300))}`;
+    if (e.expected_s !== undefined) t += `\n<b>expected</b> ${esc(clip(e.expected_s, 300))}`;
+    t += `\n<b>got     </b> ${esc(clip(e.actual_s, 300))}`;
     h += `<pre class="val">${t}</pre>`;
   });
   return h;
@@ -1163,8 +1454,11 @@ function renderCases() {
       if (e.status === "pass") ok++;
       if (["xfail", "fail", "xpass"].includes(e.status)) broken++;
     }));
-    const positions = [...new Set(cs.flatMap(c =>
-      c.cells.filter(x => x[0] === ty).map(x => x[1])))].map(p => ABBR[p] || p).join(" ");
+    /* Same order as the grid's columns, so a type's position list reads the
+       way its row does. Encounter order put `evt` first for `any` purely
+       because the event case sorts first inside the block. */
+    const positions = D.axis.positions.filter(p => cs.some(c =>
+      c.cells.some(x => x[0] === ty && x[1] === p))).map(p => ABBR[p] || p).join(" ");
     h += `<div class="typeblock" data-type="${esc(ty)}">
       <div class="typehead"><span class="name">${esc(ty)}</span>
         <span class="meta">${cs.length} cases &middot; ${ok}/${total} cells pass` +
