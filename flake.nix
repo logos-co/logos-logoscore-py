@@ -221,6 +221,13 @@
             cp -r ${./.}/. .
             chmod -R +w .
             export PYTHONPATH=$PWD/src
+            # The inline-vs-shared table guard resolves the shared table by
+            # sibling checkout, which does not exist in the sandbox — so without
+            # this it SKIPPED here and ran only on a developer's workspace. A
+            # drift guard that is green because it never ran is worse than no
+            # guard: pointed at the table it found two boundaries pinned inline
+            # and absent from cases.json.
+            export LOGOS_CONFORMANCE_DIR=${logos-test-modules}/conformance
             ${python}/bin/pytest tests/unit -v
             touch $out
           '';

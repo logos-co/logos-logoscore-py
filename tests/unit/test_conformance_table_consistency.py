@@ -87,7 +87,13 @@ def test_every_inline_method_case_exists_in_the_shared_table():
 
 def test_every_inline_event_case_exists_in_the_shared_table():
     shared = _load_shared()
-    have = {(e["event"], e["fire"], json.dumps(_jsonify(_materialize(e["value"]))))
+    # A multi-argument event case spells its payload `values`, singular `value`
+    # otherwise — the same two spellings run_matrix.py reads. Reading only the
+    # singular one made this guard raise KeyError on the whole table, so ONE
+    # multi-arg case took every event comparison down with it.
+    have = {(e["event"], e["fire"],
+             json.dumps(_jsonify(_materialize(e["values"] if "values" in e
+                                              else e["value"]))))
             for e in shared["events"]}
     missing = [
         f"{event}/{fire}({value!r})"
