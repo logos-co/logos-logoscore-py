@@ -21,6 +21,13 @@ Three things keep it honest:
 Usage:
     run_matrix.py --cpp-modules DIR --rust-modules DIR [--logoscore BIN]
                   [--contract full_api.lidl] [--jsonl out.jsonl] [--quiet]
+                  [--report out.html] [--report-text] [--md known.md]
+
+Reporting lives in `matrix_report.py` and measures nothing: it is handed the
+rows this driver already computed. The terminal summary is useful with no flags
+at all — a TYPE x POSITION grid, the differential including its agreements, and
+what is NOT covered — and every coordinate line the previous report printed is
+still printed, unchanged, because CI greps them.
 
 This is the `py` driver. The case table and the xfail registry live with the
 PROVIDERS, in logos-test-modules/conformance/ — the driver lives here because
@@ -52,6 +59,9 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import matrix_report  # noqa: E402  (the view; it measures nothing)
 
 
 def norm_type(t: str) -> str:
@@ -336,6 +346,18 @@ def main() -> int:
     ap.add_argument("--consumer", default="py", help="label for this driver in the report")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
+    # Reporting. `--report` is the artifact (self-contained HTML, no CDN, same
+    # Pages precedent as the doctest harness); `--report-text` is the same
+    # drill-down for anyone without a browser; `--md` regenerates the one
+    # registry table the conformance README maintains by hand.
+    ap.add_argument("--report", default=None, metavar="FILE.html",
+                    help="write the full HTML report")
+    ap.add_argument("--report-text", action="store_true",
+                    help="also print the per-type, per-case drill-down")
+    ap.add_argument("--md", default=None, metavar="FILE.md",
+                    help="write the README's known-broken table")
+    ap.add_argument("--no-color", action="store_true",
+                    help="never colourise the terminal report")
     args = ap.parse_args()
 
     from logoscore import LogoscoreDaemon
@@ -441,18 +463,37 @@ def main() -> int:
     # (it is how `void` was found). With a single provider there is nothing to
     # compare, and the table simply has no differential rows.
     names = list(modules)
+    # Every comparison is RECORDED, not only the ones that disagree. The
+    # agreements are the evidence; leaving them out is why the differential —
+    # the most valuable signal here — is invisible in a green run. `diffs`
+    # feeds the report only: it changes no count, no row and no exit code.
+    diffs: list[dict] = []
     for cid, case in (by_case.items() if len(names) >= 2 else []):
-        if "expect_by_provider" in case:
-            continue  # the divergence IS the expectation; already reported above
         a = measured[names[0]].get(cid, Result(error="not-run"))
         b = measured[names[1]].get(cid, Result(error="not-run"))
         agree = (a.error == b.error) and (a.error is not None or same(a.value, b.value))
+        if "expect_by_provider" in case:
+            # The divergence IS the expectation, and the driver does not judge
+            # it — already reported above, cell by cell. Compared here for the
+            # report alone, because a declared divergence that quietly stopped
+            # diverging is worth seeing and nothing else would say so.
+            diffs.append({"case": cid, "consumer": args.consumer, "declared": True,
+                          "agree": agree,
+                          "values": {n: measured[n].get(
+                              cid, Result(error="not-run")).as_report()
+                              for n in names}})
+            continue
         # Registered on EITHER side: a defect that only one provider surfaces
         # (because the other's typed decode masks it) still makes the pair
         # disagree, and that disagreement is the same known cell.
         registered = next((xfail[(cid, n)] for n in names if (cid, n) in xfail), None)
         status = "pass" if agree else ("xfail" if registered else "fail")
         counts["differential-" + status] = counts.get("differential-" + status, 0) + 1
+        diffs.append({"case": cid, "consumer": args.consumer, "declared": False,
+                      "agree": agree, "status": status, "known": registered,
+                      **({} if agree else {"values": {n: measured[n].get(
+                          cid, Result(error="not-run")).as_report()
+                          for n in names}})})
         if not agree:
             rows.append({
                 "type": case["type"], "position": case["position"],
@@ -464,7 +505,9 @@ def main() -> int:
 
     # Coverage: every (type, position) the contract declares needs a case.
     uncovered = []
+    declared_cells = None
     if args.contract:
+        declared_cells = contract_cells(Path(args.contract))
         covered = set()
         for c in by_case.values():
             # A multi-argument case covers specific (type, position) PAIRS —
@@ -477,7 +520,7 @@ def main() -> int:
                 continue
             for pos in c["position"].split(","):
                 covered.add((norm_type(c["type"]), pos))
-        for ty, pos in sorted(contract_cells(Path(args.contract))):
+        for ty, pos in sorted(declared_cells):
             if (ty, pos) not in covered:
                 uncovered.append((ty, pos))
                 rows.append({
@@ -489,12 +532,32 @@ def main() -> int:
     if args.jsonl:
         Path(args.jsonl).write_text("".join(json.dumps(r) + "\n" for r in rows))
 
+    # The report is built from `rows` — the same list `--jsonl` writes — so the
+    # human view and the machine artifact cannot drift apart. It is a pure
+    # re-arrangement: nothing below measures anything or changes a verdict.
+    payload = matrix_report.build_payload(
+        consumer=args.consumer, providers=list(modules), provider_dirs=modules,
+        by_case=by_case, rows=rows, diffs=diffs, counts=counts, known=known,
+        declared_cells=declared_cells, table=table, norm_type=norm_type,
+        paths={"cases": args.cases, "known": args.known,
+               "contract": args.contract, "logoscore": args.logoscore})
+    color = False if args.no_color else None
+    if args.report:
+        Path(args.report).write_text(matrix_report.render_html(payload))
+    if args.md:
+        Path(args.md).write_text(matrix_report.render_markdown(payload))
+
     failures = [r for r in rows if r["status"] in ("fail", "xpass", "uncovered")]
     if not args.quiet:
         print(f"\nLIDL conformance matrix — consumer={args.consumer}")
         print(f"  {len(by_case)} cases x {len(modules)} providers")
         for k in sorted(counts):
             print(f"  {k:<22} {counts[k]}")
+        for line in matrix_report.render_sections(payload, color=color):
+            print(line)
+        if args.report_text:
+            for line in matrix_report.render_drilldown(payload, color=color):
+                print(line)
         if uncovered:
             print(f"\n  UNCOVERED cells declared by the contract ({len(uncovered)}):")
             for ty, pos in uncovered:

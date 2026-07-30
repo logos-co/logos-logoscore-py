@@ -226,6 +226,13 @@
           # Fails on: a red cell, an `xpass` (a registered known-broken cell
           # that started passing — the registry has to be updated), or a
           # (type, position) the contract declares and no case covers.
+          #
+          # Three artifacts land in $out, and none of them is the verdict — the
+          # exit status is: matrix.txt (the terminal report, with the TYPE x
+          # POSITION grid and the differential), matrix.jsonl (one object per
+          # cell, unchanged), and matrix.html — a self-contained page with no
+          # external requests, publishable to Pages the way the doctest
+          # harness's report already is.
           conformance-matrix = pkgs.runCommand "logoscore-py-conformance-matrix" {
             nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
@@ -248,6 +255,9 @@
               --cpp-modules  ${testModulesInstall}/modules \
               --rust-modules ${testModulesRustInstall}/modules \
               --jsonl $out/matrix.jsonl \
+              --report $out/matrix.html \
+              --md $out/known-broken.md \
+              --no-color \
               2>&1 | tee $out/matrix.txt
           '';
 
@@ -273,6 +283,8 @@
               --modules test_fullapi_ext_rust=${testModulesExtInstall}/modules \
               --modules test_fullapi_ext_cpp=${testModulesExtCppInstall}/modules \
               --jsonl $out/matrix-ext.jsonl \
+              --report $out/matrix-ext.html \
+              --no-color \
               2>&1 | tee $out/matrix-ext.txt
           '';
 
