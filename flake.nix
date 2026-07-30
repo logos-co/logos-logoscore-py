@@ -179,6 +179,14 @@
           # express these types yet — so its table runs without a differential.
           testModulesExtInstall = logos-test-modules.modules.${system}.test_fullapi_ext_rust.install;
           testModulesExtCppInstall = logos-test-modules.modules.${system}.test_fullapi_ext_cpp.install;
+          # The QT-TYPED consumer. `type: core` with no `interface` key selects
+          # apiStyle=qt, so this module's generated wrappers are the Qt ones —
+          # the surface the two existing proxies cannot reach (universal forces
+          # apiStyle=lp, cdylib forces the Rust client). It forwards the whole
+          # contract, so the case table replays through it unchanged, twice:
+          # once per generated wrapper table (sync / async).
+          testModulesQtProxyInstall =
+            logos-test-modules.modules.${system}.test_fullapi_qtproxy.install;
 
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
@@ -218,14 +226,22 @@
           '';
 
           # The LIDL conformance matrix: every (type x position) in the
-          # `full_api` contract, replayed against BOTH providers, reported as
-          # per-cell coordinates. The case table and the xfail registry live in
-          # logos-test-modules/conformance/ (with the providers they describe);
-          # this repo owns the `py` driver because it owns the client it uses.
+          # `full_api` contract, replayed against BOTH providers and every
+          # CONSUMER surface, reported as per-cell coordinates. The case table
+          # and the xfail registry live in logos-test-modules/conformance/ (with
+          # the providers they describe); this repo owns the driver because it
+          # owns the client it uses.
+          #
+          # Three consumers, one run — they have to share a process for the
+          # consumer differential to exist at all:
+          #   py             this package's client, talking to the provider
+          #   qtproxy-sync   Qt-typed wrappers, sync table  (_result.toT())
+          #   qtproxy-async  Qt-typed wrappers, async table (qvariant_cast<T>)
           #
           # Fails on: a red cell, an `xpass` (a registered known-broken cell
-          # that started passing — the registry has to be updated), or a
-          # (type, position) the contract declares and no case covers.
+          # that started passing — the registry has to be updated), a `skip`
+          # entry whose cell turns out to work, or a (type, position) the
+          # contract declares and no case covers.
           #
           # Three artifacts land in $out, and none of them is the verdict — the
           # exit status is: matrix.txt (the terminal report, with the TYPE x
@@ -254,6 +270,8 @@
               --contract ${logos-test-modules}/test-fullapi-proxy-module-rust/full_api.lidl \
               --cpp-modules  ${testModulesInstall}/modules \
               --rust-modules ${testModulesRustInstall}/modules \
+              --proxy-consumer qtproxy-sync=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=sync \
+              --proxy-consumer qtproxy-async=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=async \
               --jsonl $out/matrix.jsonl \
               --report $out/matrix.html \
               --md $out/known-broken.md \

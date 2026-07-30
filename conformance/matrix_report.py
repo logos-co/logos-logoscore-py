@@ -198,14 +198,25 @@ def build_payload(*, consumer, providers, provider_dirs, by_case, rows, diffs,
     `rows` is exactly what `--jsonl` writes, so the report cannot drift from the
     machine-readable artifact: both are derived from the same list.
     """
-    consumers = sorted({r.get("consumer", consumer) for r in rows
-                        if r.get("consumer")}) or [consumer]
+    # A differential row is identified by its own `differential` key, NOT by the
+    # shape of its labels. Provider differentials spell the pair in `provider`
+    # (`a-vs-b`) and a CONSUMER differential spells it in `consumer`, keeping a
+    # real provider name — so a filter that recognised only the first shape let
+    # consumer differentials through as if they were cells, and their `known:
+    # None` then broke the per-case rollup.
+    # Restricted to rows that name a real provider for the same reason: an
+    # uncovered / dead-skip / setup-failed row carries "-" in both label slots
+    # and is not a surface anything was measured on.
+    measured_rows = [r for r in rows if not r.get("differential")]
+    consumers = sorted({r["consumer"] for r in measured_rows
+                        if r.get("consumer") and r["provider"] in providers}
+                       ) or [consumer]
 
     # ── per-cell results, keyed by the coordinate they are reported under ──
     cells: dict[tuple[str, str, str], dict] = {}
-    for r in rows:
+    for r in measured_rows:
         if r["case"] not in by_case or r["provider"] not in providers:
-            continue  # differential rows and uncovered rows are not cells
+            continue  # uncovered, dead-skip and setup-failed rows are not cells
         cells[(r["case"], r["provider"], r.get("consumer", consumer))] = r
 
     # Annotated on a COPY: `diffs` belongs to the driver, and the report is not
@@ -215,7 +226,15 @@ def build_payload(*, consumer, providers, provider_dirs, by_case, rows, diffs,
     for d in diffs:
         if d.get("values"):
             d["values_s"] = {p: _render(v) for p, v in d["values"].items()}
-    diff_by_case = {d["case"]: d for d in diffs}
+    # The provider differential runs on EVERY consumer surface, so a case has
+    # one entry per surface. The per-case badge shows the primary consumer's,
+    # chosen explicitly: a last-wins flatten would make the badge depend on
+    # which surface happened to be measured last. The per-surface detail is in
+    # the differential panel, which is where a divergence belongs.
+    diff_by_case: dict[str, dict] = {}
+    for d in diffs:
+        if d["case"] not in diff_by_case or d.get("consumer") == consumer:
+            diff_by_case[d["case"]] = d
 
     # ── the cases, resolved ──
     case_views = []
@@ -521,7 +540,18 @@ def render_differential(payload, paint) -> list[str]:
         for i, a in enumerate(cons):
             for b in cons[i + 1:]:
                 out.append(f"      {a} vs {b}")
-    declared = [dd for dd in payload["diffs"] if dd.get("declared")]
+    # One entry per (case, consumer). Collapse to one line per case — a panel
+    # that repeated every divergence once per surface would say the same thing
+    # three times — but keep a case whose surfaces DISAGREE, by name: that is
+    # Q1b's whole shape, and showing only the first surface would report it as
+    # settled.
+    grouped: dict[str, list] = {}
+    for dd in payload["diffs"]:
+        if dd.get("declared"):
+            grouped.setdefault(dd["case"], []).append(dd)
+    declared = [entries[0] for entries in grouped.values()]
+    split = [(cid, entries) for cid, entries in grouped.items()
+             if len({e.get("kind") for e in entries}) > 1]
     if declared:
         out.append("")
         out.append(paint("    DECLARED DIVERGENCES (expect_by_provider) — the "
@@ -560,6 +590,19 @@ def render_differential(payload, paint) -> list[str]:
                     f"provider answers with its own name, which is what the case "
                     f"is for: {ids}", 80)):
                 out.append(paint(("      " if i == 0 else "        ") + line, "dim"))
+
+        # A declared divergence that does not behave the same on every consumer
+        # surface. The lines above show the primary one; this says where that is
+        # not the whole story, which is the only way the panel can carry a
+        # finding like Q1b instead of averaging it away.
+        for cid, entries in split:
+            out.append(f"      {cid:<34}{paint('VARIES BY CONSUMER', 'xfail')}")
+            for e in entries:
+                verdict = {"behaviour": "providers DIFFER",
+                           "agree": "providers agree — no longer diverges",
+                           "identity": "differ by identity"}.get(e.get("kind"), "?")
+                out.append(paint(f"        {e.get('consumer', '?'):>14}  {verdict}",
+                                 "dim"))
     return out
 
 
