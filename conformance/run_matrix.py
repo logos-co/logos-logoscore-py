@@ -7,11 +7,16 @@ position P, survive provider R -> consumer K intact? A red cell is printed as
 failure names itself and one provider cannot satisfy an assertion on behalf of
 the other.
 
-Three things keep it honest:
+Four things keep it honest:
 
   * every case runs against BOTH providers, and the two results are compared to
     each other independently of `expect` — the cheapest possible detector for
     the next divergence, and it needs nobody to know the right answer first;
+  * every case also runs against every CONSUMER, and those are compared to each
+    other the same way. The same argument applies on this axis and it is not
+    hypothetical: the `_bytes` collision (known.json M3) is invisible to a
+    python consumer, which is precisely the consumer that can decline to decode
+    the tag;
   * a known-broken cell is an `xfail` REGISTRY entry, and a cell that starts
     passing is an `xpass`, which fails the run so the registry gets updated;
   * coverage is computed from the contract: every (type, position) the .lidl
@@ -20,21 +25,38 @@ Three things keep it honest:
 
 Usage:
     run_matrix.py --cpp-modules DIR --rust-modules DIR [--logoscore BIN]
+                  [--proxy-consumer LABEL=MODULE=DIR[=sync|async]]
                   [--contract full_api.lidl] [--jsonl out.jsonl] [--quiet]
 
-This is the `py` driver. The case table and the xfail registry live with the
-PROVIDERS, in logos-test-modules/conformance/ — the driver lives here because
-it uses this package's client, and logoscore-py already depends on
-logos-test-modules (the reverse would be a cycle).
+The case table and the xfail registry live with the PROVIDERS, in
+logos-test-modules/conformance/ — the driver lives here because it uses this
+package's client, and logoscore-py already depends on logos-test-modules (the
+reverse would be a cycle).
 
-WHAT THIS DRIVER DOES NOT COVER. The consumer axis has exactly one point: `py`.
-`--consumer` is a label written into the report, not a driver selector — no C++,
-Rust or QML driver replays cases.json today. That is a real hole, not a
-formality, and it has already hidden a defect: the event bridge failed to decode
-canonical `{"_bytes": ...}` into a QByteArray, which this driver could not see
-because the undecoded map round-trips to JSON and the python client decodes the
-tag itself (see events.py). A Qt/C++ or QML subscriber got the map. A matrix
-with one consumer cannot see a defect that its own consumer happens to undo.
+THE CONSUMER AXIS. `py` is the direct consumer: this package's client talks to
+the provider. A `--proxy-consumer` point routes the SAME case table through an
+intermediate module, so the value is decoded and re-encoded by that module's
+generated wrappers before python ever sees it. `test_fullapi_qtproxy` is the
+Qt-typed one (`type: core`, no `interface` key => apiStyle=qt), which is the only
+surface the Qt wrappers are on.
+
+Two caveats that must not be forgotten when reading a proxy cell:
+
+  * python is still terminal. A proxy cell measures a ROUND TRIP through the
+    other consumer, so a transformation that is its own inverse — a map that
+    becomes bytes and re-encodes to the same map — stays invisible. What such a
+    cell does catch is a LOSSY step, and a collision is lossy the moment the
+    receiving slot is typed (see `echoMap` vs `echoAny` for `{"_bytes": ...}`).
+  * a proxy adds a hop, so a red proxy cell is not automatically the consumer's
+    fault. That is what the consumer differential is for: it names the pair.
+
+CALL MODE is part of the consumer identity, not a variant of it. The generated
+wrappers convert differently on the two paths — `_result.toULongLong()` in the
+sync table, `qvariant_cast<qulonglong>(v)` (with a DEFAULT substituted on an
+invalid QVariant) in the async one — so `qtproxy-sync` and `qtproxy-async` are
+two distinct consumer surfaces running two distinct bodies of generated code.
+Every method cell replays through both. Events do not have the axis: a
+subscription is a callback either way.
 
 Transport is likewise fixed: the daemon is constructed with no `transports=`, so
 every cell here is measured over LocalSocket/QtRO. The plain (tcp/tcp_ssl) wire
@@ -45,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fnmatch
 import json
 import os
 import re
@@ -188,9 +211,10 @@ DISPATCH_ERROR_KEYS = {"code", "message"}
 
 
 class Result:
-    __slots__ = ("value", "error")
+    __slots__ = ("value", "error", "status")
 
     def __init__(self, value=None, error=None):
+        self.status = None
         # A provider that rejects an argument answers with the structured
         # dispatch error as its RESULT ({"code": "dispatch_failed", ...}), not
         # with a transport error — so a driver that only watches for raised
@@ -203,6 +227,177 @@ class Result:
 
     def as_report(self):
         return {"__error__": self.error} if self.error else jsonable(self.value)
+
+
+# ── the consumer axis ───────────────────────────────────────────────────────
+
+
+class Consumer:
+    """One point on the consumer axis.
+
+    `py` calls the provider directly. A proxy point calls an intermediate module
+    that forwards to the provider, so the value is decoded and re-encoded by that
+    module's generated wrappers on the way through.
+    """
+
+    __slots__ = ("label", "module", "dirs", "call_mode", "probe_method")
+
+    def __init__(self, label, module=None, dirs=(), call_mode=None,
+                 probe_method="echoInt"):
+        self.label = label
+        self.module = module            # None => call the provider directly
+        self.dirs = list(dirs)          # extra module dirs this consumer needs
+        self.call_mode = call_mode      # None | "sync" | "async"
+        self.probe_method = probe_method  # a call whose mode can be read back
+
+    @property
+    def is_proxy(self) -> bool:
+        return self.module is not None
+
+    def target(self, provider: str) -> str:
+        return self.module or provider
+
+    def modules_dirs(self, provider_dirs: dict) -> list:
+        # A proxy declares BOTH providers as dependencies, so loading it needs
+        # every provider dir present regardless of which one it is bound to.
+        if not self.is_proxy:
+            return list(provider_dirs.values())
+        return [*self.dirs, *provider_dirs.values()]
+
+    def prepare(self, client, provider: str, timeout: float) -> None:
+        """Load and point this consumer at `provider`.
+
+        Every setting is READ BACK. A `useProvider` that silently no-ops would
+        make both providers measure identically and the provider differential
+        would go permanently green; a `useCallMode` that silently no-ops would
+        make the async half of the matrix a duplicate of the sync half. Neither
+        failure announces itself, so neither is left to trust.
+        """
+        client.load_module(self.target(provider))
+        if not self.is_proxy:
+            return
+        client.call(self.module, "useProvider", provider, timeout=timeout)
+        got = client.call(self.module, "currentProvider", timeout=timeout)
+        if got != provider:
+            raise RuntimeError(
+                f"{self.label}: useProvider({provider}) did not take (currentProvider={got!r})")
+        if self.call_mode is None:
+            return
+        client.call(self.module, "useCallMode", self.call_mode, timeout=timeout)
+        got = client.call(self.module, "currentCallMode", timeout=timeout)
+        if got != self.call_mode:
+            raise RuntimeError(
+                f"{self.label}: useCallMode({self.call_mode}) did not take (currentCallMode={got!r})")
+        # ...and prove the selected TABLE actually ran, not just that the flag is
+        # set: one known-good call, then the status the module recorded for it.
+        # `echoInt` is this contract's probe; a proxy for a different contract
+        # would need its own, which is why the failure below names the method
+        # rather than reporting a bare call error.
+        try:
+            client.call(self.module, self.probe_method, 1, timeout=timeout)
+        except Exception as e:
+            raise RuntimeError(
+                f"{self.label}: call-mode probe {self.probe_method}(1) failed ({e}); "
+                f"a proxy consumer with a call mode needs a probe method this "
+                f"contract actually has") from None
+        status = client.call(self.module, "lastCallStatus", timeout=timeout)
+        if status != f"ok-{self.call_mode}":
+            raise RuntimeError(
+                f"{self.label}: a call in {self.call_mode} mode reported {status!r}, "
+                f"so the {self.call_mode} wrapper table is not the one being measured")
+
+    def call_status(self, client, timeout: float):
+        """What the proxy recorded about the call just made, or None."""
+        if not (self.is_proxy and self.call_mode):
+            return None
+        try:
+            return client.call(self.module, "lastCallStatus", timeout=timeout)
+        except Exception:
+            return "unavailable"
+
+
+def parse_proxy_consumer(spec: str) -> Consumer:
+    """LABEL=MODULE=DIR[=MODE]"""
+    parts = spec.split("=")
+    if len(parts) not in (3, 4):
+        raise ValueError(f"--proxy-consumer expects LABEL=MODULE=DIR[=MODE], got {spec!r}")
+    label, module, path = parts[0], parts[1], parts[2]
+    mode = parts[3] if len(parts) == 4 else None
+    if mode is not None and mode not in ("sync", "async"):
+        raise ValueError(f"--proxy-consumer mode must be sync or async, got {mode!r}")
+    return Consumer(label, module=module, dirs=[path], call_mode=mode)
+
+
+# ── the registries ──────────────────────────────────────────────────────────
+
+
+def load_xfail(known: dict) -> dict:
+    """(case, provider, consumer) -> entry id.
+
+    `consumers` is REQUIRED, and deliberately has no default. The entry-wide
+    `providers` key already taught this lesson once: a defect present on one
+    provider was registered against both, and the passing one was then reported
+    as `xpass` — the registry manufacturing a failure. A defaulted `consumers`
+    would repeat it one axis over, and silently, because the surface an entry was
+    measured on is exactly the thing nobody remembers a year later.
+    """
+    xfail: dict[tuple[str, str, str], str] = {}
+    for entry in known["xfail"]:
+        for key in ("cases", "providers", "consumers"):
+            if key not in entry:
+                raise SystemExit(
+                    f"known.json xfail entry {entry.get('id')!r} has no `{key}`; "
+                    f"an xfail must state which surfaces it was measured on")
+        by_prov = entry.get("per_case_providers", {})
+        by_cons = entry.get("per_case_consumers", {})
+        for cid in entry["cases"]:
+            for prov in by_prov.get(cid, entry["providers"]):
+                for cons in by_cons.get(cid, entry["consumers"]):
+                    xfail[(cid, prov, cons)] = entry["id"]
+    return xfail
+
+
+class SkipRegistry:
+    """`known.json`'s `skip[]` — cells a surface cannot express.
+
+    This list existed from the start and NOTHING read it. With one consumer that
+    was invisible; a second consumer forces it closed, because "unsupported by
+    this surface" and "broken on this surface" are different claims and only one
+    of them should be silent.
+    """
+
+    def __init__(self, known: dict):
+        self.entries = []
+        for i, entry in enumerate(known.get("skip", [])):
+            if "consumers" not in entry:
+                raise SystemExit(
+                    f"known.json skip entry #{i} has no `consumers`; a skip must "
+                    f"name the surface that cannot express the cell")
+            self.entries.append({
+                "patterns": entry["cases"],
+                "providers": entry.get("providers"),   # None => every provider
+                "consumers": entry["consumers"],
+                "reason": entry.get("reason", "unspecified"),
+            })
+
+    def reason(self, cid: str, provider: str, consumer: str):
+        for e in self.entries:
+            if consumer not in e["consumers"]:
+                continue
+            if e["providers"] is not None and provider not in e["providers"]:
+                continue
+            if any(fnmatch.fnmatch(cid, p) for p in e["patterns"]):
+                return e["reason"]
+        return None
+
+    def dead_patterns(self, case_ids) -> list:
+        """Patterns matching no case in the table — a typo, not a skip."""
+        dead = []
+        for e in self.entries:
+            for p in e["patterns"]:
+                if not any(fnmatch.fnmatch(c, p) for c in case_ids):
+                    dead.append(p)
+        return dead
 
 
 def expectation(case: dict, provider: str):
@@ -224,9 +419,10 @@ def matches(got: Result, want, raw: bool = False) -> bool:
     return same(got.value, materialize(want, raw))
 
 
-def run_methods(client, module: str, cases: list, timeout: float):
+def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeout: float):
     from logoscore.errors import LogoscoreError, MethodError
 
+    module = consumer.target(provider)
     out: dict[str, Result] = {}
     for case in cases:
         raw = case.get("raw", False)
@@ -239,24 +435,32 @@ def run_methods(client, module: str, cases: list, timeout: float):
             # default, so without this the _bytes-collision cells measured the
             # CLIENT undoing the collision rather than the system producing it —
             # and no change to any C++ repo could ever have moved them.
-            out[case["id"]] = Result(value=client.call(
+            r = Result(value=client.call(
                 module, case["method"], *args, timeout=t, decode_bytes=not raw))
         except MethodError as e:
-            out[case["id"]] = Result(error=e.code or "MethodError")
+            r = Result(error=e.code or "MethodError")
         except LogoscoreError as e:
-            out[case["id"]] = Result(error=type(e).__name__)
+            r = Result(error=type(e).__name__)
         except Exception as e:
             # An adversarial payload can HANG the call rather than fail it (the
             # pending-call sentinel does exactly that), which surfaces as a
             # subprocess timeout. A cell that wedges the driver would take the
             # whole matrix with it, so record it as the failure it is.
-            out[case["id"]] = Result(error=type(e).__name__)
+            r = Result(error=type(e).__name__)
+        # Which generated table actually served this cell. Recorded per cell,
+        # not once per phase: the async wrapper substitutes a DEFAULT (0, an
+        # empty list) when no value arrives, so "the callback answered 0" and
+        # "the callback never ran" produce the same cell value and are told
+        # apart only here.
+        r.status = consumer.call_status(client, timeout)
+        out[case["id"]] = r
     return out
 
 
-def run_events(client, module: str, events: list, timeout: float):
+def run_events(client, consumer: "Consumer", provider: str, events: list, timeout: float):
     from logoscore.errors import LogoscoreError, MethodError
 
+    module = consumer.target(provider)
     out: dict[str, Result] = {}
     for ev in events:
         raw = ev.get("raw", False)
@@ -333,7 +537,12 @@ def main() -> int:
     ap.add_argument("--contract", default=None,
                     help="full_api.lidl; coverage is checked against it when given")
     ap.add_argument("--jsonl", default=None, help="write one JSON object per cell")
-    ap.add_argument("--consumer", default="py", help="label for this driver in the report")
+    ap.add_argument("--consumer", default="py",
+                    help="label for the DIRECT consumer (this package's client)")
+    ap.add_argument("--proxy-consumer", action="append", default=[],
+                    metavar="LABEL=MODULE=DIR[=MODE]",
+                    help="replay the table through a forwarding module; repeatable. "
+                         "MODE (sync|async) selects the generated wrapper table.")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
@@ -344,17 +553,19 @@ def main() -> int:
     known = json.loads(Path(args.known).read_text())
     cases, events = table["cases"], table["events"]
 
-    xfail: dict[tuple[str, str], str] = {}
-    for entry in known["xfail"]:
-        # `providers` is the entry-wide set; `per_case_providers` narrows an
-        # individual case to the providers that actually fail it. Without that
-        # narrowing a defect present on one provider gets registered for both,
-        # and the OTHER provider — which passes — is then reported as xpass,
-        # i.e. the registry manufactures a failure.
-        narrowed = entry.get("per_case_providers", {})
-        for cid in entry["cases"]:
-            for prov in narrowed.get(cid, entry["providers"]):
-                xfail[(cid, prov)] = entry["id"]
+    xfail = load_xfail(known)
+    skips = SkipRegistry(known)
+
+    consumers = [Consumer(args.consumer)]
+    for spec in args.proxy_consumer:
+        try:
+            consumers.append(parse_proxy_consumer(spec))
+        except ValueError as e:
+            print(e)
+            return 2
+    if len({c.label for c in consumers}) != len(consumers):
+        print("duplicate consumer labels")
+        return 2
 
     modules: dict[str, str] = {}
     if args.cpp_modules:
@@ -382,85 +593,154 @@ def main() -> int:
         print("no providers to run")
         return 2
 
-    measured: dict[str, dict[str, Result]] = {}
-    for module, mods in modules.items():
-        measured[module] = {}
-        # One daemon per PHASE. Every event subscription spawns a `logoscore
-        # watch` subprocess; sharing a daemon with the ~80-call method phase
-        # wedged it partway through the events (the last five failed
-        # contiguously with RPC_FAILED under the nix sandbox, and every one of
-        # them passes on a fresh daemon). A phase must not be able to poison
-        # the next one — otherwise a red cell means "something earlier used up
-        # a resource", which is exactly the kind of unreliable signal this
-        # whole exercise exists to remove.
-        for phase, runner, work in (("methods", run_methods, cases),
-                                    ("events", run_events, events)):
-            with LogoscoreDaemon(modules_dir=mods, binary=args.logoscore) as daemon:
-                client = daemon.client()
-                client.load_module(module)
-                measured[module].update(runner(client, module, work, args.timeout))
+    by_case = {c["id"]: c for c in cases} | {e["id"]: e for e in events}
+    setup_errors = []
+
+    # measured[(consumer, provider)][case] = Result
+    measured: dict[tuple[str, str], dict[str, Result]] = {}
+    for consumer in consumers:
+        for provider in modules:
+            key = (consumer.label, provider)
+            measured[key] = {}
+            # One daemon per PHASE. Every event subscription spawns a `logoscore
+            # watch` subprocess; sharing a daemon with the ~80-call method phase
+            # wedged it partway through the events (the last five failed
+            # contiguously with RPC_FAILED under the nix sandbox, and every one of
+            # them passes on a fresh daemon). A phase must not be able to poison
+            # the next one — otherwise a red cell means "something earlier used up
+            # a resource", which is exactly the kind of unreliable signal this
+            # whole exercise exists to remove.
+            #
+            # A daemon is per (consumer, provider) too, so a proxy's bound target
+            # and call mode are set on a fresh process rather than inherited from
+            # the previous cell block.
+            for runner, work in ((run_methods, cases), (run_events, events)):
+                with LogoscoreDaemon(
+                        modules_dir=consumer.modules_dirs(modules),
+                        binary=args.logoscore) as daemon:
+                    client = daemon.client()
+                    try:
+                        consumer.prepare(client, provider, args.timeout)
+                    except Exception as e:
+                        # A consumer that cannot be pointed at a provider must not
+                        # quietly contribute a block of `not-run` cells that read
+                        # as ordinary failures.
+                        setup_errors.append(f"{consumer.label}/{provider}: {e}")
+                        break
+                    measured[key].update(
+                        runner(client, consumer, provider, work, args.timeout))
 
     rows, counts = [], {}
-    by_case = {c["id"]: c for c in cases} | {e["id"]: e for e in events}
+
+    def bump(k):
+        counts[k] = counts.get(k, 0) + 1
 
     for cid, case in by_case.items():
-        for module in modules:
-            got = measured[module].get(cid, Result(error="not-run"))
-            want, have_want = (
-                expectation(case, module) if "method" in case
-                else (case["values"] if "values" in case else case["value"], True)
-            )
-            if not have_want:
-                status = "skip"
-            elif matches(got, want, case.get("raw", False)):
-                status = "xpass" if (cid, module) in xfail else "pass"
-            else:
-                status = "xfail" if (cid, module) in xfail else "fail"
+        for consumer in consumers:
+            for module in modules:
+                got = measured[(consumer.label, module)].get(cid, Result(error="not-run"))
+                want, have_want = (
+                    expectation(case, module) if "method" in case
+                    else (case["values"] if "values" in case else case["value"], True)
+                )
+                ok = have_want and matches(got, want, case.get("raw", False))
+                registered = xfail.get((cid, module, consumer.label))
+                skipped = skips.reason(cid, module, consumer.label)
 
-            counts[status] = counts.get(status, 0) + 1
-            row = {
-                "type": case["type"],
-                "position": case["position"],
-                "provider": module,
-                "consumer": args.consumer,
-                "case": cid,
-                "status": status,
-                "actual": got.as_report(),
-            }
-            if have_want:
-                row["expected"] = jsonable(materialize(want, case.get("raw", False))) if not (
-                    isinstance(want, dict) and set(want) == {"__error__"}
-                ) else want
-            if (cid, module) in xfail:
-                row["known"] = xfail[(cid, module)]
-            rows.append(row)
+                if skipped:
+                    # A skip claims the surface CANNOT express the cell. If it
+                    # can, the claim is false and has to be retired — the same
+                    # forcing function `xpass` applies to xfail entries.
+                    status = "skip-passes" if ok else "skip-registered"
+                elif not have_want:
+                    status = "skip"
+                elif ok:
+                    status = "xpass" if registered else "pass"
+                else:
+                    status = "xfail" if registered else "fail"
 
-    # Differential: providers of the SAME contract must answer identically, so
-    # any case without a declared per-provider expectation is compared across
-    # them independently of `expect`. This catches a divergence nobody predicted
-    # (it is how `void` was found). With a single provider there is nothing to
-    # compare, and the table simply has no differential rows.
-    names = list(modules)
-    for cid, case in (by_case.items() if len(names) >= 2 else []):
-        if "expect_by_provider" in case:
-            continue  # the divergence IS the expectation; already reported above
-        a = measured[names[0]].get(cid, Result(error="not-run"))
-        b = measured[names[1]].get(cid, Result(error="not-run"))
-        agree = (a.error == b.error) and (a.error is not None or same(a.value, b.value))
-        # Registered on EITHER side: a defect that only one provider surfaces
-        # (because the other's typed decode masks it) still makes the pair
-        # disagree, and that disagreement is the same known cell.
-        registered = next((xfail[(cid, n)] for n in names if (cid, n) in xfail), None)
+                bump(status)
+                row = {
+                    "type": case["type"],
+                    "position": case["position"],
+                    "provider": module,
+                    "consumer": consumer.label,
+                    "case": cid,
+                    "status": status,
+                    "actual": got.as_report(),
+                }
+                if have_want:
+                    row["expected"] = jsonable(materialize(want, case.get("raw", False))) if not (
+                        isinstance(want, dict) and set(want) == {"__error__"}
+                    ) else want
+                if registered:
+                    row["known"] = registered
+                if skipped:
+                    row["skip_reason"] = skipped
+                if got.status:
+                    row["call_status"] = got.status
+                rows.append(row)
+
+    def differential(kind, cid, case, label_a, res_a, label_b, res_b, note):
+        agree = (res_a.error == res_b.error) and (
+            res_a.error is not None or same(res_a.value, res_b.value))
+        registered = next(
+            (xfail[k] for k in ((cid, *label_a), (cid, *label_b)) if k in xfail), None)
         status = "pass" if agree else ("xfail" if registered else "fail")
-        counts["differential-" + status] = counts.get("differential-" + status, 0) + 1
+        bump(f"differential-{kind}-{status}")
         if not agree:
             rows.append({
                 "type": case["type"], "position": case["position"],
-                "provider": f"{names[0]}-vs-{names[1]}", "consumer": args.consumer, "case": cid,
-                "status": status, "expected": a.as_report(), "actual": b.as_report(),
-                "known": registered,
-                "note": "providers disagree and the contract declares no divergence",
+                "provider": label_a[0] if kind == "consumer" else f"{label_a[0]}-vs-{label_b[0]}",
+                "consumer": f"{label_a[1]}-vs-{label_b[1]}" if kind == "consumer" else label_a[1],
+                "case": cid, "status": status,
+                "expected": res_a.as_report(), "actual": res_b.as_report(),
+                "known": registered, "differential": kind, "note": note,
             })
+
+    def comparable(cid, provider, consumer_label):
+        """Skipped cells are not comparable: the surface declined the cell, so a
+        disagreement with a surface that answered it is not a finding."""
+        return skips.reason(cid, provider, consumer_label) is None
+
+    # Provider differential, per consumer: providers of the SAME contract must
+    # answer identically, so any case without a declared per-provider expectation
+    # is compared across them independently of `expect`. This catches a divergence
+    # nobody predicted (it is how `void` was found).
+    names = list(modules)
+    if len(names) >= 2:
+        for cid, case in by_case.items():
+            if "expect_by_provider" in case:
+                continue  # the divergence IS the expectation; already reported
+            for consumer in consumers:
+                if not all(comparable(cid, n, consumer.label) for n in names[:2]):
+                    continue
+                differential(
+                    "provider", cid, case,
+                    (names[0], consumer.label), measured[(consumer.label, names[0])].get(
+                        cid, Result(error="not-run")),
+                    (names[1], consumer.label), measured[(consumer.label, names[1])].get(
+                        cid, Result(error="not-run")),
+                    "providers disagree and the contract declares no divergence")
+
+    # Consumer differential, per provider: the same value read by two consumer
+    # surfaces. Every unordered pair, not just each-against-py — the sync/async
+    # pair shares a module and differs only in which generated table ran, and
+    # that comparison is the one nothing had ever made.
+    for i, ca in enumerate(consumers):
+        for cb in consumers[i + 1:]:
+            for cid, case in by_case.items():
+                for module in names:
+                    if not (comparable(cid, module, ca.label)
+                            and comparable(cid, module, cb.label)):
+                        continue
+                    differential(
+                        "consumer", cid, case,
+                        (module, ca.label), measured[(ca.label, module)].get(
+                            cid, Result(error="not-run")),
+                        (module, cb.label), measured[(cb.label, module)].get(
+                            cid, Result(error="not-run")),
+                        "consumer surfaces disagree on the same provider's answer")
 
     # Coverage: every (type, position) the contract declares needs a case.
     uncovered = []
@@ -481,38 +761,80 @@ def main() -> int:
             if (ty, pos) not in covered:
                 uncovered.append((ty, pos))
                 rows.append({
-                    "type": ty, "position": pos, "provider": "-", "consumer": args.consumer,
+                    "type": ty, "position": pos, "provider": "-", "consumer": "-",
                     "case": "-", "status": "uncovered",
                     "note": "declared by the contract, exercised by no case",
                 })
 
+    # A skip pattern that matches no case in the table is a typo, and a typo'd
+    # skip is worse than no skip: it reads as coverage while excluding nothing.
+    for pattern in skips.dead_patterns(by_case):
+        rows.append({
+            "type": "-", "position": "-", "provider": "-", "consumer": "-",
+            "case": pattern, "status": "dead-skip",
+            "note": "known.json skip pattern matches no case in the table",
+        })
+
+    for msg in setup_errors:
+        rows.append({
+            "type": "-", "position": "-", "provider": "-", "consumer": "-",
+            "case": "-", "status": "setup-failed", "note": msg,
+        })
+
     if args.jsonl:
         Path(args.jsonl).write_text("".join(json.dumps(r) + "\n" for r in rows))
 
-    failures = [r for r in rows if r["status"] in ("fail", "xpass", "uncovered")]
+    failures = [r for r in rows if r["status"] in (
+        "fail", "xpass", "uncovered", "dead-skip", "skip-passes", "setup-failed")]
     if not args.quiet:
-        print(f"\nLIDL conformance matrix — consumer={args.consumer}")
-        print(f"  {len(by_case)} cases x {len(modules)} providers")
+        labels = ", ".join(c.label for c in consumers)
+        print(f"\nLIDL conformance matrix — consumers: {labels}")
+        print(f"  {len(by_case)} cases x {len(modules)} providers x {len(consumers)} consumers")
         for k in sorted(counts):
-            print(f"  {k:<22} {counts[k]}")
+            print(f"  {k:<28} {counts[k]}")
         if uncovered:
             print(f"\n  UNCOVERED cells declared by the contract ({len(uncovered)}):")
             for ty, pos in uncovered:
                 print(f"    {ty}/{pos}")
+
+        # The consumer deltas, grouped by PAIR. Read on their own they are the
+        # answer to "which cells does this surface get differently", which is
+        # what a new consumer is added to find out.
+        deltas = [r for r in rows if r.get("differential") == "consumer"]
+        if deltas:
+            pairs = sorted({r["consumer"] for r in deltas})
+            for pair in pairs:
+                group = [r for r in deltas if r["consumer"] == pair]
+                a, b = pair.split("-vs-")
+                print(f"\n  CONSUMER DELTA {pair} ({len(group)}):")
+                for r in group:
+                    print(f"    {r['status']:<9} {r['type']}/{r['position']}/{r['provider']}")
+                    print(f"              case={r['case']}")
+                    print(f"              {a:<16}={json.dumps(r['expected'])[:100]}")
+                    print(f"              {b:<16}={json.dumps(r['actual'])[:100]}")
+
         if failures:
             print(f"\n  FAILURES ({len(failures)}):")
             for r in failures:
                 coord = f"{r['type']}/{r['position']}/{r['provider']}/{r['consumer']}"
                 print(f"    {r['status']:<9} {coord}")
                 print(f"              case={r['case']}")
+                if "note" in r and r["status"] in ("dead-skip", "setup-failed"):
+                    print(f"              {r['note']}")
                 if "expected" in r:
                     print(f"              expected={json.dumps(r['expected'])[:110]}")
-                print(f"              actual  ={json.dumps(r.get('actual'))[:110]}")
+                if "actual" in r:
+                    print(f"              actual  ={json.dumps(r.get('actual'))[:110]}")
+                if r.get("call_status"):
+                    print(f"              call_status={r['call_status']}")
                 if r["status"] == "xpass":
                     print(f"              ^ known-broken cell {r.get('known')} now PASSES — "
                           f"remove it from known.json")
+                if r["status"] == "skip-passes":
+                    print(f"              ^ registered as unsupported by this surface "
+                          f"({r.get('skip_reason')}), but it works — retire the skip")
         else:
-            print("\n  all cells pass (or are registered xfail)")
+            print("\n  all cells pass (or are registered xfail/skip)")
 
     return 1 if failures else 0
 
