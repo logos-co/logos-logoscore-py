@@ -1,0 +1,200 @@
+name: Conformance
+
+# The LIDL conformance matrix, run in CI and published as a browsable report.
+#
+# Until now the matrix only ran when somebody ran it by hand, so a regression in
+# cross-language type behaviour could land unseen. This job runs both tables and
+# publishes the HTML report so a reviewer can read WHICH cells moved rather than
+# a single pass count.
+#
+# One-time setup, same as the doc-test reports in the SDK repos:
+#   Repo Settings -> Pages -> "Build and deployment" -> Source: "Deploy from a
+#   branch", Branch: `gh-pages` / `(root)`. The publish job creates that branch
+#   on its first run.
+#
+# Fork PRs still RUN the matrix; only the Pages push and PR comment are skipped,
+# because GITHUB_TOKEN cannot push or comment from a fork. The report is still
+# downloadable as an artifact there.
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  matrix:
+    name: Conformance matrix (${{ matrix.table }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `stem` is the artifact prefix each check writes into $out — the full
+          # table writes matrix.*, the ext table matrix-ext.*. They differ; do
+          # not assume one name for both.
+          - table: full
+            check: conformance-matrix
+            stem: matrix
+          - table: ext
+            check: conformance-matrix-ext
+            stem: matrix-ext
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # The check itself is the gate: it exits non-zero on a `fail`, and also on
+      # an `xpass` — a cell the registry calls known-broken that now passes. An
+      # xpass failing the build is deliberate; it forces the registry to stay
+      # honest instead of silently under-reporting what works.
+      - name: Run the matrix
+        id: run
+        run: nix build '.#checks.x86_64-linux.${{ matrix.check }}' --print-build-logs --out-link result-${{ matrix.table }}
+
+      # `always()`: a failing matrix is exactly when the report is worth reading,
+      # and nix still writes the artifacts before the check exits non-zero.
+      - name: Collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="report-${{ matrix.table }}"
+          mkdir -p "$out"
+          link="result-${{ matrix.table }}"
+          stem="${{ matrix.stem }}"
+          if [ -e "$link" ]; then
+            # Normalise to stem-less names inside the artifact so the publish
+            # job does not need to know which table wrote which prefix.
+            for ext in html txt jsonl; do
+              [ -f "$link/$stem.$ext" ] && cp "$link/$stem.$ext" "$out/matrix.$ext"
+            done
+            # Only the full table emits this one.
+            [ -f "$link/known-broken.md" ] && cp "$link/known-broken.md" "$out/known-broken.md"
+          fi
+          # An empty directory would upload as a silent success; say so instead.
+          if [ -z "$(ls -A "$out")" ]; then
+            echo "No matrix artifacts were produced — the check failed before writing them." | tee "$out/NO-REPORT.txt"
+          fi
+          ls -la "$out"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-${{ matrix.table }}
+          path: report-${{ matrix.table }}/
+          if-no-files-found: warn
+
+  publish-report:
+    name: Publish report to GitHub Pages
+    needs: matrix
+    # Run even when the matrix fails — see above. Skip on forks, where
+    # GITHUB_TOKEN can neither push nor comment.
+    if: ${{ always() && github.event.pull_request.head.repo.fork != true }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write         # push to the gh-pages branch
+      pull-requests: write    # post/update the PR comment
+
+    # Serialize Pages pushes so two refs cannot race on the gh-pages branch.
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # No `name:` -> downloads every artifact into artifacts/<name>/...
+
+      - name: Arrange site directory
+        id: arrange
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="pr-${{ github.event.pull_request.number }}"
+          else
+            BASE="main"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "site/$BASE"
+          found=""
+          for table in full ext; do
+            src="artifacts/conformance-report-$table/matrix.html"
+            if [ -f "$src" ]; then
+              mkdir -p "site/$BASE/$table"
+              cp "$src" "site/$BASE/$table/index.html"
+              # The plain-text and jsonl forms ride along: jsonl is what you diff
+              # between two runs to see exactly which cells changed.
+              for extra in matrix.txt matrix.jsonl known-broken.md; do
+                [ -f "artifacts/conformance-report-$table/$extra" ] \
+                  && cp "artifacts/conformance-report-$table/$extra" "site/$BASE/$table/$extra"
+              done
+              found="$found $table"
+            fi
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "<!doctype html><meta charset=utf-8>"
+            echo "<title>LIDL conformance matrix — $BASE</title>"
+            echo "<style>body{font:16px system-ui;margin:40px;max-width:640px}a{color:#2563eb}code{background:#f3f4f6;padding:1px 4px;border-radius:3px}</style>"
+            echo "<h1>LIDL conformance matrix</h1>"
+            echo "<p><strong>$BASE</strong> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
+            for table in full ext; do
+              if [ -d "site/$BASE/$table" ]; then
+                echo "<li><a href=\"./$table/\">$table table</a> — also <a href=\"./$table/matrix.jsonl\">jsonl</a>, <a href=\"./$table/matrix.txt\">text</a></li>"
+              fi
+            done
+            echo "</ul>"
+            echo "<p>A cell is a (case × provider × consumer) triple. <code>xfail</code> is a registered known-broken cell; <code>xpass</code> means the registry is stale and fails the run.</p>"
+          } > "site/$BASE/index.html"
+
+      - name: Deploy to gh-pages
+        if: steps.arrange.outputs.found != ''
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          keep_files: true        # don't wipe other PRs' directories
+          commit_message: "Publish conformance report for ${{ steps.arrange.outputs.base }} (${{ github.sha }})"
+
+      - name: Comment on PR with report links
+        if: ${{ github.event_name == 'pull_request' && steps.arrange.outputs.found != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const base = '${{ steps.arrange.outputs.base }}';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const url = `https://${owner}.github.io/${repo}/${base}/`;
+            const marker = '<!-- conformance-report -->';
+            const body = `${marker}\n**Conformance matrix report:** ${url}\n\n` +
+              `Each cell is a (case × provider × consumer) triple. ` +
+              `\`xfail\` is a registered known-broken cell; an \`xpass\` means the registry ` +
+              `is stale and fails the run.`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: context.issue.number, body });
+            }

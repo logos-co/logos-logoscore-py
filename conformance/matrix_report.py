@@ -722,9 +722,17 @@ def render_register(payload, paint) -> list[str]:
                 out.append(paint(f"          expected {_short(exp, 68)}", "dim"))
             out.append(paint(f"          got      {_short(act, 68)}   "
                              f"[{status}] {where}", "dim"))
+        # `fix_is` is a string in the older entries and a list of steps in the
+        # newer ones (OPT1/OPT2). Both are valid registry data, so render both
+        # rather than crashing on one — a report that dies on a well-formed
+        # registry is worse than no report.
         if e.get("fix_is"):
-            for i, line in enumerate(_wrap("fix is: " + e["fix_is"], 84)):
-                out.append(paint(f"          {line}", "dim"))
+            fix = e["fix_is"]
+            parts = fix if isinstance(fix, list) else [fix]
+            for n, part in enumerate(parts):
+                label = "fix is: " if n == 0 else "        "
+                for line in _wrap(label + str(part), 84):
+                    out.append(paint(f"          {line}", "dim"))
     return out
 
 
