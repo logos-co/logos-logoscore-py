@@ -32,6 +32,17 @@ gets wrong:
   * the prose is hand-written and authoritative. A case's `why` and a registry
     entry's evidence are reproduced verbatim, never paraphrased and never
     replaced by a generated second opinion.
+
+SEVERAL CONTRACTS ON ONE PAGE. `matrix_report.py --merge a.html b.html -o
+merged.html` takes the payloads the single-table pages already embed and lays
+them out as N labelled contracts on one page. It measures nothing either, and
+it adds nothing up: `full_api` and `full_api_ext` are different contracts, with
+different case tables, different registries, different PROVIDERS and different
+consumer axes, so a blended count would hide which contract owned a regression
+— worse than the two separate pages it replaces. Each contract keeps its own
+counts (on its own tab, permanently on screen), its own grid and its own
+differential; there is no cross-contract differential, because a case in one
+table has no counterpart in the other to compare against.
 """
 from __future__ import annotations
 
@@ -39,7 +50,9 @@ import datetime
 import html as _html
 import json
 import os
+import re
 import sys
+from pathlib import Path
 
 # ── the vocabulary ──────────────────────────────────────────────────────────
 # A cell's status is one token, and the token is the same in every surface: the
@@ -1079,20 +1092,122 @@ def _prosify(entry):
 # ── html ────────────────────────────────────────────────────────────────────
 
 
-def render_html(payload) -> str:
-    # The prose split (bullets vs a hard-wrapped paragraph) is decided here, in
-    # python, rather than re-derived in JavaScript: one implementation, and the
-    # embedded payload then carries the registry already shaped for reading.
-    payload = dict(payload, registry={
+def _view_payload(payload):
+    """The payload as the PAGE wants it.
+
+    The prose split (bullets vs a hard-wrapped paragraph) is decided here, in
+    python, rather than re-derived in JavaScript: one implementation, and the
+    embedded payload then carries the registry already shaped for reading.
+
+    Idempotent, because a merged page re-renders payloads that were already
+    shaped once on their way into a single-table page: a value that has become
+    a `{_prose: ...}` dict is no longer a list of strings and is left alone.
+    """
+    return dict(payload, registry={
         k: [_prosify(e) for e in v] for k, v in payload["registry"].items()})
-    data = json.dumps(payload, ensure_ascii=False)
+
+
+def _emit(data_obj, title: str) -> str:
+    data = json.dumps(data_obj, ensure_ascii=False)
     # Close any literal </script> in the data so it cannot terminate the tag.
     data = data.replace("</", "<\\/")
-    title = (f"LIDL conformance matrix \u2014 "
-             f"{payload['meta'].get('contract_name') or 'full_api'}")
     return (_HTML_TEMPLATE
             .replace("__TITLE__", _html.escape(title))
             .replace("__DATA__", data))
+
+
+def render_html(payload) -> str:
+    """One contract, one page \u2014 the artifact `run_matrix.py --report` writes.
+
+    The embedded payload is the BARE payload object, unchanged: it is what the
+    merge entry point below reads back, and what anything else parsing this page
+    already expects.
+    """
+    payload = _view_payload(payload)
+    title = (f"LIDL conformance matrix \u2014 "
+             f"{payload['meta'].get('contract_name') or 'full_api'}")
+    return _emit(payload, title)
+
+
+# \u2500\u2500 merging \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# Several contracts on one page, and never one number across them.
+#
+# The two tables this repo runs are NOT the same measurement: different
+# contracts, different case tables, different registries, different PROVIDERS
+# (`test_fullapi_{cpp,rust}` vs `test_fullapi_ext_{cpp,rust}`) and different
+# consumer axes. A blended "N pass" would hide which contract owns a failure,
+# which is strictly worse than the two separate pages it replaces \u2014 so the
+# merged page carries each contract's counts on its own tab, always visible,
+# and computes nothing that spans them. In particular there is no cross-table
+# differential: the differential compares PROVIDERS OF THE SAME CONTRACT, and a
+# case in one table has no counterpart in the other to compare against.
+#
+# This is a view-layer merge. It takes N payloads \u2014 the same objects a
+# single-table page embeds \u2014 and emits one page. It does not re-run anything,
+# and the two nix checks stay separate derivations so one failing gate cannot
+# suppress the other's report.
+
+
+_PAYLOAD_RE = re.compile(
+    r'<script id="report-data" type="application/json">(.*?)</script>', re.S)
+
+
+def load_payload(path) -> dict:
+    """A payload, from either a `--payload` JSON file or the HTML page it is
+    embedded in. Reading the page back is deliberate: it is proof that what the
+    merged page shows is exactly what the single-table page showed, with no
+    second serialization able to drift from it."""
+    text = Path(path).read_text()
+    if text.lstrip().startswith("{"):
+        obj = json.loads(text)
+    else:
+        m = _PAYLOAD_RE.search(text)
+        if not m:
+            raise SystemExit(
+                f"{path}: not a payload, and no <script id=\"report-data\"> in it")
+        obj = json.loads(m.group(1).replace("<\\/", "</"))
+    if "reports" in obj and "meta" not in obj:
+        raise SystemExit(
+            f"{path}: that is already a MERGED page. Merge the per-contract "
+            f"reports, not a merge of them.")
+    if "meta" not in obj or "counts" not in obj:
+        raise SystemExit(f"{path}: does not look like a matrix payload")
+    return obj
+
+
+def _slug(name: str, taken: set) -> str:
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(name or "contract")).strip("-")
+    s = s or "contract"
+    base, n = s, 2
+    while s in taken:
+        s, n = f"{base}-{n}", n + 1
+    taken.add(s)
+    return s
+
+
+def render_merged_html(payloads, hrefs=None, title=None) -> str:
+    """One page, N contracts, each one still its own report.
+
+    `hrefs[i]` is where contract i's standalone page lives, if it is published
+    somewhere. A URL ending in `/` is treated as the DIRECTORY the publisher
+    lays out (`index.html`, `matrix.jsonl`, `matrix.txt`), so the artifacts stay
+    linked rather than merely reachable.
+    """
+    hrefs = list(hrefs or [])
+    if hrefs and len(hrefs) != len(payloads):
+        raise SystemExit(
+            f"--href given {len(hrefs)} time(s) for {len(payloads)} report(s); "
+            f"they are matched by position, so pass one per report or none")
+    taken: set = set()
+    reports = []
+    for i, p in enumerate(payloads):
+        p = _view_payload(p)
+        name = p["meta"].get("contract_name") or f"contract {i + 1}"
+        reports.append({"ns": _slug(name, taken), "name": name,
+                        "href": hrefs[i] if hrefs else None, "payload": p})
+    names = " + ".join(r["name"] for r in reports)
+    return _emit({"reports": reports},
+                 title or f"LIDL conformance \u2014 {names}")
 
 
 _HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -1124,6 +1239,30 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .pill.known { background:rgba(210,153,34,.15); color:var(--known);
     background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(210,153,34,.18) 3px,rgba(210,153,34,.18) 6px); }
   .pill.dim { background:rgba(110,118,129,.15); color:var(--muted); }
+  /* One tab per contract. The tab carries that contract's OWN counts and they
+     stay on screen whichever tab is active — the split is the point: a reader
+     must never have to click to find out which contract owns a failure. */
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
+  .tabs:empty { display:none; }
+  .tab { display:flex; flex-direction:column; gap:3px; align-items:flex-start;
+    background:var(--panel2); border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; cursor:pointer; color:var(--text); text-align:left;
+    font:inherit; }
+  .tab:hover { border-color:var(--accent); }
+  .tab.on { border-color:var(--accent); background:rgba(88,166,255,.08); }
+  .tab .tname { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-weight:700; font-size:13px; color:#fff; }
+  .tab.on .tname { color:var(--accent); }
+  .tab .tmeta { color:var(--dim); font-size:11px; }
+  .tab .tpills { display:flex; gap:5px; flex-wrap:wrap; }
+  .tab .pill { font-size:11px; padding:1px 8px; }
+  .contract.hide { display:none; }
+  .banner { border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:8px; background:var(--panel); padding:12px 16px; margin:0 0 6px; }
+  .banner h2 { font-size:15px; margin:0 0 4px; }
+  .banner p { color:var(--muted); font-size:12.5px; margin:0 0 8px; max-width:95ch; }
+  .banner a, .lede a, table.flat a { color:var(--accent); text-decoration:none; }
+  .banner a:hover, .lede a:hover, table.flat a:hover { text-decoration:underline; }
   nav { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   nav a { color:var(--muted); font-size:12px; text-decoration:none; padding:2px 8px;
     border:1px solid var(--border); border-radius:999px; }
@@ -1231,11 +1370,13 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span class="q">does a value of type <b>T</b>, in position <b>P</b>, survive provider <b>R</b> &rarr; consumer <b>K</b> intact?</span>
     <span id="pills" style="margin-left:auto"></span>
   </div>
+  <div class="tabs" id="tabs"></div>
   <nav>
-    <a href="#grid">grid</a><a href="#differential">differential</a>
-    <a href="#cases">cases</a><a href="#register">known-broken</a>
-    <a href="#notmeasured">not measured</a><a href="#history">history</a>
-    <a href="#all">all cells</a>
+    <a id="navtop" class="hide" href="#contracts">contracts</a>
+    <a data-sec="grid" href="#grid">grid</a><a data-sec="differential" href="#differential">differential</a>
+    <a data-sec="cases" href="#cases">cases</a><a data-sec="register" href="#register">known-broken</a>
+    <a data-sec="notmeasured" href="#notmeasured">not measured</a><a data-sec="history" href="#history">history</a>
+    <a data-sec="all" href="#all">all cells</a>
     <span style="width:14px"></span>
     <button class="chip on" data-f="all">all cases</button>
     <button class="chip" data-f="notgreen">not plain pass</button>
@@ -1247,7 +1388,33 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <main id="main"></main>
 <script id="report-data" type="application/json">__DATA__</script>
 <script>
-const D = JSON.parse(document.getElementById("report-data").textContent);
+/* ── what this page is ────────────────────────────────────────────────────
+   A single-table page embeds the payload for ONE contract, unchanged. A merged
+   page embeds {"reports":[{ns,name,href,payload}, ...]} — the SAME payload
+   objects, one per contract, never combined into one.
+
+   Nothing here computes a number that spans contracts. The two tables are
+   different measurements: different contracts, different case tables and
+   registries, different PROVIDERS, different consumer axes. A blended count
+   would hide which contract owns a failure, and the differential — providers
+   compared to EACH OTHER — only means anything within one contract, because a
+   case in one table has no counterpart in the other. */
+const RAW = JSON.parse(document.getElementById("report-data").textContent);
+const REPORTS = RAW.reports || [{ns: "", href: null,
+  name: (RAW.meta.contract_name || "full_api"), payload: RAW}];
+/* Produced by --merge, as opposed to "happens to carry one report". A merged
+   landing page built when only ONE table produced a report must still name the
+   contract it is showing — otherwise the table that failed simply vanishes and
+   the page reads as if it were the whole story. */
+const MERGED = !!RAW.reports;
+
+/* The report currently being rendered. Rendering is synchronous and each
+   report is emitted whole before the next begins, so a mutable "current"
+   binding is enough and keeps every section function reading exactly the way
+   it did when there was only ever one report. Nothing wired AFTER rendering
+   (filters, deep links, the tab strip) reads it — they work off the DOM. */
+let D = REPORTS[0].payload, NS = REPORTS[0].ns;
+const nsid = s => NS ? NS + "-" + s : s;
 const esc = s => String(s === undefined || s === null ? "" : s)
   .replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const GLYPH = {pass:"\u00b7", xfail:"K", fail:"X", xpass:"^", skip:"~", "not-run":"?"};
@@ -1263,21 +1430,32 @@ const ABBR  = {method_arg:"arg", "method_arg@0":"a0", "method_arg@1":"a1",
    reports it. `clip` shortens text that is already the rendering. */
 const clip  = (s, n) => s === undefined || s === null ? ""
   : (s.length > n ? s.slice(0, n-1) + "\u2026" : s);
-const surfaces = [];
-D.meta.providers.forEach(p => D.meta.consumers.forEach(c => surfaces.push(p + "|" + c)));
+const surfacesOf = P => {
+  const out = [];
+  P.meta.providers.forEach(p => P.meta.consumers.forEach(c => out.push(p + "|" + c)));
+  return out;
+};
+/* Only the `test_fullapi_` stem comes off, NOT the `ext_` that follows it: on a
+   merged page the ext contract's providers must not read as `cpp, rust` next to
+   the full contract's `cpp, rust`. They are different modules, and the whole
+   point of the page is that the two rows are different measurements. */
 const shortProv = p => p.replace(/^test_fullapi_/, "");
 
-/* ── header pills ─────────────────────────────────────────────────────── */
-(function () {
-  const c = D.counts, n = k => c[k] || 0;
+/* ── the pills for ONE contract ───────────────────────────────────
+   Always per contract, never summed across contracts. On a merged page these
+   ride on the contract's own tab, so the split stays visible without a click. */
+function pillsHtml(P) {
+  const c = P.counts, n = k => c[k] || 0;
   const bits = [`<span class="pill pass">${n("pass")} pass</span>`];
   if (n("xfail")) bits.push(`<span class="pill known">${n("xfail")} known-broken</span>`);
   if (n("fail")) bits.push(`<span class="pill fail">${n("fail")} FAIL</span>`);
   if (n("xpass")) bits.push(`<span class="pill fail">${n("xpass")} xpass \u2014 registry stale</span>`);
-  if (D.uncovered.length) bits.push(`<span class="pill fail">${D.uncovered.length} uncovered</span>`);
+  if (P.uncovered.length) bits.push(`<span class="pill fail">${P.uncovered.length} uncovered</span>`);
   if (n("skip")) bits.push(`<span class="pill dim">${n("skip")} skip</span>`);
-  document.getElementById("pills").innerHTML = bits.join(" ");
-})();
+  return bits.join(" ");
+}
+const isRed = P => (P.counts.fail || 0) + (P.counts.xpass || 0)
+  + P.uncovered.length > 0;
 
 /* ── grid ─────────────────────────────────────────────────────────────── */
 function gridCell(cell) {
@@ -1445,7 +1623,7 @@ function callHtml(cv) {
     /* Values differing only by the provider's own name render identically
        once truncated; the full pair lives in the differential panel. */
     want = `<span class="where">each provider answers with its own name &mdash;
-       see <a href="#differential">differential</a></span>`;
+       see <a href="#${esc(nsid("differential"))}">differential</a></span>`;
   else if (r.want_kind === "per_provider")
     want = (r.want_pairs || []).map(([p, v]) =>
       `${esc(p)} ${esc(clip(v, 46))}`).join(" &nbsp;|&nbsp; ");
@@ -1520,10 +1698,10 @@ function renderCases() {
       const d = cv.differential;
       const agree = d ? (d.agree ? "=" : (d.declared ? "\u2260*" : "\u2260")) : "";
       const kids = cv.known.map(k =>
-        `<a class="kid" href="#reg-${esc(k)}">${esc(k)}</a>`).join("");
+        `<a class="kid" href="#${esc(nsid("reg-" + k))}">${esc(k)}</a>`).join("");
       const tags = cv.tags.map(t => `<span class="tagchip">${esc(t)}</span>`).join("");
       /* a case listed under three types must not carry the anchor three times */
-      const anchor = anchored.has(cv.id) ? "" : ` id="case-${esc(cv.id)}"`;
+      const anchor = anchored.has(cv.id) ? "" : ` id="${esc(nsid("case-" + cv.id))}"`;
       anchored.add(cv.id);
       h += `<tr class="c"${anchor} data-case="${esc(cv.id)}"
               data-search="${esc((cv.id + " " + cv.type + " " + cv.tags.join(" ") + " " + (cv.why||"")).toLowerCase())}"
@@ -1581,13 +1759,13 @@ function renderRegister() {
     const breakdown = Object.entries(tally).map(([s, n]) =>
       `<span class="${CLS[s]}">${n} ${esc(s)}</span>`).join(", ");
     const dcount = (D.registry_used_differential[e.id] || []).length;
-    h += `<div class="card known" id="reg-${esc(e.id)}">
+    h += `<div class="card known" id="${esc(nsid("reg-" + e.id))}">
       <h3>${esc(e.id)}<span class="tag">${used.length} cell(s) in this run${
         breakdown ? " &mdash; " + breakdown : ""}${
         dcount ? ", + " + dcount + " differential" : ""}</span></h3>
       <div>${esc(e.summary || "")}</div>
       <div class="kv" style="margin-top:8px"><dt>cases</dt><dd>` +
-      e.cases.map(c => `<a href="#case-${esc(c)}"><code>${esc(c)}</code></a>`).join(", ") +
+      e.cases.map(c => `<a href="#${esc(nsid("case-" + c))}"><code>${esc(c)}</code></a>`).join(", ") +
       `</dd><dt>providers</dt><dd><code>${esc((e.providers||[]).join(", "))}</code></dd>` +
       (e.consumers ? `<dt>consumers</dt><dd><code>${esc(e.consumers.join(", "))}</code></dd>` : "") +
       `</div>` + proseHtml(e) + `</div>`;
@@ -1665,6 +1843,7 @@ function renderAll() {
     <details><summary>show every cell</summary><table class="flat">
     <tr><th>status</th><th>type</th><th>position</th><th>provider</th><th>consumer</th>
     <th>case</th><th>known</th></tr>`;
+  const surfaces = surfacesOf(D);
   D.cases.forEach(cv => surfaces.forEach(k => {
     const e = cv.results[k];
     if (!e) return;
@@ -1675,47 +1854,120 @@ function renderAll() {
   return h + `</table></details>`;
 }
 
-/* ── assemble ─────────────────────────────────────────────────────────── */
-const m = D.meta;
-document.getElementById("main").innerHTML = `
+/* ── one contract's panel ─────────────────────────────────────────────────
+   Exactly the report that has always been rendered here, with its section ids
+   namespaced so several contracts can share a page without colliding. Every
+   section is behind safeSection(): the panel is written with ONE innerHTML
+   assignment, so an uncaught throw anywhere in it would leave the whole page
+   empty — and on a merged page that would take the OTHER contract's report
+   down with it. A broken panel says so and nothing else moves. */
+function renderContract(R) {
+  D = R.payload;
+  NS = R.ns;
+  const m = D.meta;
+  const link = R.href
+    ? ` &middot; <a href="${esc(R.href)}">standalone page</a>` +
+      (String(R.href).endsWith("/")
+        ? ` &middot; <a href="${esc(R.href)}matrix.jsonl">jsonl</a>
+            &middot; <a href="${esc(R.href)}matrix.txt">text</a>` : "")
+    : "";
+  return `<div class="contract" data-ns="${esc(R.ns)}">
   <p class="lede">Contract <code>${esc(m.contract_name || "full_api")}</code> &middot;
     ${m.case_count} cases &times; ${m.providers.length} provider(s)
     &times; ${m.consumers.length} consumer(s) = ${m.cell_count} cells &middot;
-    generated ${esc(m.generated)}<br>
+    generated ${esc(m.generated)}${link}<br>
     providers <code>${m.providers.map(esc).join("</code> <code>")}</code> &middot;
     consumers <code>${m.consumers.map(esc).join("</code> <code>")}</code> &middot;
     transport LocalSocket/QtRO</p>
-  <section id="grid"><h2>Type &times; position<span class="sub">what this system
+  <section id="${esc(nsid("grid"))}"><h2>Type &times; position<span class="sub">what this system
     guarantees, per type</span></h2>${safeSection("renderGrid", renderGrid)}</section>
-  <section id="differential"><h2>Differential<span class="sub">the answers compared to
-    each other, independently of <code>expect</code></span></h2>${safeSection("renderDifferential", renderDifferential)}</section>
-  <section id="cases"><h2>Cases<span class="sub">what was actually verified</span></h2>
+  <section id="${esc(nsid("differential"))}"><h2>Differential<span class="sub">this contract's
+    providers compared to each other, independently of <code>expect</code></span></h2>
+    ${safeSection("renderDifferential", renderDifferential)}</section>
+  <section id="${esc(nsid("cases"))}"><h2>Cases<span class="sub">what was actually verified</span></h2>
     ${safeSection("renderCases", renderCases)}</section>
-  <section id="register"><h2>Known-broken register<span class="sub">every amber cell,
+  <section id="${esc(nsid("register"))}"><h2>Known-broken register<span class="sub">every amber cell,
     and its claim</span></h2>${safeSection("renderRegister", renderRegister)}</section>
-  <section id="notmeasured"><h2>Not measured<span class="sub">on the record, not
-    silently absent</span></h2>${renderNotMeasured()}</section>
-  <section id="history"><h2>Registry history<span class="sub">closed entries, and the
+  <section id="${esc(nsid("notmeasured"))}"><h2>Not measured<span class="sub">on the record, not
+    silently absent</span></h2>${safeSection("renderNotMeasured", renderNotMeasured)}</section>
+  <section id="${esc(nsid("history"))}"><h2>Registry history<span class="sub">closed entries, and the
     guards they left behind</span></h2>${safeSection("renderHistory", renderHistory)}</section>
-  <section id="all"><h2>All cells</h2>${safeSection("renderAll", renderAll)}</section>
+  <section id="${esc(nsid("all"))}"><h2>All cells</h2>${safeSection("renderAll", renderAll)}</section>
   <div class="foot">Generated by <code>run_matrix.py --report</code>. Case table and
-    registry: <code>${esc(m.paths.cases || "")}</code>,
-    <code>${esc(m.paths.known || "")}</code>. This report measures nothing; every
-    number is a re-arrangement of one the driver produced.</div>`;
+    registry: <code>${esc((m.paths || {}).cases || "")}</code>,
+    <code>${esc((m.paths || {}).known || "")}</code>. This report measures nothing; every
+    number is a re-arrangement of one the driver produced.</div></div>`;
+}
 
-/* grid cell -> jump to the type block */
-document.querySelectorAll("td.c").forEach(td => td.addEventListener("click", () => {
-  const el = document.querySelector(`.typeblock[data-type="${td.dataset.ty}"]`);
-  if (!el) return;
-  el.classList.remove("folded");
-  el.scrollIntoView({behavior: "smooth", block: "start"});
-}));
+/* ── the contracts, side by side but never added up ───────────────────────
+   The one thing a merged page must say out loud, because the layout invites
+   the opposite reading: these are two measurements, not two halves of one. */
+function renderContracts() {
+  const n = REPORTS.length;
+  const head = n === 1 ? `1 contract`
+    : `${n} contracts, ${n} measurements`;
+  const sub = n === 1
+    ? `&mdash; the merged report, with one table present`
+    : `&mdash; not ${n === 2 ? "two halves" : "parts"} of one number`;
+  let h = `<div class="banner"><h2>${head}
+    <span class="sub" style="font-weight:400;font-size:12.5px;color:var(--muted)">
+    ${sub}</span></h2>
+    <p>Each row below is its own run: its own contract, its own case table and
+    registry, its own <b>providers</b>, its own consumer axis. Nothing on this page
+    is summed across them, and no cell in one table has a counterpart in another
+    to be compared with. The <a href="#${esc(REPORTS[0].ns)}-differential">differential</a>
+    is a comparison of the providers <em>of one contract</em>; a cross-contract
+    differential would be a comparison of unrelated things and is not computed.</p>
+    <table class="flat">
+    <tr><th>contract</th><th>providers</th><th>consumers</th><th>cases</th>
+      <th>cells</th><th>result</th><th></th></tr>`;
+  REPORTS.forEach(R => {
+    const P = R.payload, m = P.meta;
+    h += `<tr><td><a href="#${esc(R.ns)}-grid" data-goto="${esc(R.ns)}"><b>${esc(R.name)}</b></a></td>
+      <td>${(m.providers || []).map(p => esc(shortProv(p))).join(", ")}</td>
+      <td>${(m.consumers || []).map(esc).join(", ")}</td>
+      <td>${esc(m.case_count)}</td><td>${esc(m.cell_count)}</td>
+      <td>${pillsHtml(P)}</td>
+      <td>${R.href ? `<a href="${esc(R.href)}">standalone</a>` : ""}</td></tr>`;
+  });
+  h += `</table>`;
+  const tables = REPORTS.map(R =>
+    `<code>${esc((R.payload.meta.paths || {}).cases || "?")}</code>`);
+  h += `<p style="margin:10px 0 0;color:var(--dim);font-size:11.5px">case tables:
+    ${tables.join("<br>")}</p></div>`;
+  return h;
+}
 
-/* a type block folds away, so the type headers alone are a scannable index */
-document.querySelectorAll(".typehead").forEach(th =>
-  th.addEventListener("click", () => th.parentElement.classList.toggle("folded")));
+/* A contract whose panel throws OUTSIDE any section still gets a panel — an
+   empty one, saying so. Falling back to bare text would leave the tab pointing
+   at nothing, and the tab switcher would then hide every OTHER contract to show
+   a panel that does not exist: one broken contract blanking the page, by a
+   different route than the one safeSection closed. */
+function safePanel(R) {
+  try { return renderContract(R); }
+  catch (e) {
+    return `<div class="contract" data-ns="${esc(R.ns)}">
+      <p class="lede">This contract's report failed to render:
+      <code>${esc(R.name)}: ${esc(e.message)}</code>. Every other contract on
+      this page is unaffected, and the data is intact in the jsonl.</p></div>`;
+  }
+}
 
-/* filters: text, plus the four questions worth asking of a case list */
+/* ── assemble ─────────────────────────────────────────────────────────── */
+document.getElementById("main").innerHTML =
+  (MERGED ? `<section id="contracts">${
+    safeSection("renderContracts", renderContracts)}</section>` : "") +
+  REPORTS.map(safePanel).join("");
+
+/* filters: text, plus the four questions worth asking of a case list.
+
+   Declared BEFORE the tab strip, because activate() calls applyFilters() and
+   `let` sits in a temporal dead zone until its declaration is evaluated. With
+   this block below activate(), the very first activate() threw a
+   ReferenceError inside applyFilters and took every listener after it with
+   it: the tabs still switched (their listeners were already attached) and the
+   chips, the search box and the grid-cell jumps did nothing at all. The page
+   looked completely fine. */
 let FILTER = "all";
 const KEEP = {
   all: () => true,
@@ -1741,12 +1993,84 @@ document.querySelectorAll(".chip").forEach(btn => btn.addEventListener("click", 
   applyFilters();
 }));
 
-/* deep links: #case-<id> and #reg-<id> land on a row even inside a folded block */
+/* One tab per contract, carrying that contract's OWN counts. A single-table
+   page has one report and no tab strip; its pills sit in the header exactly
+   where they always did. */
+try {
+  if (MERGED) {
+    document.getElementById("tabs").innerHTML = REPORTS.map(R => {
+      const m = R.payload.meta || {};
+      return `<button class="tab" data-ns="${esc(R.ns)}">
+        <span class="tname">${esc(R.name)}</span>
+        <span class="tmeta">${esc(m.case_count)} cases &middot;
+          ${(m.providers || []).length} providers &times;
+          ${(m.consumers || []).length} consumers</span>
+        <span class="tpills">${safeSection("pills", () => pillsHtml(R.payload))}</span>
+      </button>`;
+    }).join("");
+    document.getElementById("navtop").classList.remove("hide");
+    /* An aggregate that cannot hide an owner: it NAMES the contracts that are
+       red. A bare "N pass" across both would be exactly the number this page
+       refuses to print. */
+    const red = REPORTS.filter(R => isRed(R.payload)).map(R => R.name);
+    document.getElementById("pills").innerHTML = red.length
+      ? `<span class="pill fail">FAIL in ${red.map(esc).join(", ")}</span>`
+      : `<span class="pill dim">${REPORTS.length} contract${
+          REPORTS.length === 1 ? "" : "s"}, measured separately</span>`;
+  } else {
+    document.getElementById("pills").innerHTML = pillsHtml(REPORTS[0].payload);
+  }
+} catch (e) {
+  /* The tab strip IS the merged page's navigation. A throw here used to take
+     every listener below it with it, leaving a page that renders and does
+     nothing. */
+  document.getElementById("pills").innerHTML =
+    `<span class="pill fail">header failed: ${esc(e.message)}</span>`;
+}
+
+function activate(ns) {
+  const have = [...document.querySelectorAll(".contract")].map(p => p.dataset.ns);
+  /* Never hide every panel to show one that is not there. */
+  if (!have.includes(ns)) ns = have[0];
+  document.querySelectorAll(".contract").forEach(p =>
+    p.classList.toggle("hide", MERGED && p.dataset.ns !== ns));
+  document.querySelectorAll(".tab").forEach(b =>
+    b.classList.toggle("on", b.dataset.ns === ns));
+  /* The header nav is shared, so it retargets at the contract on screen. */
+  document.querySelectorAll("nav a[data-sec]").forEach(a =>
+    a.href = "#" + (ns ? ns + "-" : "") + a.dataset.sec);
+  applyFilters();
+}
+document.querySelectorAll(".tab").forEach(b =>
+  b.addEventListener("click", () => activate(b.dataset.ns)));
+document.querySelectorAll("[data-goto]").forEach(a =>
+  a.addEventListener("click", () => activate(a.dataset.goto)));
+activate(REPORTS[0].ns);
+
+/* grid cell -> jump to the type block, WITHIN this contract's panel */
+document.querySelectorAll(".contract").forEach(panel => {
+  panel.querySelectorAll("td.c").forEach(td => td.addEventListener("click", () => {
+    const el = panel.querySelector(`.typeblock[data-type="${td.dataset.ty}"]`);
+    if (!el) return;
+    el.classList.remove("folded");
+    el.scrollIntoView({behavior: "smooth", block: "start"});
+  }));
+});
+
+/* a type block folds away, so the type headers alone are a scannable index */
+document.querySelectorAll(".typehead").forEach(th =>
+  th.addEventListener("click", () => th.parentElement.classList.toggle("folded")));
+
+/* deep links: #case-<id> and #reg-<id> land on a row even inside a folded
+   block — and, on a merged page, even inside the contract that is not the one
+   on screen: the link switches to it. */
 function revealHash() {
   const id = decodeURIComponent(location.hash.slice(1));
   if (!id) return;
   const el = document.getElementById(id);
   if (!el) return;
+  const panel = el.closest(".contract");
+  if (panel) activate(panel.dataset.ns);
   const block = el.closest(".typeblock");
   if (block) block.classList.remove("folded");
   el.scrollIntoView({block: "center"});
@@ -1757,3 +2081,51 @@ revealHash();
 </body>
 </html>
 """
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def _main(argv=None) -> int:
+    """`matrix_report.py --merge a.html b.html -o merged.html`.
+
+    A view-layer entry point, on purpose. It re-runs nothing: the measuring is
+    done by `run_matrix.py`, once per contract, in its own nix check — and the
+    checks stay separate so a red gate on one table still leaves the other's
+    report standing. This takes what those runs already wrote and lays it out
+    on one page.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="matrix_report.py",
+        description="Merge several conformance reports onto one page.")
+    ap.add_argument("--merge", nargs="+", required=True, metavar="FILE",
+                    help="a report page (matrix.html) or a payload written by "
+                         "run_matrix.py --payload; repeatable")
+    ap.add_argument("--href", nargs="+", default=[], metavar="URL",
+                    help="where each report is published, matched to --merge BY "
+                         "POSITION. A URL ending in / is taken to be the "
+                         "directory the publisher lays out (index.html, "
+                         "matrix.jsonl, matrix.txt).")
+    ap.add_argument("--title", default=None)
+    ap.add_argument("-o", "--out", required=True, metavar="FILE.html")
+    args = ap.parse_args(argv)
+
+    payloads = [load_payload(p) for p in args.merge]
+    names = [p["meta"].get("contract_name") for p in payloads]
+    if len(set(names)) != len(names):
+        # Not fatal — the slugs are made unique either way — but a merged page
+        # showing one contract twice is a mistake in the caller, not a finding.
+        print(f"warning: two inputs name the same contract: {names}",
+              file=sys.stderr)
+    html = render_merged_html(payloads, hrefs=args.href, title=args.title)
+    Path(args.out).write_text(html)
+    print(f"{args.out}: {len(payloads)} contract(s) — "
+          + ", ".join(f"{n} ({p['meta']['cell_count']} cells)"
+                      for n, p in zip(names, payloads)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

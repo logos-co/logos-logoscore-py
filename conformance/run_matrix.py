@@ -565,6 +565,13 @@ def main() -> int:
                     help="also print the per-type, per-case drill-down")
     ap.add_argument("--md", default=None, metavar="FILE.md",
                     help="write the README's known-broken table")
+    # The report payload on its own. `matrix_report.py --merge` reads either
+    # this or the HTML page it is embedded in, so a merged page can be built
+    # without a browser-shaped artifact in the middle. Nothing else reads it,
+    # and it is NOT the machine-readable artifact — that is `--jsonl`, whose
+    # contents this flag does not touch.
+    ap.add_argument("--payload", default=None, metavar="FILE.json",
+                    help="write the report payload as JSON (for --merge)")
     ap.add_argument("--no-color", action="store_true",
                     help="never colourise the terminal report")
     args = ap.parse_args()
@@ -847,6 +854,8 @@ def main() -> int:
     color = False if args.no_color else None
     if args.report:
         Path(args.report).write_text(matrix_report.render_html(payload))
+    if args.payload:
+        Path(args.payload).write_text(json.dumps(payload, ensure_ascii=False))
     if args.md:
         Path(args.md).write_text(matrix_report.render_markdown(payload))
 

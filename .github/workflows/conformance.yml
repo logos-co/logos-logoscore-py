@@ -7,6 +7,20 @@ name: Conformance
 # publishes the HTML report so a reviewer can read WHICH cells moved rather than
 # a single pass count.
 #
+# TWO TABLES, ONE LANDING PAGE. `$BASE/conformance/` is the merged report: both
+# contracts on one page, each with its own counts, and nothing summed across
+# them — they are different contracts measured against different providers with
+# different case tables, so a blended number would hide which one regressed. The
+# standalone per-table pages stay exactly where they were, at
+# `$BASE/conformance/full/` and `$BASE/conformance/ext/`, and the merged page
+# links to them.
+#
+# The merge runs HERE, over the downloaded artifacts, and not from the
+# `conformance-matrix-merged` nix check — that check depends on both gates and
+# therefore cannot build when either is red, which is precisely the run whose
+# report is worth publishing. It is plain stdlib python over files that already
+# exist, so it costs nothing and works with one table, two, or none.
+#
 # One-time setup, same as the doc-test reports in the SDK repos:
 #   Repo Settings -> Pages -> "Build and deployment" -> Source: "Deploy from a
 #   branch", Branch: `gh-pages` / `(root)`. The publish job creates that branch
@@ -115,6 +129,11 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      # The merge script lives in the repo (conformance/matrix_report.py) and
+      # needs nothing but stdlib python, which the runner already has.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download all reports
         uses: actions/download-artifact@v4
         with:
@@ -142,6 +161,9 @@ jobs:
           ROOT="site/$BASE/conformance"
           mkdir -p "$ROOT"
           found=""
+          # Collected in the SAME order the merge is given them, because --href
+          # is matched to --merge by position.
+          pages=(); hrefs=()
           for table in full ext; do
             src="artifacts/conformance-report-$table/matrix.html"
             if [ -f "$src" ]; then
@@ -154,24 +176,26 @@ jobs:
                   && cp "artifacts/conformance-report-$table/$extra" "$ROOT/$table/$extra"
               done
               found="$found $table"
+              pages+=("$ROOT/$table/index.html")
+              hrefs+=("./$table/")
             fi
           done
           echo "found=$found" >> "$GITHUB_OUTPUT"
 
-          {
-            echo "<!doctype html><meta charset=utf-8>"
-            echo "<title>LIDL conformance matrix — $BASE</title>"
-            echo "<style>body{font:16px system-ui;margin:40px;max-width:640px}a{color:#2563eb}code{background:#f3f4f6;padding:1px 4px;border-radius:3px}</style>"
-            echo "<h1>LIDL conformance matrix</h1>"
-            echo "<p><strong>$BASE</strong> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
-            for table in full ext; do
-              if [ -d "$ROOT/$table" ]; then
-                echo "<li><a href=\"./$table/\">$table table</a> — also <a href=\"./$table/matrix.jsonl\">jsonl</a>, <a href=\"./$table/matrix.txt\">text</a></li>"
-              fi
-            done
-            echo "</ul>"
-            echo "<p>A cell is a (case × provider × consumer) triple. <code>xfail</code> is a registered known-broken cell; <code>xpass</code> means the registry is stale and fails the run.</p>"
-          } > "$ROOT/index.html"
+          # The landing page is the MERGED report: both contracts, each with its
+          # own counts, nothing summed across them. Built from the pages just
+          # copied in, so what the landing page shows is byte-for-byte the
+          # payload the standalone pages show.
+          if [ ${#pages[@]} -gt 0 ]; then
+            python3 conformance/matrix_report.py \
+              --merge "${pages[@]}" --href "${hrefs[@]}" \
+              -o "$ROOT/index.html"
+          else
+            # No table produced a report at all — every matrix job died before
+            # writing its artifacts. Nothing is published (the deploy step is
+            # gated on `found`), so this only has to be legible in the log.
+            echo "::warning::no conformance report was produced by any table"
+          fi
 
       - name: Deploy to gh-pages
         if: steps.arrange.outputs.found != ''
@@ -191,9 +215,22 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const url = `https://${owner}.github.io/${repo}/${base}/conformance/`;
+            // Which tables actually produced a report, in the order they are
+            // laid out. The comment links the merged page first — it is the
+            // landing page — and then each standalone one, so a reviewer who
+            // only cares about one contract can go straight to it.
+            const tables = '${{ steps.arrange.outputs.found }}'.trim().split(/\s+/)
+              .filter(Boolean);
             const marker = '<!-- conformance-report -->';
             const body = `${marker}\n**Conformance matrix report:** ${url}\n\n` +
-              `Each cell is a (case × provider × consumer) triple. ` +
+              `Both contracts on one page, each with its own counts — they are ` +
+              `separate measurements (different contracts, case tables and providers), ` +
+              `so nothing is summed across them.` +
+              (tables.length
+                ? `\n\nPer-table pages: ` +
+                  tables.map(t => `[\`${t}\`](${url}${t}/)`).join(' · ')
+                : '') +
+              `\n\nEach cell is a (case × provider × consumer) triple. ` +
               `\`xfail\` is a registered known-broken cell; an \`xpass\` means the registry ` +
               `is stale and fails the run.`;
             const { data: comments } = await github.rest.issues.listComments({

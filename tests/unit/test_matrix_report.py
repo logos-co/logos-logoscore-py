@@ -19,6 +19,9 @@ under test instead.
 """
 from __future__ import annotations
 
+import copy
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -389,3 +392,145 @@ def test_a_uint64_survives_into_the_page_exactly():
     r = R._render_call(case)
     assert r["sent"] == "echoUint(18446744073709551615)"
     assert r["want"] == "18446744073709551615"
+
+
+# ── one page, several contracts, and never one number across them ───────────
+# The merged report replaces the two separate pages. It is a VIEW-layer merge:
+# it takes the payloads the single-table pages already embed and lays them out
+# side by side. The properties below are the ones that make that honest rather
+# than convenient.
+
+
+def _payload_named(contract, counts):
+    p = copy.deepcopy(_payload())
+    p["meta"]["contract_name"] = contract
+    p["counts"] = counts
+    return p
+
+
+def _embedded(html):
+    m = re.search(r'<script id="report-data" type="application/json">(.*?)</script>',
+                  html, re.S)
+    return json.loads(m.group(1).replace("<\\/", "</"))
+
+
+def test_the_single_table_page_still_embeds_a_bare_payload():
+    # Not wrapped, not renamed: anything already reading this page — including
+    # the merge below — keeps working, and the single-table path is unchanged.
+    data = _embedded(R.render_html(_payload()))
+    assert "reports" not in data
+    assert data["meta"]["contract_name"] == "demo"
+    assert data["counts"] == {"pass": 8, "xfail": 4}
+
+
+def test_a_merged_page_carries_each_payload_unchanged():
+    a, b = _payload_named("full_api", {"pass": 8}), _payload_named("ext", {"pass": 3})
+    data = _embedded(R.render_merged_html([a, b]))
+    assert [r["name"] for r in data["reports"]] == ["full_api", "ext"]
+    # Byte-for-byte the object the standalone page shows, so the two views
+    # cannot disagree about what was measured.
+    for src, r in zip((a, b), data["reports"]):
+        assert r["payload"] == _embedded(R.render_html(src))
+
+
+def test_a_merged_page_never_blends_the_counts():
+    a, b = _payload_named("full_api", {"pass": 8}), _payload_named("ext", {"pass": 3})
+    data = _embedded(R.render_merged_html([a, b]))
+    # Each contract keeps its own counts and there is no total anywhere. A
+    # single blended "11 pass" would hide which contract owns a regression,
+    # which is worse than the two pages this replaces.
+    assert [r["payload"]["counts"] for r in data["reports"]] == [{"pass": 8}, {"pass": 3}]
+    assert "counts" not in data
+    for key in ("grid", "cases", "differential", "diffs", "registry", "axis"):
+        assert key not in data
+
+
+def test_a_merged_page_computes_no_cross_contract_differential():
+    a = _payload_named("full_api", {"pass": 8})
+    b = _payload_named("ext", {"pass": 3})
+    b["meta"]["providers"] = ["ext_a", "ext_b"]
+    b["differential"]["providers"] = ["ext_a", "ext_b"]
+    data = _embedded(R.render_merged_html([a, b]))
+    # A differential compares the providers OF ONE CONTRACT. The two tables have
+    # different providers and different cases, so there is nothing to compare
+    # across them — and the page must not invent it.
+    assert data["reports"][0]["payload"]["differential"]["providers"] == PROVIDERS
+    assert data["reports"][1]["payload"]["differential"]["providers"] == ["ext_a", "ext_b"]
+    assert "differential" not in data
+
+
+def test_each_contract_gets_its_own_id_namespace():
+    data = _embedded(R.render_merged_html(
+        [_payload_named("full_api", {}), _payload_named("full_api_ext", {})]))
+    assert [r["ns"] for r in data["reports"]] == ["full_api", "full_api_ext"]
+
+
+def test_two_contracts_with_the_same_name_still_get_distinct_namespaces():
+    # Colliding ids would make `#case-x` land in whichever contract came first,
+    # silently.
+    data = _embedded(R.render_merged_html(
+        [_payload_named("same", {}), _payload_named("same", {})]))
+    ns = [r["ns"] for r in data["reports"]]
+    assert len(set(ns)) == 2
+
+
+def test_every_section_of_a_contract_renders_behind_the_guard():
+    # The page is assembled with ONE innerHTML assignment, so an unguarded
+    # section that throws leaves <main> empty — a blank report that reads as
+    # "no data". This shipped once (renderNotMeasured was the unguarded one),
+    # and on a merged page it would take the OTHER contract down too.
+    body = R._HTML_TEMPLATE
+    sections = re.findall(r'<section id="\$\{esc\(nsid\((.*?)</section>', body, re.S)
+    assert len(sections) >= 7
+    for s in sections:
+        assert "safeSection(" in s, s
+    # ...and the panel as a whole, for anything that throws outside a section.
+    assert "function safePanel(" in body
+    assert "REPORTS.map(safePanel)" in body
+
+
+def test_the_filter_state_exists_before_anything_activates_a_contract():
+    # `let` is in a temporal dead zone until its declaration is evaluated, so an
+    # activate() above this block threw inside applyFilters and took every
+    # listener after it with it — chips, search and grid jumps all dead on a
+    # page that looked perfect.
+    body = R._HTML_TEMPLATE
+    assert body.index("let FILTER") < body.index("function activate(")
+    assert body.index("let FILTER") < body.index("activate(REPORTS[0].ns)")
+
+
+def test_a_payload_reads_back_from_the_page_it_was_embedded_in(tmp_path):
+    p = _payload()
+    page = tmp_path / "matrix.html"
+    page.write_text(R.render_html(p))
+    blob = tmp_path / "payload.json"
+    blob.write_text(json.dumps(p, ensure_ascii=False))
+    from_page = R.load_payload(page)
+    from_json = R.load_payload(blob)
+    # The two routes into the merge agree, so a merged page built from HTML says
+    # exactly what one built from the driver's --payload says.
+    assert R.render_merged_html([from_page]) == R.render_merged_html([from_json])
+
+
+def test_a_merged_page_is_not_itself_mergeable(tmp_path):
+    page = tmp_path / "merged.html"
+    page.write_text(R.render_merged_html([_payload()]))
+    with pytest.raises(SystemExit):
+        R.load_payload(page)
+
+
+def test_hrefs_are_matched_to_reports_by_position():
+    with pytest.raises(SystemExit):
+        R.render_merged_html([_payload(), _payload()], hrefs=["./only-one/"])
+
+
+def test_the_merge_cli_writes_one_page_from_several_reports(tmp_path):
+    a, b = tmp_path / "a.html", tmp_path / "b.html"
+    a.write_text(R.render_html(_payload_named("full_api", {"pass": 8})))
+    b.write_text(R.render_html(_payload_named("full_api_ext", {"pass": 3})))
+    out = tmp_path / "merged.html"
+    assert R._main(["--merge", str(a), str(b), "--href", "./full/", "./ext/",
+                    "-o", str(out)]) == 0
+    data = _embedded(out.read_text())
+    assert [r["name"] for r in data["reports"]] == ["full_api", "full_api_ext"]
+    assert [r["href"] for r in data["reports"]] == ["./full/", "./ext/"]

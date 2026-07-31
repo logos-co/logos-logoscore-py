@@ -214,7 +214,9 @@
               touch $out
             '';
         in
-        {
+        # `rec` so `conformance-matrix-merged` can name the two runs it is built
+        # from. It depends on them; it does not re-measure anything.
+        rec {
           unit = pkgs.runCommand "logoscore-py-unit-tests" {
             nativeBuildInputs = [ python ];
           } ''
@@ -312,6 +314,45 @@
               --no-color \
               2>&1 | tee $out/matrix-ext.txt
           '';
+
+          # ── the merged report ───────────────────────────────────────────
+          # ONE page, BOTH contracts, and nothing computed across them. A
+          # view-layer merge: it re-runs no measurement, it reads what the two
+          # runs above already wrote (each page carries its payload in
+          # `<script id="report-data">`) and lays them out as two labelled
+          # contracts on one page.
+          #
+          # A third DERIVATION rather than a third run, and the two gates stay
+          # separate on purpose: they measure different contracts against
+          # different providers, and one going red must not suppress the
+          # other's report. The consequence is that this derivation cannot
+          # build while either gate is red — which is right for a `check`, and
+          # exactly why CI does NOT get its landing page from here: CI merges
+          # the uploaded ARTIFACTS with the same script (see
+          # .github/workflows/conformance.yml), so the merged page still exists
+          # on the run where it is most worth reading.
+          #
+          # $out is laid out as the published site, so `nix build` produces
+          # something serveable as-is: index.html is the merged page, and
+          # full/ + ext/ are the standalone reports it links to.
+          conformance-matrix-merged =
+            pkgs.runCommand "logoscore-py-conformance-matrix-merged" {
+              nativeBuildInputs = [ python ];
+            } ''
+              mkdir -p $out/full $out/ext
+              cp ${conformance-matrix}/matrix.html     $out/full/index.html
+              cp ${conformance-matrix}/matrix.jsonl    $out/full/matrix.jsonl
+              cp ${conformance-matrix}/matrix.txt      $out/full/matrix.txt
+              cp ${conformance-matrix}/known-broken.md $out/full/known-broken.md
+              cp ${conformance-matrix-ext}/matrix-ext.html  $out/ext/index.html
+              cp ${conformance-matrix-ext}/matrix-ext.jsonl $out/ext/matrix.jsonl
+              cp ${conformance-matrix-ext}/matrix-ext.txt   $out/ext/matrix.txt
+              chmod -R u+w $out
+              ${python}/bin/python ${./conformance/matrix_report.py} \
+                --merge $out/full/index.html $out/ext/index.html \
+                --href  ./full/ ./ext/ \
+                -o $out/index.html
+            '';
 
           # One check per transport. CI's matrix fans them out; a local
           # `nix flake check` runs all three sequentially.
