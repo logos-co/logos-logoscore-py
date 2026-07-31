@@ -133,18 +133,25 @@ jobs:
           fi
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
-          mkdir -p "site/$BASE"
+          # Everything this job writes lives under $BASE/conformance/. The
+          # doc-test publisher in this repo already owns $BASE/index.html and
+          # $BASE/<os>/ (see the existing gh-pages tree: pr-6/index.html,
+          # pr-6/ubuntu-latest/...). Sharing a ref's landing page would mean
+          # whichever job finished last silently replaced the other's index.
+          # keep_files:true protects other DIRECTORIES, not a contested file.
+          ROOT="site/$BASE/conformance"
+          mkdir -p "$ROOT"
           found=""
           for table in full ext; do
             src="artifacts/conformance-report-$table/matrix.html"
             if [ -f "$src" ]; then
-              mkdir -p "site/$BASE/$table"
-              cp "$src" "site/$BASE/$table/index.html"
+              mkdir -p "$ROOT/$table"
+              cp "$src" "$ROOT/$table/index.html"
               # The plain-text and jsonl forms ride along: jsonl is what you diff
               # between two runs to see exactly which cells changed.
               for extra in matrix.txt matrix.jsonl known-broken.md; do
                 [ -f "artifacts/conformance-report-$table/$extra" ] \
-                  && cp "artifacts/conformance-report-$table/$extra" "site/$BASE/$table/$extra"
+                  && cp "artifacts/conformance-report-$table/$extra" "$ROOT/$table/$extra"
               done
               found="$found $table"
             fi
@@ -158,13 +165,13 @@ jobs:
             echo "<h1>LIDL conformance matrix</h1>"
             echo "<p><strong>$BASE</strong> · commit <code>${GITHUB_SHA::7}</code></p><ul>"
             for table in full ext; do
-              if [ -d "site/$BASE/$table" ]; then
+              if [ -d "$ROOT/$table" ]; then
                 echo "<li><a href=\"./$table/\">$table table</a> — also <a href=\"./$table/matrix.jsonl\">jsonl</a>, <a href=\"./$table/matrix.txt\">text</a></li>"
               fi
             done
             echo "</ul>"
             echo "<p>A cell is a (case × provider × consumer) triple. <code>xfail</code> is a registered known-broken cell; <code>xpass</code> means the registry is stale and fails the run.</p>"
-          } > "site/$BASE/index.html"
+          } > "$ROOT/index.html"
 
       - name: Deploy to gh-pages
         if: steps.arrange.outputs.found != ''
@@ -183,7 +190,7 @@ jobs:
             const base = '${{ steps.arrange.outputs.base }}';
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const url = `https://${owner}.github.io/${repo}/${base}/`;
+            const url = `https://${owner}.github.io/${repo}/${base}/conformance/`;
             const marker = '<!-- conformance-report -->';
             const body = `${marker}\n**Conformance matrix report:** ${url}\n\n` +
               `Each cell is a (case × provider × consumer) triple. ` +
