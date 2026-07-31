@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LIDL conformance matrix — full_api_ext</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --panel2:#0b0f14; --border:#30363d;
+    --text:#c9d1d9; --muted:#8b949e; --accent:#58a6ff;
+    --pass:#2ea043; --fail:#f85149; --known:#d29922; --xpass:#bc8cff;
+    --dim:#6e7681;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { position:sticky; top:0; z-index:10; background:var(--panel);
+    border-bottom:1px solid var(--border); padding:10px 20px; }
+  header .top { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .q { color:var(--muted); font-size:12.5px; }
+  .pill { padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600;
+    border:1px solid transparent; }
+  .pill.pass { background:rgba(46,160,67,.15); color:var(--pass); }
+  .pill.fail { background:rgba(248,81,73,.15); color:var(--fail); }
+  .pill.known { background:rgba(210,153,34,.15); color:var(--known);
+    background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(210,153,34,.18) 3px,rgba(210,153,34,.18) 6px); }
+  .pill.dim { background:rgba(110,118,129,.15); color:var(--muted); }
+  /* One tab per contract. The tab carries that contract's OWN counts and they
+     stay on screen whichever tab is active — the split is the point: a reader
+     must never have to click to find out which contract owns a failure. */
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
+  .tabs:empty { display:none; }
+  .tab { display:flex; flex-direction:column; gap:3px; align-items:flex-start;
+    background:var(--panel2); border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; cursor:pointer; color:var(--text); text-align:left;
+    font:inherit; }
+  .tab:hover { border-color:var(--accent); }
+  .tab.on { border-color:var(--accent); background:rgba(88,166,255,.08); }
+  .tab .tname { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-weight:700; font-size:13px; color:#fff; }
+  .tab.on .tname { color:var(--accent); }
+  .tab .tmeta { color:var(--dim); font-size:11px; }
+  .tab .tpills { display:flex; gap:5px; flex-wrap:wrap; }
+  .tab .pill { font-size:11px; padding:1px 8px; }
+  .contract.hide { display:none; }
+  .banner { border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:8px; background:var(--panel); padding:12px 16px; margin:0 0 6px; }
+  .banner h2 { font-size:15px; margin:0 0 4px; }
+  .banner p { color:var(--muted); font-size:12.5px; margin:0 0 8px; max-width:95ch; }
+  .banner a, .lede a, table.flat a { color:var(--accent); text-decoration:none; }
+  .banner a:hover, .lede a:hover, table.flat a:hover { text-decoration:underline; }
+  nav { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  nav a { color:var(--muted); font-size:12px; text-decoration:none; padding:2px 8px;
+    border:1px solid var(--border); border-radius:999px; }
+  nav a:hover { color:var(--accent); border-color:var(--accent); }
+  nav input { background:var(--bg); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:3px 8px; font-size:12px; min-width:190px; margin-left:auto; }
+  main { max-width:1500px; margin:0 auto; padding:18px 20px 80px; }
+  section { margin:34px 0 0; scroll-margin-top:96px; }
+  h2 { font-size:16px; margin:0 0 4px; color:#fff; }
+  h2 .sub { font-weight:400; font-size:12.5px; color:var(--muted); margin-left:8px; }
+  .lede { color:var(--muted); font-size:12.5px; margin:0 0 14px; max-width:90ch; }
+  table.grid { border-collapse:collapse; font-size:12.5px; }
+  table.grid th { color:var(--muted); font-weight:600; padding:4px 8px; text-align:right;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  table.grid th.ty { text-align:left; }
+  table.grid td { padding:2px 8px; text-align:right; border:1px solid transparent;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  table.grid td.ty { text-align:left; color:var(--text); font-weight:600; }
+  td.c { cursor:pointer; border-radius:4px; }
+  td.c:hover { border-color:var(--accent); }
+  td.na { color:var(--dim); cursor:default; }
+  td.unc { color:var(--fail); font-weight:700; }
+  .ok { color:var(--pass); }
+  .kn { color:var(--known); }
+  .bad { color:var(--fail); font-weight:700; }
+  .xp { color:var(--xpass); font-weight:700; }
+  .sk { color:var(--dim); }
+  .legend { color:var(--muted); font-size:12px; margin-top:10px; line-height:1.9; }
+  .legend b { color:var(--text); font-weight:600; }
+  .swatch { display:inline-block; padding:0 6px; border-radius:3px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .swatch.kn { background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(210,153,34,.22) 3px,rgba(210,153,34,.22) 6px); }
+  .card { border:1px solid var(--border); border-radius:8px; background:var(--panel);
+    padding:12px 16px; margin:10px 0; }
+  .card.known { border-left:3px solid var(--known); }
+  .card.fail { border-left:3px solid var(--fail); }
+  .card h3 { margin:0 0 6px; font-size:13.5px; color:#fff; }
+  .card h3 .tag { font-size:11px; color:var(--muted); font-weight:400; margin-left:8px; }
+  .kv { display:grid; grid-template-columns:max-content 1fr; gap:2px 14px;
+    font-size:12.5px; margin-top:8px; }
+  .kv dt { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:11.5px; white-space:nowrap; }
+  .kv dd { margin:0; max-width:100ch; }
+  .kv dd ul { margin:0; padding-left:18px; }
+  .kv dd li { margin-bottom:4px; }
+  .typeblock { border:1px solid var(--border); border-radius:8px; margin:10px 0;
+    overflow:hidden; }
+  .typehead { background:var(--panel); padding:8px 14px; display:flex; gap:14px;
+    align-items:baseline; flex-wrap:wrap; cursor:pointer; }
+  .typehead .name { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-weight:700; color:#fff; font-size:13.5px; }
+  .typehead .meta { color:var(--muted); font-size:12px; }
+  .typehead .pos { color:var(--dim); font-size:11.5px; margin-left:auto;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  table.cases { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.cases td { padding:5px 10px; border-top:1px solid var(--border);
+    vertical-align:top; }
+  table.cases tr.c:hover { background:rgba(88,166,255,.05); }
+  td.strip { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    white-space:nowrap; width:1%; letter-spacing:1px; }
+  td.strip .g { padding:0 1px; }
+  td.pos { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    white-space:nowrap; width:1%; }
+  td.diff { color:var(--dim); text-align:center; width:1%; }
+  td.diff.ne { color:var(--fail); font-weight:700; }
+  td.cid { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  td.cid .why { display:block; color:var(--muted); font-size:12px; margin-top:3px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    max-width:95ch; }
+  td.cid .call { display:block; color:var(--dim); font-size:11.5px; margin-top:2px; }
+  td.cid .call .arrow { color:var(--muted); }
+  pre.val .where { color:var(--dim); font-weight:400; }
+  .kv a, .card a { color:var(--accent); text-decoration:none; }
+  .kv a:hover, .card a:hover { text-decoration:underline; }
+  .kv dd p { margin:0 0 6px; }
+  .typeblock.folded table.cases { display:none; }
+  .chip { font-size:11.5px; color:var(--muted); border:1px solid var(--border);
+    border-radius:999px; padding:2px 9px; cursor:pointer; background:none; }
+  .chip.on { color:var(--accent); border-color:var(--accent); }
+  .kid { font-size:11px; padding:1px 6px; border-radius:4px; color:var(--known);
+    background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(210,153,34,.22) 3px,rgba(210,153,34,.22) 6px);
+    border:1px solid rgba(210,153,34,.4); margin-left:6px; }
+  .tagchip { font-size:10.5px; color:var(--dim); border:1px solid var(--border);
+    border-radius:3px; padding:0 4px; margin-left:5px; }
+  pre.val { background:var(--panel2); border:1px solid var(--border); border-radius:5px;
+    padding:6px 9px; margin:5px 0 0; font-size:11.5px; overflow-x:auto;
+    white-space:pre-wrap; word-break:break-all; color:#b9c1ca; }
+  pre.val b { color:var(--muted); font-weight:600; }
+  details summary { cursor:pointer; color:var(--accent); font-size:12px; }
+  details[open] summary { margin-bottom:8px; }
+  table.flat { width:100%; border-collapse:collapse; font-size:12px; }
+  table.flat th { text-align:left; color:var(--muted); font-weight:600;
+    border-bottom:1px solid var(--border); padding:4px 8px; }
+  table.flat td { padding:3px 8px; border-top:1px solid var(--border);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .hide { display:none !important; }
+  .foot { color:var(--dim); font-size:11.5px; margin-top:40px;
+    border-top:1px solid var(--border); padding-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>LIDL conformance matrix</h1>
+    <span class="q">does a value of type <b>T</b>, in position <b>P</b>, survive provider <b>R</b> &rarr; consumer <b>K</b> intact?</span>
+    <span id="pills" style="margin-left:auto"></span>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <nav>
+    <a id="navtop" class="hide" href="#contracts">contracts</a>
+    <a data-sec="grid" href="#grid">grid</a><a data-sec="differential" href="#differential">differential</a>
+    <a data-sec="cases" href="#cases">cases</a><a data-sec="register" href="#register">known-broken</a>
+    <a data-sec="notmeasured" href="#notmeasured">not measured</a><a data-sec="history" href="#history">history</a>
+    <a data-sec="all" href="#all">all cells</a>
+    <span style="width:14px"></span>
+    <button class="chip on" data-f="all">all cases</button>
+    <button class="chip" data-f="notgreen">not plain pass</button>
+    <button class="chip" data-f="known">known-broken</button>
+    <button class="chip" data-f="hostile">hostile &amp; adversarial</button>
+    <input id="q" type="search" placeholder="filter cases (type, id, tag)&hellip;">
+  </nav>
+</header>
+<main id="main"></main>
+<script id="report-data" type="application/json">{"meta": {"generated": "2026-07-31T19:27:53+00:00", "consumer": "py", "consumers": ["py"], "providers": ["test_fullapi_ext_rust", "test_fullapi_ext_cpp"], "provider_dirs": {"test_fullapi_ext_rust": "/nix/store/imwrmzz2kq4kw86nara2avz67yyyazps-logos-test_fullapi_ext_rust-module-lib-install/modules", "test_fullapi_ext_cpp": "/nix/store/7ha0rziha51vg5wq0w6wqdnc5ikznl8g-logos-test_fullapi_ext_cpp-module-lib-install/modules"}, "paths": {"cases": "/nix/store/f3spjc7si7hvmq8vsarf56na8y7rpfkm-source/conformance/ext-cases.json", "known": "/nix/store/f3spjc7si7hvmq8vsarf56na8y7rpfkm-source/conformance/known-ext.json", "contract": "/nix/store/f3spjc7si7hvmq8vsarf56na8y7rpfkm-source/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl", "logoscore": "/nix/store/2l79b3nl3jkfnds28hg3y40wmn2088sv-logos-logoscore-cli/bin/logoscore"}, "contract_name": "full_api_ext", "case_count": 39, "cell_count": 78}, "counts": {"pass": 76, "xfail": 2, "differential-provider-pass": 37}, "axis": {"types": ["?tstr", "Blob", "Opt", "Wrapper", "bool", "bstr", "tstr", "uint", "{tstr:Blob}", "{tstr:[bstr]}", "{tstr:bstr}", "{tstr:int}", "{tstr:tstr}", "[Blob]", "[Opt]", "[[int]]", "[bstr]"], "positions": ["method_arg", "method_return", "event_param", "record_field"]}, "grid": {"?tstr": {"method_arg": {"state": "covered", "cases": ["Optional/scalar/present", "Optional/scalar/empty-is-null", "Optional/scalar/empty-string-is-a-value", "hostile/Optional/scalar/wrong-type"], "tally": {"pass": 3, "xfail": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["Optional/scalar/present", "Optional/scalar/empty-is-null", "Optional/scalar/empty-string-is-a-value"], "tally": {"pass": 2, "xfail": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "Blob": {"method_arg": {"state": "covered", "cases": ["Record/nominal"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["Record/nominal"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "covered", "cases": ["event/Record"], "tally": {"pass": 1}, "declared": true}, "record_field": {"state": "covered", "cases": ["Record/bstr-field", "Record/uint-field/boundary", "Record/empty-strings"], "tally": {"pass": 3}, "declared": false}}, "Opt": {"method_arg": {"state": "covered", "cases": ["Optional/record/all-present"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["Optional/record/all-present"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "covered", "cases": ["Optional/record/all-absent", "Optional/record/explicit-null", "hostile/Optional/record/required-absent", "hostile/Optional/record/required-null"], "tally": {"pass": 4}, "declared": false}}, "Wrapper": {"method_arg": {"state": "covered", "cases": ["Record-in-Record"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["Record-in-Record"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "covered", "cases": ["Record-in-Record"], "tally": {"pass": 1}, "declared": false}}, "bool": {"method_arg": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "method_return": {"state": "covered", "cases": ["bool/fire-return"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "bstr": {"method_arg": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "method_return": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "covered", "cases": ["bstr/padded-base64", "Optional/record/bstr-present-high-bytes", "Optional/record/bstr-absent"], "tally": {"pass": 3}, "declared": false}}, "tstr": {"method_arg": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "method_return": {"state": "covered", "cases": ["identity/whoami"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "covered", "cases": ["Optional/record/empty-value-is-not-absence", "hostile/Optional/record/wrong-type-in-optional-field"], "tally": {"pass": 2}, "declared": false}}, "uint": {"method_arg": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "method_return": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "covered", "cases": ["Optional/record/uint-boundary-present", "Optional/record/uint-absent"], "tally": {"pass": 2}, "declared": false}}, "{tstr:Blob}": {"method_arg": {"state": "covered", "cases": ["{tstr:Record}/nominal"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["{tstr:Record}/nominal"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "{tstr:[bstr]}": {"method_arg": {"state": "covered", "cases": ["{tstr:[bstr]}/nested"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["{tstr:[bstr]}/nested"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "{tstr:bstr}": {"method_arg": {"state": "covered", "cases": ["{tstr:bstr}/nominal"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["{tstr:bstr}/nominal"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "{tstr:int}": {"method_arg": {"state": "covered", "cases": ["{tstr:int}/nominal", "{tstr:int}/empty"], "tally": {"pass": 2}, "declared": true}, "method_return": {"state": "covered", "cases": ["{tstr:int}/nominal", "{tstr:int}/empty"], "tally": {"pass": 2}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "{tstr:tstr}": {"method_arg": {"state": "covered", "cases": ["{tstr:tstr}/nominal"], "tally": {"pass": 1}, "declared": true}, "method_return": {"state": "covered", "cases": ["{tstr:tstr}/nominal"], "tally": {"pass": 1}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "[Blob]": {"method_arg": {"state": "covered", "cases": ["[Record]/nominal", "[Record]/empty"], "tally": {"pass": 2}, "declared": true}, "method_return": {"state": "covered", "cases": ["[Record]/nominal", "[Record]/empty"], "tally": {"pass": 2}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "[Opt]": {"method_arg": {"state": "covered", "cases": ["Optional/[Record]/mixed-presence", "Optional/[Record]/empty"], "tally": {"pass": 2}, "declared": true}, "method_return": {"state": "covered", "cases": ["Optional/[Record]/mixed-presence", "Optional/[Record]/empty"], "tally": {"pass": 2}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "[[int]]": {"method_arg": {"state": "covered", "cases": ["[[int]]/nominal", "[[int]]/empty-inner"], "tally": {"pass": 2}, "declared": true}, "method_return": {"state": "covered", "cases": ["[[int]]/nominal", "[[int]]/empty-inner"], "tally": {"pass": 2}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}, "[bstr]": {"method_arg": {"state": "covered", "cases": ["[bstr]/nominal", "[bstr]/empty-element", "[bstr]/lenient-plain-string"], "tally": {"pass": 3}, "declared": true}, "method_return": {"state": "covered", "cases": ["[bstr]/nominal", "[bstr]/empty-element"], "tally": {"pass": 2}, "declared": true}, "event_param": {"state": "n/a", "cases": [], "tally": {}, "declared": false}, "record_field": {"state": "n/a", "cases": [], "tally": {}, "declared": false}}}, "cases": [{"id": "Optional/scalar/present", "type": "?tstr", "position": "method_arg,method_return", "cells": [["?tstr", "method_arg"], ["?tstr", "method_return"]], "tags": ["nominal", "optional"], "tag_rank": 1, "why": "the `?T` TYPE-KIND spelling, which spec.md:179,184-185 binds to the same meaning as the `? name: T` field flag that Opt uses. The two must emit identical code; today they do not even agree at runtime — a flag-optional field is validated against its base type while `?tstr` falls to args::Ty::Any and is not validated at all — which is why both spellings are in one contract.", "call": "echoOptional", "fire": null, "args": ["hi"], "value": null, "expect": "hi", "expect_by_provider": null, "render": {"sent": "echoOptional(\"hi\")", "want": "\"hi\"", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/scalar/present", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/scalar/empty-is-null", "type": "?tstr", "position": "method_arg,method_return", "cells": [["?tstr", "method_arg"], ["?tstr", "method_return"]], "tags": ["optional", "empty"], "tag_rank": 3, "why": "a POSITIONAL slot has no key to omit and the arity must never change, so empty is spelled null — in the argument and in the return. Two independent blockers today, both registered: the py driver cannot SEND this argument (logoscore-py's _arg_to_str falls through to str(None), so the daemon receives the literal string \"None\"), and a null RETURN is the failure token further up (logos_json_convert turns null into an invalid QVariant and core_service reports METHOD_FAILED), so an empty optional return is currently indistinguishable from a failed call.", "call": "echoOptional", "fire": null, "args": [null], "value": null, "expect": null, "expect_by_provider": null, "render": {"sent": "echoOptional(null)", "want": "", "want_kind": ""}, "results": {"test_fullapi_ext_rust|py": {"status": "xfail", "provider": "test_fullapi_ext_rust", "consumer": "py", "known": "OPT2", "expected": null, "expected_s": "null", "actual": "None", "actual_s": "\"None\""}, "test_fullapi_ext_cpp|py": {"status": "xfail", "provider": "test_fullapi_ext_cpp", "consumer": "py", "known": "OPT2", "expected": null, "expected_s": "null", "actual": "None", "actual_s": "\"None\""}}, "rollup": "xfail", "known": ["OPT2"], "differential": {"case": "Optional/scalar/empty-is-null", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": "OPT2"}}, {"id": "Optional/scalar/empty-string-is-a-value", "type": "?tstr", "position": "method_arg,method_return", "cells": [["?tstr", "method_arg"], ["?tstr", "method_return"]], "tags": ["optional", "empty", "hostile"], "tag_rank": 3, "why": "the positional twin of Optional/record/empty-value-is-not-absence: \"\" is a present value and must come back \"\", not null. A binding that models `?tstr` as \"a string, possibly empty\" — the natural shortcut in any language whose string type has no null — collapses the two states exactly here.", "call": "echoOptional", "fire": null, "args": [""], "value": null, "expect": "", "expect_by_provider": null, "render": {"sent": "echoOptional(\"\")", "want": "\"\"", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/scalar/empty-string-is-a-value", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "hostile/Optional/scalar/wrong-type", "type": "?tstr", "position": "method_arg", "cells": [["?tstr", "method_arg"]], "tags": ["hostile", "optional"], "tag_rank": 9, "why": "R4, and the cell a lazy fix cannot pass: optional widens the domain by exactly ONE inhabitant (empty); it does not disable type checking. 42 is neither a tstr nor empty, so it must be REJECTED — not coerced, and not quietly treated as empty. Today the Rust provider ACCEPTS it and echoes 42 because ty_descriptor's catch-all makes `?tstr` args::Ty::Any, and both C++ paths spell Optional as an untyped QVariant/any for the same reason. Modelling `?T` as `any` passes every other optional cell in this table and fails only this one.", "call": "echoOptional", "fire": null, "args": [42], "value": null, "expect": {"__error__": "dispatch_failed"}, "expect_by_provider": null, "render": {"sent": "echoOptional(42)", "want": "{\"__error__\": \"dispatch_failed\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "hostile/Optional/scalar/wrong-type", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "event/Record", "type": "Blob", "position": "event_param", "cells": [["Blob", "event_param"]], "tags": [], "tag_rank": 0, "why": null, "call": "blobEvent", "fire": "fireBlobEvent", "args": null, "value": {"id": "e", "n": 7, "payload": {"_bytes": "aGk"}}, "expect": null, "expect_by_provider": null, "render": {"sent": "fireBlobEvent {\"id\": \"e\", \"n\": 7, \"payload\": {\"_bytes\": \"aGk\"}}", "want": "", "want_kind": ""}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "event/Record", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Record/nominal", "type": "Blob", "position": "method_arg,method_return", "cells": [["Blob", "method_arg"], ["Blob", "method_return"]], "tags": ["nominal", "record"], "tag_rank": 1, "why": "a record reaches the Rust author as a real struct; the round trip goes through the generated to_json/from_json, so this passing means BOTH directions encode the fields", "call": "echoBlob", "fire": null, "args": [{"id": "x", "n": 42, "payload": {"_bytes": "aGk"}}], "value": null, "expect": {"id": "x", "n": 42, "payload": {"_bytes": "aGk"}}, "expect_by_provider": null, "render": {"sent": "echoBlob({\"id\": \"x\", \"n\": 42, \"payload\": {\"_bytes\": \"aGk\"}})", "want": "{\"id\": \"x\", \"n\": 42, \"payload\": {\"_bytes\": \"aGk\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Record/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Record/bstr-field", "type": "Blob", "position": "record_field", "cells": [["Blob", "record_field"]], "tags": ["boundary", "record", "bytes-at-depth"], "tag_rank": 2, "why": "a bstr FIELD with bytes >= 0x80 — the reason records get hand-emitted to_json instead of a serde derive. See known-ext.json E1.", "call": "echoBlob", "fire": null, "args": [{"id": "x", "n": 42, "payload": {"_bytes": "AID_"}}], "value": null, "expect": {"id": "x", "n": 42, "payload": {"_bytes": "AID_"}}, "expect_by_provider": null, "render": {"sent": "echoBlob({\"id\": \"x\", \"n\": 42, \"payload\": {\"_bytes\": \"AID_\"}})", "want": "{\"id\": \"x\", \"n\": 42, \"payload\": {\"_bytes\": \"AID_\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Record/bstr-field", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Record/uint-field/boundary", "type": "Blob", "position": "record_field", "cells": [["Blob", "record_field"]], "tags": ["boundary", "record"], "tag_rank": 2, "why": "M1 seen through a record field: the provider rejects it with `expected integer at arg0.n, got number` — the field-path diagnostic is itself worth pinning", "call": "echoBlob", "fire": null, "args": [{"id": "x", "n": 18446744073709551615, "payload": {"_bytes": ""}}], "value": null, "expect": {"id": "x", "n": 18446744073709551615, "payload": {"_bytes": ""}}, "expect_by_provider": null, "render": {"sent": "echoBlob({\"id\": \"x\", \"n\": 18446744073709551615, \"payload\": {\"_bytes\": \"\"}})", "want": "{\"id\": \"x\", \"n\": 18446744073709551615, \"payload\": {\"_bytes\": \"\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Record/uint-field/boundary", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Record/empty-strings", "type": "Blob", "position": "record_field", "cells": [["Blob", "record_field"]], "tags": ["empty", "record"], "tag_rank": 3, "why": null, "call": "echoBlob", "fire": null, "args": [{"id": "", "n": 0, "payload": {"_bytes": ""}}], "value": null, "expect": {"id": "", "n": 0, "payload": {"_bytes": ""}}, "expect_by_provider": null, "render": {"sent": "echoBlob({\"id\": \"\", \"n\": 0, \"payload\": {\"_bytes\": \"\"}})", "want": "{\"id\": \"\", \"n\": 0, \"payload\": {\"_bytes\": \"\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Record/empty-strings", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/all-present", "type": "Opt", "position": "method_arg,method_return", "cells": [["Opt", "method_arg"], ["Opt", "method_return"]], "tags": ["nominal", "optional", "record"], "tag_rank": 1, "why": "the baseline: every optional field carries a VALUE, so nothing about optionality is exercised except that declaring it did not change the ordinary path. If this cell ever diverges from Record/nominal, optional support broke the case that was already working.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": "m", "count": 7, "blob": {"_bytes": "aGk"}}], "value": null, "expect": {"required": "r", "maybe": "m", "count": 7, "blob": {"_bytes": "aGk"}}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": \"m\", \"count\": 7, \"blob\": {\"_bytes\": \"aGk\"}})", "want": "{\"required\": \"r\", \"maybe\": \"m\", \"count\": 7, \"blob\": {\"_bytes\": \"aGk\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/all-present", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/all-absent", "type": "Opt", "position": "record_field", "cells": [["Opt", "record_field"]], "tags": ["optional", "record", "empty"], "tag_rank": 3, "why": "absent decodes to EMPTY — not an error, not a default — and empty re-encodes by OMITTING the key, because a named slot has a key to leave out and that is the one canonical spelling. The echo must come back with exactly one key. Two wrong answers this catches: {\"required\":\"r\",\"maybe\":null,…}, i.e. empty spelled as null in a NAMED slot (a second wire form the contract does not have), and a rejection — which is what the Rust provider answers today, `expected string at arg0.maybe, got null`, because args::Ty::Record types a flag-optional field by its base type.", "call": "echoOpt", "fire": null, "args": [{"required": "r"}], "value": null, "expect": {"required": "r"}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\"})", "want": "{\"required\": \"r\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/all-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/explicit-null", "type": "Opt", "position": "record_field", "cells": [["Opt", "record_field"]], "tags": ["optional", "record", "empty"], "tag_rank": 3, "why": "omitted and explicit-null are the SAME state on decode and DIFFERENT on encode, so the round trip is CANONICALISING rather than identity: null in, key gone out. This cell pins that asymmetry, and it is the reason the expectation is not simply the argument echoed back — a decoder that passed its input through verbatim would satisfy an identity check and still be wrong about which of the two spellings is canonical.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": null, "count": null, "blob": null}], "value": null, "expect": {"required": "r"}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": null, \"count\": null, \"blob\": null})", "want": "{\"required\": \"r\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/explicit-null", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "hostile/Optional/record/required-absent", "type": "Opt", "position": "record_field", "cells": [["Opt", "record_field"]], "tags": ["hostile", "optional", "record"], "tag_rank": 6, "why": "the liberal decode is scoped to OPTIONAL slots. A missing REQUIRED field stays an error, unchanged. This guards the over-broad fix: making the record decoder tolerate absence everywhere would turn all four absent-field cells green and silently delete the difference between `required: tstr` and `? required: tstr`.", "call": "echoOpt", "fire": null, "args": [{"maybe": "m"}], "value": null, "expect": {"__error__": "dispatch_failed"}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"maybe\": \"m\"})", "want": "{\"__error__\": \"dispatch_failed\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "hostile/Optional/record/required-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "hostile/Optional/record/required-null", "type": "Opt", "position": "record_field", "cells": [["Opt", "record_field"]], "tags": ["hostile", "optional", "record"], "tag_rank": 6, "why": "the other half of that guard: an explicit null in a REQUIRED slot is still an error, even though the identical token is a legal empty one field over. Absent and null are one state; which slot they land in is what decides whether the state is legal.", "call": "echoOpt", "fire": null, "args": [{"required": null, "maybe": "m"}], "value": null, "expect": {"__error__": "dispatch_failed"}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": null, \"maybe\": \"m\"})", "want": "{\"__error__\": \"dispatch_failed\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "hostile/Optional/record/required-null", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Record-in-Record", "type": "Wrapper", "position": "method_arg,method_return,record_field", "cells": [["Wrapper", "method_arg"], ["Wrapper", "method_return"], ["Wrapper", "record_field"]], "tags": ["nominal", "record"], "tag_rank": 1, "why": "a record holding a record, a [tstr] and a [Record] — the recursion the generated encoders have to get right", "call": "echoWrapper", "fire": null, "args": [{"inner": {"id": "i", "n": 1, "payload": {"_bytes": "aGk"}}, "tags": ["a", "b"], "blobs": [{"id": "b0", "n": 2, "payload": {"_bytes": "Ynll"}}]}], "value": null, "expect": {"inner": {"id": "i", "n": 1, "payload": {"_bytes": "aGk"}}, "tags": ["a", "b"], "blobs": [{"id": "b0", "n": 2, "payload": {"_bytes": "Ynll"}}]}, "expect_by_provider": null, "render": {"sent": "echoWrapper({\"inner\": {\"id\": \"i\", \"n\": 1, \"payload\": {\"_bytes\": \"aGk\"}}, \"tags\": [\"a\", \"b\"], \"blobs\": [{\"id\": \"b0\", \"n\": 2, \"payload\": {\"_bytes\": \"Ynll\"}}]})", "want": "{\"inner\": {\"id\": \"i\", \"n\": 1, \"payload\": {\"_bytes\": \"aGk\"}}, \"tags\": [\"a\", \"b\"], \"blobs\": [{\"id\": \"b0\", \"n\": 2, \"payload\": {\"_bytes\": \"Ynll\"}}]}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Record-in-Record", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "bool/fire-return", "type": "bool", "position": "method_return", "cells": [["bool", "method_return"]], "tags": ["nominal"], "tag_rank": 1, "why": "the fire shim's bool return is a declared cell — the event case covers the payload, not this", "call": "fireBlobEvent", "fire": null, "args": [{"id": "e", "n": 7, "payload": {"_bytes": "aGk"}}], "value": null, "expect": true, "expect_by_provider": null, "render": {"sent": "fireBlobEvent({\"id\": \"e\", \"n\": 7, \"payload\": {\"_bytes\": \"aGk\"}})", "want": "true", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "bool/fire-return", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/bstr-present-high-bytes", "type": "bstr", "position": "record_field", "cells": [["bstr", "record_field"]], "tags": ["optional", "record", "bytes-at-depth", "boundary"], "tag_rank": 2, "why": "bytes ride their own canonical {\"_bytes\"} tag and have their own history of dying one level down (E1: every byte >= 0x80 became U+FFFD; E2: an empty nested bstr arrived as null). An OPTIONAL bstr wraps exactly that path in one more decode, and 0x00/0x80/0xFF is the payload that tells a real byte decode from a UTF-8 round trip.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": "m", "count": 1, "blob": {"_bytes": "AID_"}}], "value": null, "expect": {"required": "r", "maybe": "m", "count": 1, "blob": {"_bytes": "AID_"}}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": \"m\", \"count\": 1, \"blob\": {\"_bytes\": \"AID_\"}})", "want": "{\"required\": \"r\", \"maybe\": \"m\", \"count\": 1, \"blob\": {\"_bytes\": \"AID_\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/bstr-present-high-bytes", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "bstr/padded-base64", "type": "bstr", "position": "record_field", "cells": [["bstr", "record_field"]], "tags": ["boundary", "bytes-at-depth"], "tag_rank": 2, "why": "PADDED base64 in a canonical tag, MEASURED: both providers decode it correctly on this path and re-emit the canonical unpadded form. Recorded because nothing covered padded input anywhere — every other bytes cell sends unpadded — and because the cdylib backend carries a SECOND byte decoder that bails on any non-alphabet character, returning an empty vector with no error. That decoder is not on this record-field path, so this cell is a regression guard for the codec unification rather than a baseline for a live defect. I predicted it would fail here and it did not; the expectation is what was measured.", "call": "echoBlob", "fire": null, "args": [{"id": "x", "n": 1, "payload": {"_bytes": "Zm9vYg=="}}], "value": null, "expect": {"id": "x", "n": 1, "payload": {"_bytes": "Zm9vYg"}}, "expect_by_provider": null, "render": {"sent": "echoBlob({\"id\": \"x\", \"n\": 1, \"payload\": {\"_bytes\": \"Zm9vYg==\"}})", "want": "{\"id\": \"x\", \"n\": 1, \"payload\": {\"_bytes\": \"Zm9vYg\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "bstr/padded-base64", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/bstr-absent", "type": "bstr", "position": "record_field", "cells": [["bstr", "record_field"]], "tags": ["optional", "record", "empty"], "tag_rank": 3, "why": "the byte-string half of the empty/absent confusion, and the sharper one: an absent bstr must NOT arrive as {\"_bytes\": \"\"}. E2's history is that a zero-length nested bstr was already being turned into null in one direction, so the obvious repair — decode null to an empty vector — closes E2 and erases absence in the same edit. This cell is what stops that.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": "m", "count": 1}], "value": null, "expect": {"required": "r", "maybe": "m", "count": 1}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": \"m\", \"count\": 1})", "want": "{\"required\": \"r\", \"maybe\": \"m\", \"count\": 1}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/bstr-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "identity/whoami", "type": "tstr", "position": "method_return", "cells": [["tstr", "method_return"]], "tags": ["nominal"], "tag_rank": 1, "why": null, "call": "whoAmI", "fire": null, "args": [], "value": null, "expect": null, "expect_by_provider": {"test_fullapi_ext_rust": "test_fullapi_ext_rust", "test_fullapi_ext_cpp": "test_fullapi_ext_cpp"}, "render": {"sent": "whoAmI()", "want": "", "want_kind": "identity"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "identity/whoami", "consumer": "py", "declared": true, "agree": false, "values": {"test_fullapi_ext_rust": "test_fullapi_ext_rust", "test_fullapi_ext_cpp": "test_fullapi_ext_cpp"}, "kind": "identity", "values_s": {"test_fullapi_ext_rust": "\"test_fullapi_ext_rust\"", "test_fullapi_ext_cpp": "\"test_fullapi_ext_cpp\""}}}, {"id": "Optional/record/empty-value-is-not-absence", "type": "tstr", "position": "record_field", "cells": [["tstr", "record_field"]], "tags": ["optional", "record", "empty", "hostile"], "tag_rank": 3, "why": "THE TRAP. \"\", 0 and the zero-length byte string are VALUES; only the single empty inhabitant (None / nullopt / invalid QVariant) is absence. A binding that reaches for a falsy test — `if (!v.maybe.empty())`, `if not v.count`, serde's skip_serializing_if — drops all three keys here while passing every other optional cell in this table. Present-and-empty must round-trip present.", "call": "echoOpt", "fire": null, "args": [{"required": "", "maybe": "", "count": 0, "blob": {"_bytes": ""}}], "value": null, "expect": {"required": "", "maybe": "", "count": 0, "blob": {"_bytes": ""}}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"\", \"maybe\": \"\", \"count\": 0, \"blob\": {\"_bytes\": \"\"}})", "want": "{\"required\": \"\", \"maybe\": \"\", \"count\": 0, \"blob\": {\"_bytes\": \"\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/empty-value-is-not-absence", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "hostile/Optional/record/wrong-type-in-optional-field", "type": "tstr", "position": "record_field", "cells": [["tstr", "record_field"]], "tags": ["hostile", "optional", "record"], "tag_rank": 6, "why": "R4 through a field path — the diagnostic should name arg0.maybe. This cell PASSES today by accident (args::Ty::Record types `? maybe: tstr` as Tstr and rejects the int), and that is precisely why it is worth writing down: the obvious implementation of optional decoding, o.get(\"maybe\").and_then(|v| v.as_str()), turns a present-but-wrong value into None — it would make every absent-field cell pass and REGRESS this one.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": 42}], "value": null, "expect": {"__error__": "dispatch_failed"}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": 42})", "want": "{\"__error__\": \"dispatch_failed\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "hostile/Optional/record/wrong-type-in-optional-field", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/uint-boundary-present", "type": "uint", "position": "record_field", "cells": [["uint", "record_field"]], "tags": ["optional", "record", "boundary"], "tag_rank": 2, "why": "optionality must not cost precision. uint64 max is the value that degraded to a double once nested (M1) and again through a record field (E3, closed by the codec unification); wrapping that same field in an optional adds a decode hop on every backend, and this is the cell that catches the hop reintroducing a double.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": "m", "count": 18446744073709551615, "blob": {"_bytes": ""}}], "value": null, "expect": {"required": "r", "maybe": "m", "count": 18446744073709551615, "blob": {"_bytes": ""}}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": \"m\", \"count\": 18446744073709551615, \"blob\": {\"_bytes\": \"\"}})", "want": "{\"required\": \"r\", \"maybe\": \"m\", \"count\": 18446744073709551615, \"blob\": {\"_bytes\": \"\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/uint-boundary-present", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/record/uint-absent", "type": "uint", "position": "record_field", "cells": [["uint", "record_field"]], "tags": ["optional", "record", "empty"], "tag_rank": 3, "why": "an absent NUMBER, isolated from the absent string: the failure mode here is a decoder that default-constructs a missing uint and emits \"count\": 0, which is indistinguishable from the real 0 that Optional/record/empty-value-is-not-absence sends on purpose. Absent must come back absent.", "call": "echoOpt", "fire": null, "args": [{"required": "r", "maybe": "m", "blob": {"_bytes": "aGk"}}], "value": null, "expect": {"required": "r", "maybe": "m", "blob": {"_bytes": "aGk"}}, "expect_by_provider": null, "render": {"sent": "echoOpt({\"required\": \"r\", \"maybe\": \"m\", \"blob\": {\"_bytes\": \"aGk\"}})", "want": "{\"required\": \"r\", \"maybe\": \"m\", \"blob\": {\"_bytes\": \"aGk\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/record/uint-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "{tstr:Record}/nominal", "type": "{tstr:Blob}", "position": "method_arg,method_return", "cells": [["{tstr:Blob}", "method_arg"], ["{tstr:Blob}", "method_return"]], "tags": ["nominal", "record"], "tag_rank": 1, "why": "codegen types [Record] but NOT {tstr: Record}, so this one arrives untyped — which is exactly why it is a separate cell", "call": "echoBlobMap", "fire": null, "args": [{"k": {"id": "a", "n": 1, "payload": {"_bytes": "aGk"}}}], "value": null, "expect": {"k": {"id": "a", "n": 1, "payload": {"_bytes": "aGk"}}}, "expect_by_provider": null, "render": {"sent": "echoBlobMap({\"k\": {\"id\": \"a\", \"n\": 1, \"payload\": {\"_bytes\": \"aGk\"}}})", "want": "{\"k\": {\"id\": \"a\", \"n\": 1, \"payload\": {\"_bytes\": \"aGk\"}}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "{tstr:Record}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "{tstr:[bstr]}/nested", "type": "{tstr:[bstr]}", "position": "method_arg,method_return", "cells": [["{tstr:[bstr]}", "method_arg"], ["{tstr:[bstr]}", "method_return"]], "tags": ["nominal", "bytes-at-depth"], "tag_rank": 1, "why": "bytes two containers deep", "call": "echoMapOfBytesLists", "fire": null, "args": [{"k": [{"_bytes": "aGk"}]}], "value": null, "expect": {"k": [{"_bytes": "aGk"}]}, "expect_by_provider": null, "render": {"sent": "echoMapOfBytesLists({\"k\": [{\"_bytes\": \"aGk\"}]})", "want": "{\"k\": [{\"_bytes\": \"aGk\"}]}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "{tstr:[bstr]}/nested", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "{tstr:bstr}/nominal", "type": "{tstr:bstr}", "position": "method_arg,method_return", "cells": [["{tstr:bstr}", "method_arg"], ["{tstr:bstr}", "method_return"]], "tags": ["boundary", "bytes-at-depth"], "tag_rank": 2, "why": null, "call": "echoBytesMap", "fire": null, "args": [{"k": {"_bytes": "AID_"}}], "value": null, "expect": {"k": {"_bytes": "AID_"}}, "expect_by_provider": null, "render": {"sent": "echoBytesMap({\"k\": {\"_bytes\": \"AID_\"}})", "want": "{\"k\": {\"_bytes\": \"AID_\"}}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "{tstr:bstr}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "{tstr:int}/nominal", "type": "{tstr:int}", "position": "method_arg,method_return", "cells": [["{tstr:int}", "method_arg"], ["{tstr:int}", "method_return"]], "tags": ["boundary"], "tag_rank": 2, "why": "a TYPED map, and its values carry the 64-bit range", "call": "echoIntMap", "fire": null, "args": [{"a": -1, "b": 9007199254740993}], "value": null, "expect": {"a": -1, "b": 9007199254740993}, "expect_by_provider": null, "render": {"sent": "echoIntMap({\"a\": -1, \"b\": 9007199254740993})", "want": "{\"a\": -1, \"b\": 9007199254740993}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "{tstr:int}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "{tstr:int}/empty", "type": "{tstr:int}", "position": "method_arg,method_return", "cells": [["{tstr:int}", "method_arg"], ["{tstr:int}", "method_return"]], "tags": ["empty"], "tag_rank": 3, "why": null, "call": "echoIntMap", "fire": null, "args": [{}], "value": null, "expect": {}, "expect_by_provider": null, "render": {"sent": "echoIntMap({})", "want": "{}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "{tstr:int}/empty", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "{tstr:tstr}/nominal", "type": "{tstr:tstr}", "position": "method_arg,method_return", "cells": [["{tstr:tstr}", "method_arg"], ["{tstr:tstr}", "method_return"]], "tags": ["nominal"], "tag_rank": 1, "why": null, "call": "echoStringMap", "fire": null, "args": [{"a": "x", "b": ""}], "value": null, "expect": {"a": "x", "b": ""}, "expect_by_provider": null, "render": {"sent": "echoStringMap({\"a\": \"x\", \"b\": \"\"})", "want": "{\"a\": \"x\", \"b\": \"\"}", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "{tstr:tstr}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "[Record]/nominal", "type": "[Blob]", "position": "method_arg,method_return", "cells": [["[Blob]", "method_arg"], ["[Blob]", "method_return"]], "tags": ["nominal", "record"], "tag_rank": 1, "why": null, "call": "echoBlobList", "fire": null, "args": [[{"id": "a", "n": 1, "payload": {"_bytes": "aGk"}}, {"id": "b", "n": 2, "payload": {"_bytes": ""}}]], "value": null, "expect": [{"id": "a", "n": 1, "payload": {"_bytes": "aGk"}}, {"id": "b", "n": 2, "payload": {"_bytes": ""}}], "expect_by_provider": null, "render": {"sent": "echoBlobList([{\"id\": \"a\", \"n\": 1, \"payload\": {\"_bytes\": \"aGk\"}}, {\"id\": \"b\", \"n\": 2, \"payload\": {\"_bytes\": \"\"}}])", "want": "[{\"id\": \"a\", \"n\": 1, \"payload\": {\"_bytes\": \"aGk\"}}, {\"id\": \"b\", \"n\": 2, \"payload\": {\"_bytes\": \"\"}}]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[Record]/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "[Record]/empty", "type": "[Blob]", "position": "method_arg,method_return", "cells": [["[Blob]", "method_arg"], ["[Blob]", "method_return"]], "tags": ["empty", "record"], "tag_rank": 3, "why": null, "call": "echoBlobList", "fire": null, "args": [[]], "value": null, "expect": [], "expect_by_provider": null, "render": {"sent": "echoBlobList([])", "want": "[]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[Record]/empty", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/[Record]/empty", "type": "[Opt]", "position": "method_arg,method_return", "cells": [["[Opt]", "method_arg"], ["[Opt]", "method_return"]], "tags": ["optional", "record", "empty"], "tag_rank": 3, "why": "an empty list whose element type is a record with optional fields: an empty array is where an element type gets lost ([[int]]/empty-inner), and an optional element type is one more thing to lose.", "call": "echoOptList", "fire": null, "args": [[]], "value": null, "expect": [], "expect_by_provider": null, "render": {"sent": "echoOptList([])", "want": "[]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/[Record]/empty", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "Optional/[Record]/mixed-presence", "type": "[Opt]", "position": "method_arg,method_return", "cells": [["[Opt]", "method_arg"], ["[Opt]", "method_return"]], "tags": ["optional", "record", "container"], "tag_rank": 4, "why": "presence is PER ELEMENT. Three shapes in one array — fully present, fully absent, mixed with an explicit null — so a codec that decides key presence once for the whole list, or lets the first element template the rest (how a columnar or schema-sniffing encoder fails), cannot pass. It is also the only cell where the canonicalising round trip (element 3's null becoming an omitted key) happens at depth.", "call": "echoOptList", "fire": null, "args": [[{"required": "a", "maybe": "m", "count": 1, "blob": {"_bytes": "aGk"}}, {"required": "b"}, {"required": "c", "maybe": null, "count": 2}]], "value": null, "expect": [{"required": "a", "maybe": "m", "count": 1, "blob": {"_bytes": "aGk"}}, {"required": "b"}, {"required": "c", "count": 2}], "expect_by_provider": null, "render": {"sent": "echoOptList([{\"required\": \"a\", \"maybe\": \"m\", \"count\": 1, \"blob\": {\"_bytes\": \"aGk\"}}, {\"required\": \"b\"}, {\"required\": \"c\", \"maybe\": null, \"count\": 2}])", "want": "[{\"required\": \"a\", \"maybe\": \"m\", \"count\": 1, \"blob\": {\"_bytes\": \"aGk\"}}, {\"required\": \"b\"}, {\"required\": \"c\", \"count\": 2}]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "Optional/[Record]/mixed-presence", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "[[int]]/nominal", "type": "[[int]]", "position": "method_arg,method_return", "cells": [["[[int]]", "method_arg"], ["[[int]]", "method_return"]], "tags": ["nominal"], "tag_rank": 1, "why": null, "call": "echoNestedInts", "fire": null, "args": [[[1, 2], [3]]], "value": null, "expect": [[1, 2], [3]], "expect_by_provider": null, "render": {"sent": "echoNestedInts([[1, 2], [3]])", "want": "[[1, 2], [3]]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[[int]]/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "[[int]]/empty-inner", "type": "[[int]]", "position": "method_arg,method_return", "cells": [["[[int]]", "method_arg"], ["[[int]]", "method_return"]], "tags": ["empty"], "tag_rank": 3, "why": "an empty inner array is where an element type gets lost", "call": "echoNestedInts", "fire": null, "args": [[[], []]], "value": null, "expect": [[], []], "expect_by_provider": null, "render": {"sent": "echoNestedInts([[], []])", "want": "[[], []]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[[int]]/empty-inner", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "[bstr]/nominal", "type": "[bstr]", "position": "method_arg,method_return", "cells": [["[bstr]", "method_arg"], ["[bstr]", "method_return"]], "tags": ["nominal", "bytes-at-depth"], "tag_rank": 1, "why": "the type the C++ cdylib gate rejects by name; on the Rust side it is expressible, so the cell exists here", "call": "echoBytesList", "fire": null, "args": [[{"_bytes": "aGk"}, {"_bytes": "_w"}]], "value": null, "expect": [{"_bytes": "aGk"}, {"_bytes": "_w"}], "expect_by_provider": null, "render": {"sent": "echoBytesList([{\"_bytes\": \"aGk\"}, {\"_bytes\": \"_w\"}])", "want": "[{\"_bytes\": \"aGk\"}, {\"_bytes\": \"_w\"}]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[bstr]/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}, {"id": "[bstr]/lenient-plain-string", "type": "[bstr]", "position": "method_arg", "cells": [["[bstr]", "method_arg"]], "tags": ["boundary", "bytes-at-depth", "divergence"], "tag_rank": 2, "why": "a plain string where the contract says [bstr]. Both providers now ACCEPT it — the divergence that mattered is closed. Before the codec unification the C++ side refused, because a [bstr] ELEMENT went through the strict codec the cdylib backend emitted while a SCALAR bstr went through a lenient one: echoBytes(\"hi\") succeeded and echoBytesList([\"hi\"]) threw, inside one module, for the same type. One function now.\nStill pinned per provider because the ECHOED FORM differs, and that is not the same defect: C++ decodes to real bytes and re-emits the canonical tag, while Rust binds [bstr] as an untyped Value and echoes the input verbatim. A representation difference from an untyped binding, not a disagreement about what the value is.", "call": "echoBytesList", "fire": null, "args": [["hi"]], "value": null, "expect": null, "expect_by_provider": {"test_fullapi_ext_rust": ["hi"], "test_fullapi_ext_cpp": [{"_bytes": "aGk"}]}, "render": {"sent": "echoBytesList([\"hi\"])", "want": "", "want_kind": "per_provider", "want_pairs": [["ext_rust", "[\"hi\"]"], ["ext_cpp", "[{\"_bytes\": \"aGk\"}]"]]}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[bstr]/lenient-plain-string", "consumer": "py", "declared": true, "agree": false, "values": {"test_fullapi_ext_rust": ["hi"], "test_fullapi_ext_cpp": [{"_bytes": "aGk"}]}, "kind": "behaviour", "values_s": {"test_fullapi_ext_rust": "[\"hi\"]", "test_fullapi_ext_cpp": "[{\"_bytes\": \"aGk\"}]"}}}, {"id": "[bstr]/empty-element", "type": "[bstr]", "position": "method_arg,method_return", "cells": [["[bstr]", "method_arg"], ["[bstr]", "method_return"]], "tags": ["empty", "bytes-at-depth"], "tag_rank": 3, "why": null, "call": "echoBytesList", "fire": null, "args": [[{"_bytes": ""}]], "value": null, "expect": [{"_bytes": ""}], "expect_by_provider": null, "render": {"sent": "echoBytesList([{\"_bytes\": \"\"}])", "want": "[{\"_bytes\": \"\"}]", "want_kind": "one"}, "results": {"test_fullapi_ext_rust|py": {"status": "pass", "provider": "test_fullapi_ext_rust", "consumer": "py"}, "test_fullapi_ext_cpp|py": {"status": "pass", "provider": "test_fullapi_ext_cpp", "consumer": "py"}}, "rollup": "pass", "known": [], "differential": {"case": "[bstr]/empty-element", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}}], "differential": {"providers": ["test_fullapi_ext_rust", "test_fullapi_ext_cpp"], "consumers": ["py"], "by_consumer": {"py": {"agree": 37, "differ": [], "declared": ["identity/whoami", "[bstr]/lenient-plain-string"], "declared_agree": 0}}}, "diffs": [{"case": "identity/whoami", "consumer": "py", "declared": true, "agree": false, "values": {"test_fullapi_ext_rust": "test_fullapi_ext_rust", "test_fullapi_ext_cpp": "test_fullapi_ext_cpp"}, "kind": "identity", "values_s": {"test_fullapi_ext_rust": "\"test_fullapi_ext_rust\"", "test_fullapi_ext_cpp": "\"test_fullapi_ext_cpp\""}}, {"case": "Record/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Record/bstr-field", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Record/uint-field/boundary", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Record/empty-strings", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Record-in-Record", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[Record]/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[Record]/empty", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "{tstr:Record}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[bstr]/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[bstr]/empty-element", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "{tstr:bstr}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "{tstr:[bstr]}/nested", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "{tstr:int}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "{tstr:int}/empty", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "{tstr:tstr}/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[[int]]/nominal", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[[int]]/empty-inner", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "bool/fire-return", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "bstr/padded-base64", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "[bstr]/lenient-plain-string", "consumer": "py", "declared": true, "agree": false, "values": {"test_fullapi_ext_rust": ["hi"], "test_fullapi_ext_cpp": [{"_bytes": "aGk"}]}, "kind": "behaviour", "values_s": {"test_fullapi_ext_rust": "[\"hi\"]", "test_fullapi_ext_cpp": "[{\"_bytes\": \"aGk\"}]"}}, {"case": "Optional/record/all-present", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/all-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/explicit-null", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/empty-value-is-not-absence", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/uint-boundary-present", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/uint-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/bstr-present-high-bytes", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/record/bstr-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/[Record]/mixed-presence", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/[Record]/empty", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/scalar/present", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "Optional/scalar/empty-is-null", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": "OPT2"}, {"case": "Optional/scalar/empty-string-is-a-value", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "hostile/Optional/scalar/wrong-type", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "hostile/Optional/record/wrong-type-in-optional-field", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "hostile/Optional/record/required-absent", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "hostile/Optional/record/required-null", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}, {"case": "event/Record", "consumer": "py", "declared": false, "agree": true, "status": "pass", "known": null}], "uncovered": [], "synthetic": [["Blob", "record_field"], ["Opt", "record_field"], ["Wrapper", "record_field"], ["bstr", "record_field"], ["tstr", "record_field"], ["uint", "record_field"]], "registry": {"xfail": [{"id": "OPT2", "cases": ["Optional/scalar/empty-is-null"], "providers": ["test_fullapi_ext_rust", "test_fullapi_ext_cpp"], "consumers": ["py"], "summary": "an EMPTY optional in a positional slot has no expressible form on this stack — null is already the failure token", "correct_behaviour": "a positional slot has no key to omit and the arity must never change, so an empty `?tstr` argument and an empty `?tstr` return are both spelled null. echoOptional(null) must answer null, and that must be distinguishable from a call that failed.", "measured": {"return path": "null IS the failure token above the module. logos-protocol's logos_json_convert turns a null result into an INVALID QVariant, which core_service reports as METHOD_FAILED — stated at logos-qt-sdk qt-generator/lidl_gen_cdylib_glue.cpp:100-109, where it is the documented reason `void` needed a special case (the Rust backend's catch-all returned JSON null and the same void method answered `true` from C++ and `the call failed` from Rust). An empty optional return lands in exactly that hole.", "argument path (py driver)": "the case cannot even be SENT today. logoscore-py's client._arg_to_str JSON-encodes bytes/list/tuple/dict behind the CLI's `json:` prefix and falls through to `str(arg)` for everything else — so None goes over argv as the literal string \"None\". Nulls NESTED inside a container are fine (they ride the `json:` path intact), which is why Optional/record/explicit-null and Optional/[Record]/mixed-presence are expressible and this one is not."}, "fix_is": {"_prose": "bullets", "parts": ["argument side: one line in logoscore-py, `if arg is None: return \"json:null\"` in _arg_to_str. Not made here — that repo is out of scope for this change, and a driver edit that lands without the contract it serves is how a matrix starts measuring the driver.", "return side: a real decision, not a patch. Either the dispatch result carries presence out of band (the same missing channel as M4-residual: logos_rpc_status.h:24-27 says the slot returns a single QVariant and `deferred` has nowhere out-of-band to live), or `?T` is declared unusable as a bare return type and the contract says so. Making null mean `empty` on a wire where null already means `failed` is not a third option."]}, "note": "Kept as its own entry rather than folded into OPT1 because it survives OPT1's fix: implementing Option<T> in every generator does not make a null return distinguishable from METHOD_FAILED. If OPT1 lands and this cell still fails, that is the correct outcome and this entry is the reason it is not a surprise."}], "skip": [], "coverage_limits": [], "fixed": [{"ids": ["E1", "E2", "E3"], "fixed_by": "logos-protocol 362b03f — one canonical LIDL <-> JSON codec (#29)", "what": "bytes at depth mangled (E1), an empty nested bstr arriving as null (E2), and M1 seen through a record field (E3).", "verified": "all 22 registered cells went xpass on the re-pin, and the two ext providers now agree on every case — the differential went from 10 pass / 9 xfail to 19/19."}, {"ids": ["OPT1"], "fixed_by": "logos-lidl#7 (contract + accessors), logos-protocol#37 (Codec<std::optional<T>>), logos-rust-sdk#31 (Ty::Opt, Option<T>), logos-cpp-sdk#125 (cdylib gate, record codecs, header parser)", "what": "optionality is declared by the contract and read by NO generator, in any language", "verified": "conformance-matrix-ext, 39 cases x 2 providers x 1 consumer: 76 pass / 2 xfail / 0 fail. The six cells this entry covered went xpass, which is what forced it out of xfail.", "correct_behaviour": {"_prose": "bullets", "parts": ["`?T` is TWO-state: a value of T, or empty — never three-state, because one LIDL type maps to one type per language and every target has exactly one empty inhabitant (None / nullopt / invalid QVariant / undefined).", "DECODE is liberal in an optional slot: an omitted key and an explicit null both decode to empty. In a REQUIRED slot both stay errors (hostile/Optional/record/required-absent and /required-null pin that, and they pass today).", "ENCODE has ONE canonical form: empty is spelled by OMITTING the key where the slot is NAMED (a record field), and by null where the slot is POSITIONAL (method arg, return, event param) — a positional slot has no key to omit and the arity must never change. The round trip is therefore canonicalising, not identity.", "A present-but-wrong-typed value in an optional slot is STILL AN ERROR: optional widens the domain by exactly one inhabitant, it does not disable type checking. That is hostile/Optional/scalar/wrong-type, and it is the cell that separates a real implementation from `?T` = `any`."]}, "measured": {"logos-lidl": "parses BOTH spellings correctly and has done all along — parser.cpp:145 sets FieldDecl::optional for `? name: T`, parser.cpp:220 builds TypeExpr::Optional for `?T`, and json.cpp carries both across the AST boundary. The information is present at every backend's door; nothing opens it. `git grep '\\.optional'` across logos-rust-sdk, logos-cpp-sdk and logos-qt-sdk finds exactly one hit, in a rustgen unit test.", "logos-rust-sdk lidl-gen": "no TypeKind::Optional arm anywhere. `?tstr` falls to the catch-alls: rust_param_type gives the author `serde_json::Value`, and ty_descriptor gives the dispatch `args::Ty::Any` — i.e. no validation at all. The FIELD FLAG takes the opposite route: `? maybe: tstr` keeps ty=tstr, so the field is typed String, args::Ty::Record checks it as Tstr, and an absent key is rejected with `expected string at arg0.maybe, got null` (args.rs coerces a missing key to Value::Null, so absent and explicit-null are already indistinguishable there — which is the ONE part of the contract that already holds). Two spellings the spec calls equivalent, opposite behaviour.", "logos-rust-sdk rustgen record decode": "a SECOND gate behind the first: from_json is emitted as `o.get(\"f\")?.as_str()?`, whose `?` short-circuits the whole Option. Even if Ty::Record learned optionality, a record with an absent field would still decode to None as a unit.", "logos-rust-sdk to_json": "always writes the key, so a Rust peer cannot currently EMIT an absent field at all — the encode half of the contract has no expression in the generated code.", "logos-cpp-sdk cdylib backend": "EXECUTED against exactly these declarations. `?T` is a hard codegen reject — typeSupported() (lidl_gen_cdylib.cpp) has no TypeExpr::Optional arm, so `method echoOptional(v: ?tstr) -> ?tstr` fails the build with `Error: module not cdylib-eligible: method 'echoOptional': parameter 'v' has a type outside the cdylib-supported (Qt-free) subset` (exit 10). With that method removed, the record IS accepted and emitRecordCodecs ignores the flag completely: it emits `Codec<std::string>::from(j.contains(\"maybe\") ? j.at(\"maybe\") : nlohmann::json(), path + \".maybe\")`, i.e. absent becomes a typeError, and `out[\"maybe\"] = Codec<std::string>::to(v.maybe)` on the way back, i.e. the key is always written.", "logos-cpp-sdk impl-header parser": "EXECUTED. std::optional<T> is unrecognised and falls into the `Fallback: treat as opaque` arm, so a header-first C++ provider CANNOT EXPRESS an optional at all: `std::optional<std::string> maybe` derives as `maybe: any`, `std::optional<std::string> echoOptional(...)` derives as `method echoOptional(v: any) -> any`. Silently — no warning, and the derived contract then disagrees with the Rust provider's on a table whose whole purpose is that the two agree.", "logos-cpp-sdk / logos-qt-sdk emit": "lidl_emit_common.cpp maps TypeExpr::Optional to `QVariant` in both directions (lidlTypeToQtTypeName and lidlTypeToStd) — the untyped `any` spelling, which is exactly the modelling hostile/Optional/scalar/wrong-type exists to reject."}, "fix_is": {"_prose": "bullets", "parts": ["logos-lidl: `fieldIsOptional(f) = f.optional || f.type.kind == Optional` and `fieldValueType(f)`, so the two spellings are collapsed ONCE, at the front end, and no backend re-derives the equivalence (three re-derivations is three chances to disagree).", "logos-rust-sdk: Option<T> in rust_param_type/owned_type, `Ty::Opt` in args.rs, and a from_json that does not `?` on an absent optional key.", "logos-cpp-sdk: TypeExpr::Optional through the impl-header parser (std::optional<T> -> Optional), an Optional arm in typeSupported(), and Codec<std::optional<T>> in logos-protocol's logos_codec.h — absent OR null decodes to nullopt, nullopt encodes by omitting a named key.", "Qt is OUT OF SCOPE: logos-qt-generator has zero module.types handling, so records do not compile through --backend qt at all. Fixing that is a different piece of work and must not be smuggled in here."]}, "note": {"_prose": "bullets", "parts": ["Registered as ONE entry because it is one missing feature, not six defects. When it lands, all six cells go xpass together and this entry gets deleted in the same commit.", "Three cells in the family are deliberately NOT registered because they PASS today and must keep passing: hostile/Optional/record/wrong-type-in-optional-field, hostile/Optional/record/required-absent and hostile/Optional/record/required-null. They pass by accident — the flag is ignored, so the field is checked as a plain tstr — and the natural implementation of optional decoding, `o.get(\"maybe\").and_then(|v| v.as_str())`, would turn the first one red while turning the six above green. That is the shape of the lazy fix this family is built to catch."]}}], "unmeasurable": [{"id": "OPT0", "summary": "the whole ext table is UNRUNNABLE until the C++ generator learns optional — this is a build failure, not a red cell", "what": {"_prose": "bullets", "parts": ["test_fullapi_ext_cpp is header-first: its contract is DERIVED from src/test_fullapi_ext_cpp_impl.h. The header now declares std::optional fields and a std::optional method, per the contract. It does not compile, and the failure is not expressible as an xfail because it happens before any case runs — the flake check builds both providers' install outputs, and run_matrix refuses to start when a provider the table declares has no module dir.", "The compile error is a consequence of the silent degradation described in OPT1: --header-to-lidl derives `maybe: any`, so the generated codec is `Codec<LogosMap>::to(v.maybe)` applied to a std::optional<std::string>. Fixing only the codec is not enough — with the header parser fixed, typeSupported() then rejects the module outright.", "test_fullapi_ext_rust is red for a narrower reason: lib.rs is authored at the target (`fn echo_optional(&mut self, v: Option<String>) -> Option<String>`) while lidl-gen still emits `serde_json::Value` for `?tstr`, so the crate fails with `expected serde_json::Value, found Option<String>`. Both providers were written at the target deliberately — the cases define what the implementation must hit, and a fixture that encodes the current behaviour cannot do that."]}, "consequence": "between this commit and the generator work, `conformance-matrix-ext` fails at BUILD time and reports nothing. The table is still the deliverable: it is what the fix is measured against, and every cell in it is either registered above or expected to pass on the day the generators are right."}]}, "registry_used": {"OPT2": [{"cell": "Optional/scalar/empty-is-null/test_fullapi_ext_rust/py", "status": "xfail", "case": "Optional/scalar/empty-is-null"}, {"cell": "Optional/scalar/empty-is-null/test_fullapi_ext_cpp/py", "status": "xfail", "case": "Optional/scalar/empty-is-null"}]}, "registry_used_differential": {"OPT2": ["Optional/scalar/empty-is-null"]}, "registry_dead": [], "registry_inert_skips": []}</script>
+<script>
+/* ── what this page is ────────────────────────────────────────────────────
+   A single-table page embeds the payload for ONE contract, unchanged. A merged
+   page embeds {"reports":[{ns,name,href,payload}, ...]} — the SAME payload
+   objects, one per contract, never combined into one.
+
+   Nothing here computes a number that spans contracts. The two tables are
+   different measurements: different contracts, different case tables and
+   registries, different PROVIDERS, different consumer axes. A blended count
+   would hide which contract owns a failure, and the differential — providers
+   compared to EACH OTHER — only means anything within one contract, because a
+   case in one table has no counterpart in the other. */
+const RAW = JSON.parse(document.getElementById("report-data").textContent);
+const REPORTS = RAW.reports || [{ns: "", href: null,
+  name: (RAW.meta.contract_name || "full_api"), payload: RAW}];
+/* Produced by --merge, as opposed to "happens to carry one report". A merged
+   landing page built when only ONE table produced a report must still name the
+   contract it is showing — otherwise the table that failed simply vanishes and
+   the page reads as if it were the whole story. */
+const MERGED = !!RAW.reports;
+
+/* The report currently being rendered. Rendering is synchronous and each
+   report is emitted whole before the next begins, so a mutable "current"
+   binding is enough and keeps every section function reading exactly the way
+   it did when there was only ever one report. Nothing wired AFTER rendering
+   (filters, deep links, the tab strip) reads it — they work off the DOM. */
+let D = REPORTS[0].payload, NS = REPORTS[0].ns;
+const nsid = s => NS ? NS + "-" + s : s;
+const esc = s => String(s === undefined || s === null ? "" : s)
+  .replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const GLYPH = {pass:"\u00b7", xfail:"K", fail:"X", xpass:"^", skip:"~", "not-run":"?"};
+const CLS   = {pass:"ok", xfail:"kn", fail:"bad", xpass:"xp", skip:"sk", "not-run":"bad"};
+const ABBR  = {method_arg:"arg", "method_arg@0":"a0", "method_arg@1":"a1",
+  "method_arg@2":"a2", method_return:"ret", event_param:"evt",
+  "event_param@0":"e0", "event_param@1":"e1", "event_param@2":"e2",
+  nested_in_container:"nest"};
+/* There is deliberately NO value-to-text helper here. Every measured value is
+   rendered in python (_render) and reaches this page as a string, because
+   JSON.parse resolves numbers to doubles and would silently rewrite
+   18446744073709551615 as ...52000 \u2014 the M1/M5/M6 defect, in the report that
+   reports it. `clip` shortens text that is already the rendering. */
+const clip  = (s, n) => s === undefined || s === null ? ""
+  : (s.length > n ? s.slice(0, n-1) + "\u2026" : s);
+const surfacesOf = P => {
+  const out = [];
+  P.meta.providers.forEach(p => P.meta.consumers.forEach(c => out.push(p + "|" + c)));
+  return out;
+};
+/* Only the `test_fullapi_` stem comes off, NOT the `ext_` that follows it: on a
+   merged page the ext contract's providers must not read as `cpp, rust` next to
+   the full contract's `cpp, rust`. They are different modules, and the whole
+   point of the page is that the two rows are different measurements. */
+const shortProv = p => p.replace(/^test_fullapi_/, "");
+
+/* ── the pills for ONE contract ───────────────────────────────────
+   Always per contract, never summed across contracts. On a merged page these
+   ride on the contract's own tab, so the split stays visible without a click. */
+function pillsHtml(P) {
+  const c = P.counts, n = k => c[k] || 0;
+  const bits = [`<span class="pill pass">${n("pass")} pass</span>`];
+  if (n("xfail")) bits.push(`<span class="pill known">${n("xfail")} known-broken</span>`);
+  if (n("fail")) bits.push(`<span class="pill fail">${n("fail")} FAIL</span>`);
+  if (n("xpass")) bits.push(`<span class="pill fail">${n("xpass")} xpass \u2014 registry stale</span>`);
+  if (P.uncovered.length) bits.push(`<span class="pill fail">${P.uncovered.length} uncovered</span>`);
+  if (n("skip")) bits.push(`<span class="pill dim">${n("skip")} skip</span>`);
+  return bits.join(" ");
+}
+const isRed = P => (P.counts.fail || 0) + (P.counts.xpass || 0)
+  + P.uncovered.length > 0;
+
+/* ── grid ─────────────────────────────────────────────────────────────── */
+function gridCell(cell) {
+  if (cell.state === "n/a") return {html:'<span class="sk">.</span>', cls:"na"};
+  if (cell.state === "uncovered") return {html:"--", cls:"unc c"};
+  const t = cell.tally, parts = [];
+  if (t.pass) parts.push(`<span class="ok">${t.pass}ok</span>`);
+  [["fail","X","bad"],["xpass","^","xp"],["xfail","K","kn"],["skip","~","sk"],
+   ["not-run","?","bad"]].forEach(([k, sfx, cls]) => {
+    if (t[k]) parts.push(`<span class="${cls}">${parts.length?"+":""}${t[k]}${sfx}</span>`);
+  });
+  return {html: parts.join(""), cls: "c"};
+}
+function renderGrid() {
+  const P = D.axis.positions, T = D.axis.types;
+  let h = `<table class="grid"><tr><th class="ty">type</th>` +
+    P.map(p => `<th title="${esc(p)}">${esc(ABBR[p] || p)}</th>`).join("") + `</tr>`;
+  T.forEach(ty => {
+    h += `<tr><td class="ty">${esc(ty)}</td>`;
+    P.forEach(p => {
+      const cell = D.grid[ty][p], g = gridCell(cell);
+      const title = cell.state === "covered"
+        ? cell.cases.join("\n")
+        : (cell.state === "uncovered"
+            ? "declared by the contract, exercised by no case"
+            : "no such position for this type");
+      h += `<td class="${g.cls}" data-ty="${esc(ty)}" data-pos="${esc(p)}" title="${esc(title)}">${g.html}</td>`;
+    });
+    h += `</tr>`;
+  });
+  h += `</table>`;
+  const surf = D.meta.providers.length * D.meta.consumers.length;
+  h += `<div class="legend">
+    <b><span class="ok">n ok</span></b> = n cases green on all ${surf} provider &times; consumer surfaces &nbsp;&nbsp;
+    <b><span class="swatch kn">+n K</span></b> = n cases with a registered known-broken cell (never counted as a pass) &nbsp;&nbsp;
+    <b><span class="bad">n X</span></b> = failing &nbsp;&nbsp;
+    <b><span class="xp">n ^</span></b> = xpass, the registry is stale<br>
+    <b><span class="bad">--</span></b> = declared by the contract, <b>no case</b> &nbsp;&nbsp;
+    <b><span class="sk">.</span></b> = no such position for this type &nbsp;&nbsp;
+    <span class="sk">click any covered cell to jump to its cases</span>`;
+  if (D.synthetic.length) {
+    h += `<br><span class="sk">covered but not declared by the contract: ` +
+      D.synthetic.map(c => esc(c[0] + " @ " + c[1])).join(", ") + `</span>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+/* ── differential ─────────────────────────────────────────────────────── */
+function renderDifferential() {
+  const d = D.differential;
+  let h = "";
+  if (d.providers.length < 2) {
+    h += `<p class="lede">One provider (<code>${esc(d.providers[0] || "-")}</code>) \u2014
+      nothing to compare. This table has no differential column, which is a gap,
+      not a design choice.</p>`;
+  } else {
+    h += `<div class="card"><h3>provider &nbsp;<code>${esc(d.providers[0])}</code>
+      vs <code>${esc(d.providers[1])}</code></h3><table class="flat">`;
+    const KLABEL = {behaviour: "by behaviour", agree: "no longer diverging",
+                    identity: "by identity"};
+    d.consumers.forEach(c => {
+      const s = d.by_consumer[c];
+      /* The breakdown, not just the count: "6 declared divergences" reads as
+         six facts about the system, and two of them are a provider spelling
+         its own name. */
+      const k = {};
+      D.diffs.filter(x => x.declared && (x.consumer || c) === c)
+        .forEach(x => k[x.kind || "behaviour"] = (k[x.kind || "behaviour"] || 0) + 1);
+      const detail = ["behaviour", "agree", "identity"].filter(x => k[x])
+        .map(x => `${k[x]} ${KLABEL[x]}`).join("; ");
+      h += `<tr><td>on ${esc(c)}</td>
+        <td class="ok">${s.agree} agree</td>
+        <td class="${s.differ.length ? "bad" : "sk"}">${s.differ.length} differ</td>
+        <td class="sk">${s.declared.length ? "+" + s.declared.length +
+          " declared, not compared" + (detail ? ` (${esc(detail)})` : "") : ""}</td></tr>`;
+    });
+    h += `</table></div>`;
+  }
+  if (d.consumers.length < 2) {
+    h += `<div class="card"><h3>consumer <span class="tag">one point</span></h3>
+      <p class="lede" style="margin:0">A cell proves a provider agreed with this
+      client, not that two consumer surfaces agree with each other. A defect a
+      consumer happens to undo is invisible from here.</p></div>`;
+  } else {
+    h += `<div class="card"><h3>consumer</h3><table class="flat">`;
+    for (let i = 0; i < d.consumers.length; i++)
+      for (let j = i + 1; j < d.consumers.length; j++)
+        h += `<tr><td>${esc(d.consumers[i])} vs ${esc(d.consumers[j])}</td></tr>`;
+    h += `</table></div>`;
+  }
+  const decl = D.diffs.filter(x => x.declared);
+  if (decl.length) {
+    h += `<h3 style="font-size:13.5px;margin:20px 0 4px">Declared divergences
+      <span style="font-weight:400;color:var(--muted);font-size:12px">
+      (<code>expect_by_provider</code>) \u2014 what each provider actually answered</span></h3>
+      <p class="lede">The driver does not compare these: the divergence <em>is</em>
+      the expectation. Shown because a declared divergence that quietly stopped
+      diverging is worth seeing, and it carries no verdict and no exit code.</p>
+      <table class="flat"><tr><th>case</th><th></th><th>answers</th></tr>`;
+    /* Behaviour first, then the ones that stopped diverging, then identity.
+       `kind` is decided in python (see _divergence_kind) so the page and the
+       terminal cannot classify the same divergence differently. */
+    const KIND = {behaviour: 0, agree: 1, identity: 2};
+    [...decl].sort((a, b) => (KIND[a.kind] ?? 0) - (KIND[b.kind] ?? 0)).forEach(x => {
+      /* One provider per line: the difference between two long values is
+         usually deep inside them, and a side-by-side truncation hides it.
+         When they AGREE there is no difference to place, so the value is
+         stated once. */
+      /* values_s, not values: pre-rendered in python so a uint64 answer is not
+         re-encoded through a double on the way to the screen. */
+      const ents = Object.entries(x.values_s || {});
+      const vals = x.kind === "agree" && ents.length
+        ? `<div><b>both</b> ${esc(clip(ents[0][1], 150))}</div>`
+        : ents.map(([p, v]) =>
+            `<div><b>${esc(shortProv(p))}</b> ${esc(clip(v, 150))}</div>`).join("");
+      /* "Both providers now answer the same" is not good news and is not
+         green: it means the per-provider split in the table is vestigial.
+         Same shape of finding as an xpass, same colour. */
+      const verdict = x.kind === "agree"
+        ? `<span class="xp">NO LONGER DIVERGES</span>
+           <div class="sk" style="font-size:11.5px">the declaration is vestigial</div>`
+        : x.kind === "identity"
+        ? `<span class="sk">DIFFER</span>
+           <div class="sk" style="font-size:11.5px">by identity — true by construction</div>`
+        : `<span class="kn">DIFFER</span>
+           <div class="sk" style="font-size:11.5px">by behaviour</div>`;
+      h += `<tr><td>${esc(x.case)}</td><td>${verdict}</td><td>${vals}</td></tr>`;
+    });
+    h += `</table>`;
+  }
+  return h;
+}
+
+/* ── cases ────────────────────────────────────────────────────────────── */
+function stripHtml(cv) {
+  return D.meta.consumers.map(c =>
+    `<span class="g">` + D.meta.providers.map(p => {
+      const e = cv.results[p + "|" + c] || {status: "not-run"};
+      return `<span class="${CLS[e.status] || ""}" title="${esc(p + " / " + c + " \u2014 " + e.status)}">${GLYPH[e.status] || "?"}</span>`;
+    }).join("") + `</span>`).join(" ");
+}
+function posLabel(cells, onlyType) {
+  const p = cells.filter(c => !onlyType || c[0] === onlyType).map(c => c[1]);
+  if (p.length === 2 && p[0] === "method_arg" && p[1] === "method_return") return "arg\u2192ret";
+  return [...new Set(p)].map(x => ABBR[x] || x).join(",");
+}
+/* What the case sent and what the table expects, on ONE dim line. A green cell
+   has nothing more to say than "it matched", and several hundred identical
+   "it matched" blobs are what makes a report unreadable. Values appear in full
+   only where something did not match. */
+function callHtml(cv) {
+  /* Every value here comes PRE-RENDERED from python (cv.render). JSON.parse
+     puts numbers in doubles, so reading cv.args/cv.expect would print
+     18446744073709552000 for the case that exists to prove
+     18446744073709551615 survives. clip only — never re-encode. */
+  const r = cv.render || {};
+  if (!r.sent) return "";
+  const sent = esc(clip(r.sent, 100));
+  let want = "";
+  if (r.want_kind === "identical")
+    /* One expectation written N times is not N expectations. */
+    want = `${esc(clip(r.want, 90))} <span class="where">(declared per provider, identical)</span>`;
+  else if (r.want_kind === "identity")
+    /* Values differing only by the provider's own name render identically
+       once truncated; the full pair lives in the differential panel. */
+    want = `<span class="where">each provider answers with its own name &mdash;
+       see <a href="#${esc(nsid("differential"))}">differential</a></span>`;
+  else if (r.want_kind === "per_provider")
+    want = (r.want_pairs || []).map(([p, v]) =>
+      `${esc(p)} ${esc(clip(v, 46))}`).join(" &nbsp;|&nbsp; ");
+  else if (r.want_kind === "one")
+    want = esc(clip(r.want, 90));
+  return `<span class="call">${sent}${want ? ` <span class="arrow">&rarr;</span> ${want}` : ""}</span>`;
+}
+function valuesHtml(cv) {
+  /* Identical outcomes on several surfaces print once, named: two providers
+     failing the same way is one fact, not two. */
+  const groups = new Map();
+  Object.entries(cv.results).forEach(([k, e]) => {
+    if (e.status === "pass") return;
+    /* Grouped and displayed on the PRE-RENDERED text, for the same reason
+       callHtml is: two values that differ only above 2^53 are one value once
+       JSON.parse has been through them. */
+    const sig = JSON.stringify([e.status, e.expected_s === undefined, e.expected_s, e.actual_s]);
+    (groups.get(sig) || groups.set(sig, {e, keys: []}).get(sig)).keys.push(k);
+  });
+  let h = "";
+  groups.forEach(({e, keys}) => {
+    const where = keys.length === Object.keys(cv.results).length
+      ? "all surfaces" : keys.join(", ");
+    let t = `<b>${esc(e.status)}</b> <span class="where">${esc(where)}</span>`;
+    if (e.expected_s !== undefined) t += `\n<b>expected</b> ${esc(clip(e.expected_s, 300))}`;
+    t += `\n<b>got     </b> ${esc(clip(e.actual_s, 300))}`;
+    h += `<pre class="val">${t}</pre>`;
+  });
+  return h;
+}
+function renderCases() {
+  /* A case is listed under EVERY type it exercises: `arity/triple` has type
+     "int,tstr,bstr", which is three types, one per slot — not one. */
+  const byType = {}, anchored = new Set();
+  D.cases.forEach(cv => [...new Set(cv.cells.map(c => c[0]))].forEach(ty =>
+    (byType[ty] = byType[ty] || []).push(cv)));
+  /* re-sorted per block: the payload's global order is keyed on case.type, which
+     for a multi-argument case is a LIST of types */
+  Object.values(byType).forEach(cs => cs.sort((a, b) =>
+    a.tag_rank - b.tag_rank || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
+  let h = `<p class="lede">Glyph groups are
+    (<code>${D.meta.providers.map(shortProv).map(esc).join(", ")}</code>), one group per
+    consumer: <code>${D.meta.consumers.map(esc).join(", ")}</code> &mdash;
+    <span class="ok">&middot;</span> pass,
+    <span class="kn">K</span> registered known-broken,
+    <span class="bad">X</span> fail, <span class="xp">^</span> xpass.
+    The middle column is the differential: <b>=</b> the two providers answer identically,
+    <b class="bad">&ne;</b> they do not, <b>&ne;*</b> the table declares the divergence.
+    Cases are ordered by what they are for: round-trip, boundary, empty, container,
+    arity, hostile, adversarial. Click a type to collapse it.</p>`;
+  D.axis.types.forEach(ty => {
+    const cs = byType[ty];
+    if (!cs) return;
+    let total = 0, ok = 0, broken = 0;
+    cs.forEach(cv => Object.values(cv.results).forEach(e => {
+      total++;
+      if (e.status === "pass") ok++;
+      if (["xfail", "fail", "xpass"].includes(e.status)) broken++;
+    }));
+    /* Same order as the grid's columns, so a type's position list reads the
+       way its row does. Encounter order put `evt` first for `any` purely
+       because the event case sorts first inside the block. */
+    const positions = D.axis.positions.filter(p => cs.some(c =>
+      c.cells.some(x => x[0] === ty && x[1] === p))).map(p => ABBR[p] || p).join(" ");
+    h += `<div class="typeblock" data-type="${esc(ty)}">
+      <div class="typehead"><span class="name">${esc(ty)}</span>
+        <span class="meta">${cs.length} cases &middot; ${ok}/${total} cells pass` +
+      (broken ? ` &middot; <span class="kn">${broken} known-broken</span>` : "") +
+      `</span><span class="pos">${esc(positions)}</span></div>
+      <table class="cases">`;
+    cs.forEach(cv => {
+      const d = cv.differential;
+      const agree = d ? (d.agree ? "=" : (d.declared ? "\u2260*" : "\u2260")) : "";
+      const kids = cv.known.map(k =>
+        `<a class="kid" href="#${esc(nsid("reg-" + k))}">${esc(k)}</a>`).join("");
+      const tags = cv.tags.map(t => `<span class="tagchip">${esc(t)}</span>`).join("");
+      /* a case listed under three types must not carry the anchor three times */
+      const anchor = anchored.has(cv.id) ? "" : ` id="${esc(nsid("case-" + cv.id))}"`;
+      anchored.add(cv.id);
+      h += `<tr class="c"${anchor} data-case="${esc(cv.id)}"
+              data-search="${esc((cv.id + " " + cv.type + " " + cv.tags.join(" ") + " " + (cv.why||"")).toLowerCase())}"
+              data-status="${esc(cv.rollup)}" data-ty="${esc(cv.type)}"
+              data-pos="${esc(cv.cells.map(c => c[1]).join(" "))}">
+        <td class="strip">${stripHtml(cv)}</td>
+        <td class="diff ${d && !d.agree && !d.declared ? "ne" : ""}"
+            title="do the two providers answer identically?">${agree}</td>
+        <td class="pos">${esc(posLabel(cv.cells, ty))}</td>
+        <td class="cid">${esc(cv.id)}${kids}${tags}
+          ${callHtml(cv)}
+          ${cv.why ? `<span class="why">${esc(cv.why)}</span>` : ""}
+          ${valuesHtml(cv)}</td></tr>`;
+    });
+    h += `</table></div>`;
+  });
+  return h;
+}
+
+/* ── registry prose, rendered generically ─────────────────────────────── */
+/* A registry entry has no fixed schema \u2014 the four in known.json carry four
+   different key sets \u2014 so prose is rendered generically, by shape. */
+const SKIP_KEYS = new Set(["id", "ids", "cases", "providers", "consumers",
+  "per_case_providers", "per_case_consumers", "axis", "summary"]);
+function proseHtml(entry, also) {
+  let h = `<dl class="kv">`;
+  Object.entries(entry).forEach(([k, v]) => {
+    if (SKIP_KEYS.has(k) || (also && also.includes(k))) return;
+    if (v === null || v === undefined) return;
+    let body;
+    if (v && typeof v === "object" && v._prose) {
+      body = v._prose === "bullets"
+        ? `<ul>${v.parts.map(x => `<li>${esc(x)}</li>`).join("")}</ul>`
+        : v.parts.map(x => `<p>${esc(x)}</p>`).join("");
+    } else if (Array.isArray(v)) {
+      body = `<ul>${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>`;
+    } else if (typeof v === "object") {
+      body = `<ul>${Object.entries(v).map(([kk, vv]) =>
+        `<li><code>${esc(kk)}</code> \u2014 ${esc(vv)}</li>`).join("")}</ul>`;
+    } else body = esc(v);
+    h += `<dt>${esc(k)}</dt><dd>${body}</dd>`;
+  });
+  return h + `</dl>`;
+}
+function renderRegister() {
+  if (!D.registry.xfail.length)
+    return `<p class="lede">No registered known-broken cells.</p>`;
+  let h = `<p class="lede">Every amber cell above resolves to one of these, and the
+    entry is the claim behind it \u2014 measured, with evidence, in the providers'
+    own <code>known.json</code>. A registered cell is <b>never</b> counted as a pass.</p>`;
+  D.registry.xfail.forEach(e => {
+    const used = D.registry_used[e.id] || [];
+    const tally = {};
+    used.forEach(u => tally[u.status] = (tally[u.status] || 0) + 1);
+    const breakdown = Object.entries(tally).map(([s, n]) =>
+      `<span class="${CLS[s]}">${n} ${esc(s)}</span>`).join(", ");
+    const dcount = (D.registry_used_differential[e.id] || []).length;
+    h += `<div class="card known" id="${esc(nsid("reg-" + e.id))}">
+      <h3>${esc(e.id)}<span class="tag">${used.length} cell(s) in this run${
+        breakdown ? " &mdash; " + breakdown : ""}${
+        dcount ? ", + " + dcount + " differential" : ""}</span></h3>
+      <div>${esc(e.summary || "")}</div>
+      <div class="kv" style="margin-top:8px"><dt>cases</dt><dd>` +
+      e.cases.map(c => `<a href="#${esc(nsid("case-" + c))}"><code>${esc(c)}</code></a>`).join(", ") +
+      `</dd><dt>providers</dt><dd><code>${esc((e.providers||[]).join(", "))}</code></dd>` +
+      (e.consumers ? `<dt>consumers</dt><dd><code>${esc(e.consumers.join(", "))}</code></dd>` : "") +
+      `</div>` + proseHtml(e) + `</div>`;
+  });
+  return h;
+}
+function renderNotMeasured() {
+  let h = `<p class="lede">Nothing may be silently absent from the matrix. A cell is
+    either covered, explicitly skipped with a typed reason, or registered \u2014 and
+    this is where the second and third kinds are visible.</p>`;
+  if (D.uncovered.length) {
+    h += `<div class="card fail"><h3>Uncovered contract cells</h3><table class="flat">` +
+      D.uncovered.map(c => `<tr><td>${esc(c[0])}</td><td>${esc(c[1])}</td></tr>`).join("") +
+      `</table></div>`;
+  } else {
+    h += `<div class="card"><h3>Uncovered contract cells <span class="tag">none</span></h3>
+      <p class="lede" style="margin:0">Every <code>(type, position)</code> the
+      <code>.lidl</code> declares has at least one case.</p></div>`;
+  }
+  D.registry.skip.forEach((s, i) => {
+    const inert = D.registry_inert_skips.includes(i);
+    h += `<div class="card"><h3>skip <span class="tag">${esc((s.consumers||[]).join(", "))}
+      &middot; ${esc(s.reason || "")}</span></h3>
+      <div class="kv"><dt>cases</dt><dd><code>${esc((s.cases||[]).join(", "))}</code></dd></div>` +
+      (inert ? `<p class="lede" style="margin:8px 0 0"><b>This run has no such
+        consumer</b>, so the entry produced no cells at all \u2014 "declared unsupported
+        on a surface nobody measured" is not the same as "nothing was skipped".</p>` : "") +
+      proseHtml(s) + `</div>`;
+  });
+  D.registry.coverage_limits.forEach(l => {
+    h += `<div class="card"><h3>limit \u2014 ${esc(l.axis)} axis
+      <span class="tag">${esc(l.status || "open")}</span></h3>` + proseHtml(l) + `</div>`;
+  });
+  if (D.registry_dead.length) {
+    h += `<div class="card known"><h3>Registry entries that matched no cell</h3>
+      <p class="lede" style="margin:0 0 6px">These did not fire in this run. Either the
+      surface they name is not in it, or the entry is stale. The driver does not fail on
+      this \u2014 whether it should is a policy call, and this report only surfaces it.</p>
+      <div class="mono">${D.registry_dead.map(esc).join(", ")}</div></div>`;
+  }
+  return h;
+}
+function renderHistory() {
+  let h = `<p class="lede">Why several green cases exist at all: each is a regression
+    guard a fix left behind. Kept verbatim from the registry.</p>`;
+  D.registry.fixed.forEach(f => {
+    /* `ids` is the fixed-entry schema, but an entry promoted out of xfail may
+       still carry the singular `id`. Render either rather than throwing — see
+       the section guard below for why one bad entry used to blank the page. */
+    const label = Array.isArray(f.ids) ? f.ids.join(" / ") : (f.id || "");
+    h += `<details class="card"><summary><b>${esc(label)}</b> \u2014
+      ${esc(f.what || "")}</summary>` + proseHtml(f, ["what"]) + `</details>`;
+  });
+  D.registry.unmeasurable.forEach(u => {
+    h += `<details class="card"><summary><b>${esc(u.id)}</b> (not measurable here) \u2014
+      ${esc(u.summary || "")}</summary>` + proseHtml(u) + `</details>`;
+  });
+  return h;
+}
+/* Every section is rendered behind this. The page is assembled as ONE
+   innerHTML assignment, so before this guard a single throw anywhere in any
+   section left <main> completely empty — a blank report that looks like "no
+   data" rather than "a bug in one panel". Now the failing panel says so and
+   the rest of the report still renders. */
+function safeSection(name, fn) {
+  try { return fn(); }
+  catch (e) {
+    return `<p class="lede">This section failed to render: <code>${esc(name)}: ${esc(e.message)}</code>.
+      The rest of the report is unaffected; the data is intact in the jsonl.</p>`;
+  }
+}
+function renderAll() {
+  let h = `<p class="lede">Completeness, reachable but not the landing view: one row per
+    (case, provider, consumer) cell, ${D.meta.cell_count} in total.</p>
+    <details><summary>show every cell</summary><table class="flat">
+    <tr><th>status</th><th>type</th><th>position</th><th>provider</th><th>consumer</th>
+    <th>case</th><th>known</th></tr>`;
+  const surfaces = surfacesOf(D);
+  D.cases.forEach(cv => surfaces.forEach(k => {
+    const e = cv.results[k];
+    if (!e) return;
+    h += `<tr><td class="${CLS[e.status]}">${esc(e.status)}</td><td>${esc(cv.type)}</td>
+      <td>${esc(cv.position)}</td><td>${esc(e.provider)}</td><td>${esc(e.consumer)}</td>
+      <td>${esc(cv.id)}</td><td class="kn">${esc(e.known || "")}</td></tr>`;
+  }));
+  return h + `</table></details>`;
+}
+
+/* ── one contract's panel ─────────────────────────────────────────────────
+   Exactly the report that has always been rendered here, with its section ids
+   namespaced so several contracts can share a page without colliding. Every
+   section is behind safeSection(): the panel is written with ONE innerHTML
+   assignment, so an uncaught throw anywhere in it would leave the whole page
+   empty — and on a merged page that would take the OTHER contract's report
+   down with it. A broken panel says so and nothing else moves. */
+function renderContract(R) {
+  D = R.payload;
+  NS = R.ns;
+  const m = D.meta;
+  const link = R.href
+    ? ` &middot; <a href="${esc(R.href)}">standalone page</a>` +
+      (String(R.href).endsWith("/")
+        ? ` &middot; <a href="${esc(R.href)}matrix.jsonl">jsonl</a>
+            &middot; <a href="${esc(R.href)}matrix.txt">text</a>` : "")
+    : "";
+  return `<div class="contract" data-ns="${esc(R.ns)}">
+  <p class="lede">Contract <code>${esc(m.contract_name || "full_api")}</code> &middot;
+    ${m.case_count} cases &times; ${m.providers.length} provider(s)
+    &times; ${m.consumers.length} consumer(s) = ${m.cell_count} cells &middot;
+    generated ${esc(m.generated)}${link}<br>
+    providers <code>${m.providers.map(esc).join("</code> <code>")}</code> &middot;
+    consumers <code>${m.consumers.map(esc).join("</code> <code>")}</code> &middot;
+    transport LocalSocket/QtRO</p>
+  <section id="${esc(nsid("grid"))}"><h2>Type &times; position<span class="sub">what this system
+    guarantees, per type</span></h2>${safeSection("renderGrid", renderGrid)}</section>
+  <section id="${esc(nsid("differential"))}"><h2>Differential<span class="sub">this contract's
+    providers compared to each other, independently of <code>expect</code></span></h2>
+    ${safeSection("renderDifferential", renderDifferential)}</section>
+  <section id="${esc(nsid("cases"))}"><h2>Cases<span class="sub">what was actually verified</span></h2>
+    ${safeSection("renderCases", renderCases)}</section>
+  <section id="${esc(nsid("register"))}"><h2>Known-broken register<span class="sub">every amber cell,
+    and its claim</span></h2>${safeSection("renderRegister", renderRegister)}</section>
+  <section id="${esc(nsid("notmeasured"))}"><h2>Not measured<span class="sub">on the record, not
+    silently absent</span></h2>${safeSection("renderNotMeasured", renderNotMeasured)}</section>
+  <section id="${esc(nsid("history"))}"><h2>Registry history<span class="sub">closed entries, and the
+    guards they left behind</span></h2>${safeSection("renderHistory", renderHistory)}</section>
+  <section id="${esc(nsid("all"))}"><h2>All cells</h2>${safeSection("renderAll", renderAll)}</section>
+  <div class="foot">Generated by <code>run_matrix.py --report</code>. Case table and
+    registry: <code>${esc((m.paths || {}).cases || "")}</code>,
+    <code>${esc((m.paths || {}).known || "")}</code>. This report measures nothing; every
+    number is a re-arrangement of one the driver produced.</div></div>`;
+}
+
+/* ── the contracts, side by side but never added up ───────────────────────
+   The one thing a merged page must say out loud, because the layout invites
+   the opposite reading: these are two measurements, not two halves of one. */
+function renderContracts() {
+  const n = REPORTS.length;
+  const head = n === 1 ? `1 contract`
+    : `${n} contracts, ${n} measurements`;
+  const sub = n === 1
+    ? `&mdash; the merged report, with one table present`
+    : `&mdash; not ${n === 2 ? "two halves" : "parts"} of one number`;
+  let h = `<div class="banner"><h2>${head}
+    <span class="sub" style="font-weight:400;font-size:12.5px;color:var(--muted)">
+    ${sub}</span></h2>
+    <p>Each row below is its own run: its own contract, its own case table and
+    registry, its own <b>providers</b>, its own consumer axis. Nothing on this page
+    is summed across them, and no cell in one table has a counterpart in another
+    to be compared with. The <a href="#${esc(REPORTS[0].ns)}-differential">differential</a>
+    is a comparison of the providers <em>of one contract</em>; a cross-contract
+    differential would be a comparison of unrelated things and is not computed.</p>
+    <table class="flat">
+    <tr><th>contract</th><th>providers</th><th>consumers</th><th>cases</th>
+      <th>cells</th><th>result</th><th></th></tr>`;
+  REPORTS.forEach(R => {
+    const P = R.payload, m = P.meta;
+    h += `<tr><td><a href="#${esc(R.ns)}-grid" data-goto="${esc(R.ns)}"><b>${esc(R.name)}</b></a></td>
+      <td>${(m.providers || []).map(p => esc(shortProv(p))).join(", ")}</td>
+      <td>${(m.consumers || []).map(esc).join(", ")}</td>
+      <td>${esc(m.case_count)}</td><td>${esc(m.cell_count)}</td>
+      <td>${pillsHtml(P)}</td>
+      <td>${R.href ? `<a href="${esc(R.href)}">standalone</a>` : ""}</td></tr>`;
+  });
+  h += `</table>`;
+  const tables = REPORTS.map(R =>
+    `<code>${esc((R.payload.meta.paths || {}).cases || "?")}</code>`);
+  h += `<p style="margin:10px 0 0;color:var(--dim);font-size:11.5px">case tables:
+    ${tables.join("<br>")}</p></div>`;
+  return h;
+}
+
+/* A contract whose panel throws OUTSIDE any section still gets a panel — an
+   empty one, saying so. Falling back to bare text would leave the tab pointing
+   at nothing, and the tab switcher would then hide every OTHER contract to show
+   a panel that does not exist: one broken contract blanking the page, by a
+   different route than the one safeSection closed. */
+function safePanel(R) {
+  try { return renderContract(R); }
+  catch (e) {
+    return `<div class="contract" data-ns="${esc(R.ns)}">
+      <p class="lede">This contract's report failed to render:
+      <code>${esc(R.name)}: ${esc(e.message)}</code>. Every other contract on
+      this page is unaffected, and the data is intact in the jsonl.</p></div>`;
+  }
+}
+
+/* ── assemble ─────────────────────────────────────────────────────────── */
+document.getElementById("main").innerHTML =
+  (MERGED ? `<section id="contracts">${
+    safeSection("renderContracts", renderContracts)}</section>` : "") +
+  REPORTS.map(safePanel).join("");
+
+/* filters: text, plus the four questions worth asking of a case list.
+
+   Declared BEFORE the tab strip, because activate() calls applyFilters() and
+   `let` sits in a temporal dead zone until its declaration is evaluated. With
+   this block below activate(), the very first activate() threw a
+   ReferenceError inside applyFilters and took every listener after it with
+   it: the tabs still switched (their listeners were already attached) and the
+   chips, the search box and the grid-cell jumps did nothing at all. The page
+   looked completely fine. */
+let FILTER = "all";
+const KEEP = {
+  all: () => true,
+  notgreen: tr => tr.dataset.status !== "pass",
+  known: tr => tr.dataset.status === "xfail" || !!tr.querySelector(".kid"),
+  hostile: tr => /hostile|adversarial/.test(tr.dataset.search),
+};
+function applyFilters() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  document.querySelectorAll("table.cases tr.c").forEach(tr => {
+    const ok = KEEP[FILTER](tr) && (!q || tr.dataset.search.includes(q));
+    tr.classList.toggle("hide", !ok);
+  });
+  document.querySelectorAll(".typeblock").forEach(b => {
+    b.classList.toggle("hide", !b.querySelector("tr.c:not(.hide)"));
+  });
+}
+document.getElementById("q").addEventListener("input", applyFilters);
+document.querySelectorAll(".chip").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll(".chip").forEach(b => b.classList.remove("on"));
+  btn.classList.add("on");
+  FILTER = btn.dataset.f;
+  applyFilters();
+}));
+
+/* One tab per contract, carrying that contract's OWN counts. A single-table
+   page has one report and no tab strip; its pills sit in the header exactly
+   where they always did. */
+try {
+  if (MERGED) {
+    document.getElementById("tabs").innerHTML = REPORTS.map(R => {
+      const m = R.payload.meta || {};
+      return `<button class="tab" data-ns="${esc(R.ns)}">
+        <span class="tname">${esc(R.name)}</span>
+        <span class="tmeta">${esc(m.case_count)} cases &middot;
+          ${(m.providers || []).length} providers &times;
+          ${(m.consumers || []).length} consumers</span>
+        <span class="tpills">${safeSection("pills", () => pillsHtml(R.payload))}</span>
+      </button>`;
+    }).join("");
+    document.getElementById("navtop").classList.remove("hide");
+    /* An aggregate that cannot hide an owner: it NAMES the contracts that are
+       red. A bare "N pass" across both would be exactly the number this page
+       refuses to print. */
+    const red = REPORTS.filter(R => isRed(R.payload)).map(R => R.name);
+    document.getElementById("pills").innerHTML = red.length
+      ? `<span class="pill fail">FAIL in ${red.map(esc).join(", ")}</span>`
+      : `<span class="pill dim">${REPORTS.length} contract${
+          REPORTS.length === 1 ? "" : "s"}, measured separately</span>`;
+  } else {
+    document.getElementById("pills").innerHTML = pillsHtml(REPORTS[0].payload);
+  }
+} catch (e) {
+  /* The tab strip IS the merged page's navigation. A throw here used to take
+     every listener below it with it, leaving a page that renders and does
+     nothing. */
+  document.getElementById("pills").innerHTML =
+    `<span class="pill fail">header failed: ${esc(e.message)}</span>`;
+}
+
+function activate(ns) {
+  const have = [...document.querySelectorAll(".contract")].map(p => p.dataset.ns);
+  /* Never hide every panel to show one that is not there. */
+  if (!have.includes(ns)) ns = have[0];
+  document.querySelectorAll(".contract").forEach(p =>
+    p.classList.toggle("hide", MERGED && p.dataset.ns !== ns));
+  document.querySelectorAll(".tab").forEach(b =>
+    b.classList.toggle("on", b.dataset.ns === ns));
+  /* The header nav is shared, so it retargets at the contract on screen. */
+  document.querySelectorAll("nav a[data-sec]").forEach(a =>
+    a.href = "#" + (ns ? ns + "-" : "") + a.dataset.sec);
+  applyFilters();
+}
+document.querySelectorAll(".tab").forEach(b =>
+  b.addEventListener("click", () => activate(b.dataset.ns)));
+document.querySelectorAll("[data-goto]").forEach(a =>
+  a.addEventListener("click", () => activate(a.dataset.goto)));
+activate(REPORTS[0].ns);
+
+/* grid cell -> jump to the type block, WITHIN this contract's panel */
+document.querySelectorAll(".contract").forEach(panel => {
+  panel.querySelectorAll("td.c").forEach(td => td.addEventListener("click", () => {
+    const el = panel.querySelector(`.typeblock[data-type="${td.dataset.ty}"]`);
+    if (!el) return;
+    el.classList.remove("folded");
+    el.scrollIntoView({behavior: "smooth", block: "start"});
+  }));
+});
+
+/* a type block folds away, so the type headers alone are a scannable index */
+document.querySelectorAll(".typehead").forEach(th =>
+  th.addEventListener("click", () => th.parentElement.classList.toggle("folded")));
+
+/* deep links: #case-<id> and #reg-<id> land on a row even inside a folded
+   block — and, on a merged page, even inside the contract that is not the one
+   on screen: the link switches to it. */
+function revealHash() {
+  const id = decodeURIComponent(location.hash.slice(1));
+  if (!id) return;
+  const el = document.getElementById(id);
+  if (!el) return;
+  const panel = el.closest(".contract");
+  if (panel) activate(panel.dataset.ns);
+  const block = el.closest(".typeblock");
+  if (block) block.classList.remove("folded");
+  el.scrollIntoView({block: "center"});
+}
+window.addEventListener("hashchange", revealHash);
+revealHash();
+</script>
+</body>
+</html>
