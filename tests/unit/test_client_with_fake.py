@@ -123,6 +123,48 @@ def test_call_container_args_use_json_prefix(rec: Recorder):
     assert map_arg.startswith("json:") and json.loads(map_arg[5:]) == {"k": "v"}
 
 
+def test_call_none_arg_is_json_null(rec: Recorder):
+    """A top-level `None` is the EMPTY inhabitant of an optional slot, and a
+    positional slot spells empty as null — so it must cross argv as the CLI's
+    `json:null`, not as `str(None)`.
+
+    Measured end to end against `test_fullapi_ext_rust`'s
+    `echoOptional(v: ?tstr) -> ?tstr` before this test was written: `"None"`
+    is accepted and echoed back as the four-character STRING "None" (a
+    present value), while `json:null` is accepted as empty — provably as
+    EMPTY and not as a rejection, because `json:42` and `json:[1,2]` in the
+    same slot come back `dispatch_failed / expected string at arg0` and the
+    null does not.
+    """
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    client = LogoscoreClient()
+    client.call("m", "echoOptional", None)
+    assert rec.calls[0]["cmd"] == [
+        "logoscore", "call", "m", "echoOptional", "json:null", "--json",
+    ]
+
+
+def test_call_none_arg_keeps_arity_and_does_not_catch_the_string(rec: Recorder):
+    """Two things a narrower fix gets wrong.
+
+    ARITY: a positional empty occupies its slot — encoding it must not drop
+    the argument, which would silently shift every later one left. `None` is
+    sent here in the MIDDLE so a dropped arg is visible.
+
+    THE STRING: only the `None` object is empty. The four-character string
+    "None" is a present `tstr` value and must still cross as itself — a fix
+    that matched on the rendered text (`if str(arg) == "None"`) would make
+    the two indistinguishable, in the exact direction the bug already
+    confused them.
+    """
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    client = LogoscoreClient()
+    client.call("m", "many", "a", None, 3, "None")
+    assert rec.calls[0]["cmd"] == [
+        "logoscore", "call", "m", "many", "a", "json:null", "3", "None", "--json",
+    ]
+
+
 def test_call_multi_arg_mixed_types_argv(rec: Recorder):
     """A multi-argument call mixing every `_arg_to_str` branch — locks in
     both argument arity (>2 positional args) and the per-arg wire encoding.
