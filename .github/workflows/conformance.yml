@@ -1,0 +1,244 @@
+name: Conformance
+
+# The LIDL conformance matrix, run in CI and published as a browsable report.
+#
+# Until now the matrix only ran when somebody ran it by hand, so a regression in
+# cross-language type behaviour could land unseen. This job runs both tables and
+# publishes the HTML report so a reviewer can read WHICH cells moved rather than
+# a single pass count.
+#
+# TWO TABLES, ONE LANDING PAGE. `$BASE/conformance/` is the merged report: both
+# contracts on one page, each with its own counts, and nothing summed across
+# them — they are different contracts measured against different providers with
+# different case tables, so a blended number would hide which one regressed. The
+# standalone per-table pages stay exactly where they were, at
+# `$BASE/conformance/full/` and `$BASE/conformance/ext/`, and the merged page
+# links to them.
+#
+# The merge runs HERE, over the downloaded artifacts, and not from the
+# `conformance-matrix-merged` nix check — that check depends on both gates and
+# therefore cannot build when either is red, which is precisely the run whose
+# report is worth publishing. It is plain stdlib python over files that already
+# exist, so it costs nothing and works with one table, two, or none.
+#
+# One-time setup, same as the doc-test reports in the SDK repos:
+#   Repo Settings -> Pages -> "Build and deployment" -> Source: "Deploy from a
+#   branch", Branch: `gh-pages` / `(root)`. The publish job creates that branch
+#   on its first run.
+#
+# Fork PRs still RUN the matrix; only the Pages push and PR comment are skipped,
+# because GITHUB_TOKEN cannot push or comment from a fork. The report is still
+# downloadable as an artifact there.
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  matrix:
+    name: Conformance matrix (${{ matrix.table }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `stem` is the artifact prefix each check writes into $out — the full
+          # table writes matrix.*, the ext table matrix-ext.*. They differ; do
+          # not assume one name for both.
+          - table: full
+            check: conformance-matrix
+            stem: matrix
+          - table: ext
+            check: conformance-matrix-ext
+            stem: matrix-ext
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # The check itself is the gate: it exits non-zero on a `fail`, and also on
+      # an `xpass` — a cell the registry calls known-broken that now passes. An
+      # xpass failing the build is deliberate; it forces the registry to stay
+      # honest instead of silently under-reporting what works.
+      - name: Run the matrix
+        id: run
+        run: nix build '.#checks.x86_64-linux.${{ matrix.check }}' --print-build-logs --out-link result-${{ matrix.table }}
+
+      # `always()`: a failing matrix is exactly when the report is worth reading,
+      # and nix still writes the artifacts before the check exits non-zero.
+      - name: Collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="report-${{ matrix.table }}"
+          mkdir -p "$out"
+          link="result-${{ matrix.table }}"
+          stem="${{ matrix.stem }}"
+          if [ -e "$link" ]; then
+            # Normalise to stem-less names inside the artifact so the publish
+            # job does not need to know which table wrote which prefix.
+            for ext in html txt jsonl; do
+              [ -f "$link/$stem.$ext" ] && cp "$link/$stem.$ext" "$out/matrix.$ext"
+            done
+            # Only the full table emits this one.
+            [ -f "$link/known-broken.md" ] && cp "$link/known-broken.md" "$out/known-broken.md"
+          fi
+          # An empty directory would upload as a silent success; say so instead.
+          if [ -z "$(ls -A "$out")" ]; then
+            echo "No matrix artifacts were produced — the check failed before writing them." | tee "$out/NO-REPORT.txt"
+          fi
+          ls -la "$out"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-${{ matrix.table }}
+          path: report-${{ matrix.table }}/
+          if-no-files-found: warn
+
+  publish-report:
+    name: Publish report to GitHub Pages
+    needs: matrix
+    # Run even when the matrix fails — see above. Skip on forks, where
+    # GITHUB_TOKEN can neither push nor comment.
+    if: ${{ always() && github.event.pull_request.head.repo.fork != true }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write         # push to the gh-pages branch
+      pull-requests: write    # post/update the PR comment
+
+    # Serialize Pages pushes so two refs cannot race on the gh-pages branch.
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+
+    steps:
+      # The merge script lives in the repo (conformance/matrix_report.py) and
+      # needs nothing but stdlib python, which the runner already has.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # No `name:` -> downloads every artifact into artifacts/<name>/...
+
+      - name: Arrange site directory
+        id: arrange
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="pr-${{ github.event.pull_request.number }}"
+          else
+            BASE="main"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+          # Everything this job writes lives under $BASE/conformance/. The
+          # doc-test publisher in this repo already owns $BASE/index.html and
+          # $BASE/<os>/ (see the existing gh-pages tree: pr-6/index.html,
+          # pr-6/ubuntu-latest/...). Sharing a ref's landing page would mean
+          # whichever job finished last silently replaced the other's index.
+          # keep_files:true protects other DIRECTORIES, not a contested file.
+          ROOT="site/$BASE/conformance"
+          mkdir -p "$ROOT"
+          found=""
+          # Collected in the SAME order the merge is given them, because --href
+          # is matched to --merge by position.
+          pages=(); hrefs=()
+          for table in full ext; do
+            src="artifacts/conformance-report-$table/matrix.html"
+            if [ -f "$src" ]; then
+              mkdir -p "$ROOT/$table"
+              cp "$src" "$ROOT/$table/index.html"
+              # The plain-text and jsonl forms ride along: jsonl is what you diff
+              # between two runs to see exactly which cells changed.
+              for extra in matrix.txt matrix.jsonl known-broken.md; do
+                [ -f "artifacts/conformance-report-$table/$extra" ] \
+                  && cp "artifacts/conformance-report-$table/$extra" "$ROOT/$table/$extra"
+              done
+              found="$found $table"
+              pages+=("$ROOT/$table/index.html")
+              hrefs+=("./$table/")
+            fi
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+          # The landing page is the MERGED report: both contracts, each with its
+          # own counts, nothing summed across them. Built from the pages just
+          # copied in, so what the landing page shows is byte-for-byte the
+          # payload the standalone pages show.
+          if [ ${#pages[@]} -gt 0 ]; then
+            python3 conformance/matrix_report.py \
+              --merge "${pages[@]}" --href "${hrefs[@]}" \
+              -o "$ROOT/index.html"
+          else
+            # No table produced a report at all — every matrix job died before
+            # writing its artifacts. Nothing is published (the deploy step is
+            # gated on `found`), so this only has to be legible in the log.
+            echo "::warning::no conformance report was produced by any table"
+          fi
+
+      - name: Deploy to gh-pages
+        if: steps.arrange.outputs.found != ''
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          keep_files: true        # don't wipe other PRs' directories
+          commit_message: "Publish conformance report for ${{ steps.arrange.outputs.base }} (${{ github.sha }})"
+
+      - name: Comment on PR with report links
+        if: ${{ github.event_name == 'pull_request' && steps.arrange.outputs.found != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const base = '${{ steps.arrange.outputs.base }}';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const url = `https://${owner}.github.io/${repo}/${base}/conformance/`;
+            // Which tables actually produced a report, in the order they are
+            // laid out. The comment links the merged page first — it is the
+            // landing page — and then each standalone one, so a reviewer who
+            // only cares about one contract can go straight to it.
+            const tables = '${{ steps.arrange.outputs.found }}'.trim().split(/\s+/)
+              .filter(Boolean);
+            const marker = '<!-- conformance-report -->';
+            const body = `${marker}\n**Conformance matrix report:** ${url}\n\n` +
+              `Both contracts on one page, each with its own counts — they are ` +
+              `separate measurements (different contracts, case tables and providers), ` +
+              `so nothing is summed across them.` +
+              (tables.length
+                ? `\n\nPer-table pages: ` +
+                  tables.map(t => `[\`${t}\`](${url}${t}/)`).join(' · ')
+                : '') +
+              `\n\nEach cell is a (case × provider × consumer) triple. ` +
+              `\`xfail\` is a registered known-broken cell; an \`xpass\` means the registry ` +
+              `is stale and fails the run.`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: context.issue.number, body });
+            }

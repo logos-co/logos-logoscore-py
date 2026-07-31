@@ -27,6 +27,13 @@ Usage:
     run_matrix.py --cpp-modules DIR --rust-modules DIR [--logoscore BIN]
                   [--proxy-consumer LABEL=MODULE=DIR[=sync|async]]
                   [--contract full_api.lidl] [--jsonl out.jsonl] [--quiet]
+                  [--report out.html] [--report-text] [--md known.md]
+
+Reporting lives in `matrix_report.py` and measures nothing: it is handed the
+rows this driver already computed. The terminal summary is useful with no flags
+at all — a TYPE x POSITION grid, the differential including its agreements, and
+what is NOT covered — and every coordinate line the previous report printed is
+still printed, unchanged, because CI greps them.
 
 The case table and the xfail registry live with the PROVIDERS, in
 logos-test-modules/conformance/ — the driver lives here because it uses this
@@ -75,6 +82,9 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import matrix_report  # noqa: E402  (the view; it measures nothing)
 
 
 def norm_type(t: str) -> str:
@@ -545,6 +555,25 @@ def main() -> int:
                          "MODE (sync|async) selects the generated wrapper table.")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
+    # Reporting. `--report` is the artifact (self-contained HTML, no CDN, same
+    # Pages precedent as the doctest harness); `--report-text` is the same
+    # drill-down for anyone without a browser; `--md` regenerates the one
+    # registry table the conformance README maintains by hand.
+    ap.add_argument("--report", default=None, metavar="FILE.html",
+                    help="write the full HTML report")
+    ap.add_argument("--report-text", action="store_true",
+                    help="also print the per-type, per-case drill-down")
+    ap.add_argument("--md", default=None, metavar="FILE.md",
+                    help="write the README's known-broken table")
+    # The report payload on its own. `matrix_report.py --merge` reads either
+    # this or the HTML page it is embedded in, so a merged page can be built
+    # without a browser-shaped artifact in the middle. Nothing else reads it,
+    # and it is NOT the machine-readable artifact — that is `--jsonl`, whose
+    # contents this flag does not touch.
+    ap.add_argument("--payload", default=None, metavar="FILE.json",
+                    help="write the report payload as JSON (for --merge)")
+    ap.add_argument("--no-color", action="store_true",
+                    help="never colourise the terminal report")
     args = ap.parse_args()
 
     from logoscore import LogoscoreDaemon
@@ -681,6 +710,15 @@ def main() -> int:
                     row["call_status"] = got.status
                 rows.append(row)
 
+    # Every PROVIDER comparison is RECORDED, not only the ones that disagree.
+    # The agreements are the evidence; leaving them out is why the differential
+    # — the most valuable signal here — is invisible in a green run. `diffs`
+    # feeds the report only: it changes no count, no row and no exit code. Each
+    # entry carries the consumer it was measured on, because the same pair of
+    # providers can agree on one surface and diverge on another (Q1b is exactly
+    # that), and a differential flattened across surfaces would hide it.
+    diffs: list[dict] = []
+
     def differential(kind, cid, case, label_a, res_a, label_b, res_b, note):
         agree = (res_a.error == res_b.error) and (
             res_a.error is not None or same(res_a.value, res_b.value))
@@ -688,6 +726,12 @@ def main() -> int:
             (xfail[k] for k in ((cid, *label_a), (cid, *label_b)) if k in xfail), None)
         status = "pass" if agree else ("xfail" if registered else "fail")
         bump(f"differential-{kind}-{status}")
+        if kind == "provider":
+            diffs.append({"case": cid, "consumer": label_a[1], "declared": False,
+                          "agree": agree, "status": status, "known": registered,
+                          **({} if agree else {"values": {
+                              label_a[0]: res_a.as_report(),
+                              label_b[0]: res_b.as_report()}})})
         if not agree:
             rows.append({
                 "type": case["type"], "position": case["position"],
@@ -710,17 +754,29 @@ def main() -> int:
     names = list(modules)
     if len(names) >= 2:
         for cid, case in by_case.items():
-            if "expect_by_provider" in case:
-                continue  # the divergence IS the expectation; already reported
             for consumer in consumers:
                 if not all(comparable(cid, n, consumer.label) for n in names[:2]):
                     continue
+                res_a, res_b = (measured[(consumer.label, n)].get(
+                    cid, Result(error="not-run")) for n in names[:2])
+                if "expect_by_provider" in case:
+                    # The divergence IS the expectation, and the driver does not
+                    # judge it — already reported above, cell by cell. Recorded
+                    # for the report alone, because a declared divergence that
+                    # quietly stopped diverging is worth seeing and nothing else
+                    # would say so. No count: this is not a comparison the run
+                    # can fail.
+                    diffs.append({
+                        "case": cid, "consumer": consumer.label, "declared": True,
+                        "agree": (res_a.error == res_b.error) and (
+                            res_a.error is not None or same(res_a.value, res_b.value)),
+                        "values": {names[0]: res_a.as_report(),
+                                   names[1]: res_b.as_report()}})
+                    continue
                 differential(
                     "provider", cid, case,
-                    (names[0], consumer.label), measured[(consumer.label, names[0])].get(
-                        cid, Result(error="not-run")),
-                    (names[1], consumer.label), measured[(consumer.label, names[1])].get(
-                        cid, Result(error="not-run")),
+                    (names[0], consumer.label), res_a,
+                    (names[1], consumer.label), res_b,
                     "providers disagree and the contract declares no divergence")
 
     # Consumer differential, per provider: the same value read by two consumer
@@ -744,7 +800,9 @@ def main() -> int:
 
     # Coverage: every (type, position) the contract declares needs a case.
     uncovered = []
+    declared_cells = None
     if args.contract:
+        declared_cells = contract_cells(Path(args.contract))
         covered = set()
         for c in by_case.values():
             # A multi-argument case covers specific (type, position) PAIRS —
@@ -757,7 +815,7 @@ def main() -> int:
                 continue
             for pos in c["position"].split(","):
                 covered.add((norm_type(c["type"]), pos))
-        for ty, pos in sorted(contract_cells(Path(args.contract))):
+        for ty, pos in sorted(declared_cells):
             if (ty, pos) not in covered:
                 uncovered.append((ty, pos))
                 rows.append({
@@ -784,6 +842,23 @@ def main() -> int:
     if args.jsonl:
         Path(args.jsonl).write_text("".join(json.dumps(r) + "\n" for r in rows))
 
+    # The report is built from `rows` — the same list `--jsonl` writes — so the
+    # human view and the machine artifact cannot drift apart. It is a pure
+    # re-arrangement: nothing below measures anything or changes a verdict.
+    payload = matrix_report.build_payload(
+        consumer=consumers[0].label, providers=list(modules), provider_dirs=modules,
+        by_case=by_case, rows=rows, diffs=diffs, counts=counts, known=known,
+        declared_cells=declared_cells, table=table, norm_type=norm_type,
+        paths={"cases": args.cases, "known": args.known,
+               "contract": args.contract, "logoscore": args.logoscore})
+    color = False if args.no_color else None
+    if args.report:
+        Path(args.report).write_text(matrix_report.render_html(payload))
+    if args.payload:
+        Path(args.payload).write_text(json.dumps(payload, ensure_ascii=False))
+    if args.md:
+        Path(args.md).write_text(matrix_report.render_markdown(payload))
+
     failures = [r for r in rows if r["status"] in (
         "fail", "xpass", "uncovered", "dead-skip", "skip-passes", "setup-failed")]
     if not args.quiet:
@@ -792,6 +867,11 @@ def main() -> int:
         print(f"  {len(by_case)} cases x {len(modules)} providers x {len(consumers)} consumers")
         for k in sorted(counts):
             print(f"  {k:<28} {counts[k]}")
+        for line in matrix_report.render_sections(payload, color=color):
+            print(line)
+        if args.report_text:
+            for line in matrix_report.render_drilldown(payload, color=color):
+                print(line)
         if uncovered:
             print(f"\n  UNCOVERED cells declared by the contract ({len(uncovered)}):")
             for ty, pos in uncovered:
