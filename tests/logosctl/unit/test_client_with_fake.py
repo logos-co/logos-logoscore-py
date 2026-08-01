@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import os
 import subprocess
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any
 import pytest
 
 from logosctl import LogosctlClient, issue_token, list_tokens, revoke_token
+from logosctl.client import DaemonEndpoint
 from logosctl.errors import (
     DaemonNotRunningError,
     MethodError,
@@ -413,3 +415,111 @@ def test_watch_argv(rec: Recorder, monkeypatch: pytest.MonkeyPatch):
     ]
     assert spawned["env"]["LOGOSCTL_CONFIG_DIR"] == "/tmp/xcfg"
     assert spawned["env"]["LOGOSCTL_TOKEN"] == "t"
+
+
+# ── Copilot review findings (PR #18) ────────────────────────────────────────
+
+def test_a_chatty_watcher_does_not_deadlock(tmp_path: Path):
+    """stderr is piped, so something has to read it.
+
+    A pipe nobody drains fills at ~64K and blocks the child mid-write. A
+    watcher blocked writing stderr stops writing stdout, so the event stream
+    stalls forever with no error and no timeout — the worst shape of bug.
+
+    This spawns a real process that writes far more to stderr than the pipe
+    holds, and then emits an event. Against an undrained stderr it hangs.
+    """
+    import sys
+    from logosctl.events import Subscription
+
+    # An executable shim, because Subscription.start puts `--json` ahead of
+    # the arguments and a bare interpreter would reject it.
+    noisy = tmp_path / "noisy"
+    noisy.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        # 400 KB, comfortably past any platform's pipe buffer.
+        "for i in range(4000):\n"
+        "    sys.stderr.write('x' * 100 + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "print('{\"event\": \"after-the-flood\"}', flush=True)\n"
+    )
+    noisy.chmod(0o755)
+
+    seen: list[dict] = []
+    done = threading.Event()
+
+    sub = Subscription.start(
+        binary=str(noisy),
+        args=[],
+        config_dir=None,
+        token=None,
+        callback=lambda e: (seen.append(e), done.set()),
+        error_callback=None,
+    )
+    try:
+        assert done.wait(timeout=30), (
+            "the event never arrived — the watcher is blocked writing stderr, "
+            "which is exactly the deadlock draining prevents"
+        )
+        assert seen == [{"event": "after-the-flood"}]
+    finally:
+        sub.cancel()
+
+
+def test_a_watcher_that_dies_reports_why(tmp_path: Path):
+    """A subscription whose process exits non-zero must say so, with what the
+    process wrote. Otherwise it is indistinguishable from a healthy
+    subscription that simply has nothing to report."""
+    import sys
+    from logosctl.events import Subscription
+
+    dies = tmp_path / "dies"
+    dies.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.write('cannot reach core_service\\n')\n"
+        "sys.exit(2)\n"
+    )
+    dies.chmod(0o755)
+
+    errors: list[BaseException] = []
+    failed = threading.Event()
+
+    sub = Subscription.start(
+        binary=str(dies),
+        args=[],
+        config_dir=None,
+        token=None,
+        callback=lambda e: None,
+        error_callback=lambda e: (errors.append(e), failed.set()),
+    )
+    try:
+        assert failed.wait(timeout=30), "the watcher died silently"
+        assert "code 2" in str(errors[0])
+        assert "cannot reach core_service" in str(errors[0]), (
+            "the reason the watcher died has to travel with the error"
+        )
+    finally:
+        sub.cancel()
+
+
+@pytest.mark.parametrize("bad", [42, None, ["auto.json"], {"name": "auto.json"}])
+def test_a_non_string_token_file_falls_back_instead_of_raising(tmp_path: Path, bad):
+    """`token_file` reaching write_config as a non-string is a corrupt or
+    hand-edited config, not a reason to abort the write. `Path(42)` raises
+    TypeError over a value we were always going to reject anyway."""
+    client_dir = tmp_path / "client"
+    client_dir.mkdir(parents=True)
+    (client_dir / "config.yaml").write_text(json.dumps({"token_file": bad}))
+
+    LogosctlClient.write_config(
+        tmp_path,
+        {"core_service": DaemonEndpoint(transport="local")},
+        token="tok",
+        merge=True,
+    )
+
+    cfg = json.loads((client_dir / "config.yaml").read_text())
+    assert cfg["token_file"] == "auto.json"
+    assert (client_dir / "auto.json").exists()

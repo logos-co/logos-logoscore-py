@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -36,6 +37,11 @@ class Subscription:
         self._callback = callback
         self._error_callback = error_callback
         self._cancelled = False
+        # Bounded tail of the watcher's stderr, filled by a drain thread.
+        # Bounded because a chatty watcher would otherwise grow it without
+        # limit over a long subscription, and only the end is diagnostic.
+        self._stderr_tail: deque[str] = deque(maxlen=50)
+        self._stderr_thread: threading.Thread | None = None
 
     @classmethod
     def start(
@@ -90,7 +96,34 @@ class Subscription:
         )
         sub._thread = thread
         thread.start()
+        # stderr is piped, so SOMETHING has to read it. A pipe nobody drains
+        # fills at 64K and blocks the child mid-write — and a watcher blocked
+        # writing stderr stops writing stdout, so the event stream silently
+        # stalls forever. Draining rather than sending it to /dev/null keeps
+        # the diagnostics: a watcher that dies should be able to say why.
+        stderr_thread = threading.Thread(
+            target=sub._drain_stderr,
+            name=f"logosctl-watch-stderr-{'-'.join(args)}",
+            daemon=True,
+        )
+        sub._stderr_thread = stderr_thread
+        stderr_thread.start()
         return sub
+
+    def _drain_stderr(self) -> None:
+        stream = self._process.stderr
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                self._stderr_tail.append(line.rstrip("\n"))
+        except Exception:  # noqa: BLE001 — draining must never raise
+            pass
+
+    @property
+    def stderr_tail(self) -> str:
+        """The tail of the watcher's stderr. Empty when it said nothing."""
+        return "\n".join(self._stderr_tail)
 
     @property
     def alive(self) -> bool:
@@ -119,6 +152,9 @@ class Subscription:
             except ProcessLookupError:
                 pass
         self._thread.join(timeout=timeout)
+        # The child is gone, so its stderr is at EOF and this returns promptly.
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=timeout)
 
     def __enter__(self) -> "Subscription":
         return self
@@ -159,6 +195,20 @@ class Subscription:
                     self._report_error(e)
         except Exception as e:  # noqa: BLE001
             self._report_error(e)
+
+        # The stream ended. If that was the watcher dying rather than us
+        # cancelling it, say so — and say what it wrote on the way out. A
+        # subscription that goes quiet because its process exited is otherwise
+        # indistinguishable from one where nothing happened to be emitted.
+        if not self._cancelled:
+            code = self._process.poll()
+            if code:
+                if self._stderr_thread is not None:
+                    self._stderr_thread.join(timeout=1.0)
+                tail = self.stderr_tail.strip()
+                self._report_error(RuntimeError(
+                    f"watch exited with code {code}"
+                    + (f"\n{tail}" if tail else "")))
 
     def _report_error(self, exc: BaseException) -> None:
         if self._error_callback is not None:

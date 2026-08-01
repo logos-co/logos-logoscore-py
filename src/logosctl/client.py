@@ -218,8 +218,16 @@ class LogosctlClient:
             # path, no traversal) — otherwise fall back to auto.json.
             # The CLI applies the same rule and fails closed, so a name
             # we can't honor would leave an unreadable credential.
+            # `setdefault` above only fills the key in when it is ABSENT, so a
+            # merged config can still carry a non-string here — a hand-edited
+            # file, a corrupt one, an older format. `Path(42)` raises
+            # TypeError, which would abort the write over a value we were
+            # always going to reject anyway. Treat "not a plain string" as one
+            # more thing we cannot honor, same as a path or a traversal.
             token_file = cfg["token_file"]
-            if Path(token_file).name != token_file or Path(token_file).is_absolute():
+            if (not isinstance(token_file, str)
+                    or Path(token_file).name != token_file
+                    or Path(token_file).is_absolute()):
                 token_file = "auto.json"
                 cfg["token_file"] = token_file
         if instance_id is not None:
