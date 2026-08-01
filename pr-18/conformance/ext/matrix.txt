@@ -1,0 +1,65 @@
+
+LIDL conformance matrix — consumers: py
+  39 cases x 2 providers x 1 consumers
+  differential-provider-pass   37
+  pass                         76
+  xfail                        2
+
+  TYPE x POSITION   — does a value of this type, in this position, survive?
+                     arg    ret    evt record
+  ?tstr           3ok+1K 2ok+1K      .      .
+  Blob               1ok    1ok    1ok    3ok
+  Opt                1ok    1ok      .    4ok
+  Wrapper            1ok    1ok      .    1ok
+  bool                 .    1ok      .      .
+  bstr                 .      .      .    3ok
+  tstr                 .    1ok      .    2ok
+  uint                 .      .      .    2ok
+  {tstr:Blob}        1ok    1ok      .      .
+  {tstr:[bstr]}      1ok    1ok      .      .
+  {tstr:bstr}        1ok    1ok      .      .
+  {tstr:int}         2ok    2ok      .      .
+  {tstr:tstr}        1ok    1ok      .      .
+  [Blob]             2ok    2ok      .      .
+  [Opt]              2ok    2ok      .      .
+  [[int]]            2ok    2ok      .      .
+  [bstr]             3ok    2ok      .      .
+
+    n ok = n cases green on all 2 provider x consumer surfaces      +n K = n cases with a registered known-broken cell
+    --   = declared by the contract, NO CASE                        .    = no such position for this type
+    covered but not declared by the contract: Blob@record_field, Opt@record_field, Wrapper@record_field, bstr@record_field, tstr@record_field, uint@record_field
+
+  DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
+    provider  test_fullapi_ext_rust vs test_fullapi_ext_cpp
+      on py                37 agree   0 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
+    consumer  one consumer point; a cell proves a provider agreed with this client,
+              not that two consumer surfaces agree with each other.
+
+    DECLARED DIVERGENCES (expect_by_provider) — the driver does not compare these; the divergence IS the expectation
+      [bstr]/lenient-plain-string       DIFFER  by behaviour
+        ext_rust  ["hi"]
+        ext_cpp  [{"_bytes": "aGk"}]
+      1 more differ BY IDENTITY — each provider answers with its own name, which is
+        what the case is for: identity/whoami
+
+  NOT MEASURED   — what this run does not answer, on the record
+    nothing declared out of scope
+
+  KNOWN-BROKEN REGISTER   — every amber cell above, and the claim behind it
+    OPT2  2 cell(s) in this run (2 xfail), + 1 differential   cases: Optional/scalar/empty-is-null
+          an EMPTY optional in a positional slot has no expressible form on this stack — null
+          is already the failure token
+          expected null
+          got      "None"   [xfail] ext_rust/py, ext_cpp/py
+          fix is: argument side: one line in logoscore-py, `if arg is None: return
+          "json:null"` in _arg_to_str. Not made here — that repo is out of scope for this
+          change, and a driver edit that lands without the contract it serves is how a matrix
+          starts measuring the driver.
+          return side: a real decision, not a patch. Either the dispatch result carries
+          presence out of band (the same missing channel as M4-residual:
+          logos_rpc_status.h:24-27 says the slot returns a single QVariant and `deferred` has
+          nowhere out-of-band to live), or `?T` is declared unusable as a bare return type and
+          the contract says so. Making null mean `empty` on a wire where null already means
+          `failed` is not a third option.
+
+  all cells pass (or are registered xfail/skip)
