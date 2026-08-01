@@ -8,6 +8,10 @@ on:
 
 jobs:
   test:
+    # The `logoscore` client. Its logosctl twin is a SEPARATE job below, not
+    # extra steps here, so the two signals can never mask each other: the new
+    # CLI is still being validated and a red logosctl run must leave this job's
+    # verdict on logoscore untouched.
     strategy:
       fail-fast: false
       matrix:
@@ -103,3 +107,57 @@ jobs:
       - name: Run docker smoke tests
         run: |
           nix develop --command pytest tests/docker_smoke -v
+
+  # ── logosctl ──────────────────────────────────────────────────────────────
+  # The second client, driving the `logosctl` binary (`.#ctl` in the CLI
+  # flake). Its own job so it runs in parallel with `test` on its own runner
+  # and fails on its own name — see the note at the top of `test`.
+  #
+  # It IS a gate, not `continue-on-error`: the whole point of shipping the two
+  # clients side by side is to find out whether the new one holds up, and a
+  # suite nobody has to fix measures nothing. Branch protection is the place
+  # to decide whether it blocks a merge, not this file.
+  #
+  # No docker smoke step: `src/logosctl/docker_daemon.py` targets a
+  # `logosctl:smoke-*` image that does not exist yet, and there is no
+  # tests/logosctl/docker_smoke to run against it.
+  test-logosctl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Run unit tests (logosctl)
+        run: nix build '.#checks.${{ matrix.arch }}.unit-logosctl' --print-build-logs
+
+      # Three transports, sequential within the one job — same trade as the
+      # logoscore job above: the dominant cost is realising the CLI + test
+      # module closure once, which a third matrix axis would pay per entry.
+      - name: Run integration tests (logosctl, local)
+        run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-local' --print-build-logs
+
+      - name: Run integration tests (logosctl, tcp)
+        run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-tcp' --print-build-logs
+
+      - name: Run integration tests (logosctl, tcp_ssl)
+        run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-tcp_ssl' --print-build-logs

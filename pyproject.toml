@@ -34,7 +34,11 @@ Issues = "https://github.com/logos-co/logos-logoscore-py/issues"
 test = ["pytest>=7"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/logoscore"]
+# Two clients, one distribution. `logoscore` drives the `logoscore` binary,
+# `logosctl` drives `logosctl`; they share nothing but this wheel. Both ship
+# until one of the two CLIs is retired, and that removal is one entry here
+# plus the matching directory under src/ — nothing to untangle.
+packages = ["src/logoscore", "src/logosctl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
