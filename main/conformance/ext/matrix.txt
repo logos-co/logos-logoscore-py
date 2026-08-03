@@ -50,7 +50,7 @@ LIDL conformance matrix — consumers: py
           an EMPTY optional in a positional slot has no expressible form on this stack — null
           is already the failure token
           expected null
-          got      "None"   [xfail] ext_rust/py, ext_cpp/py
+          got      {"__error__": "METHOD_FAILED"}   [xfail] ext_rust/py, ext_cpp/py
           fix is: argument side: one line in logoscore-py, `if arg is None: return
           "json:null"` in _arg_to_str. Not made here — that repo is out of scope for this
           change, and a driver edit that lands without the contract it serves is how a matrix
