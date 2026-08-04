@@ -8,15 +8,42 @@ The wrapper is a thin layer over the `logoscore` CLI: every operation
 spawns a `logoscore <subcommand> --json` subprocess and parses its output.
 No C++ bindings, no IPC code.
 
+## Two clients
+
+The CLI repo now ships [two binaries](https://github.com/logos-co/logos-logoscore-cli#two-binaries),
+so this package ships two clients — one each, side by side:
+
+| Import | Drives | |
+|---|---|---|
+| **`logoscore`** | the `logoscore` binary | The client that exists today. Unchanged. **Use this one.** |
+| **`logosctl`** | the `logosctl` binary | Same shape, ported to the new CLI's surface. **Being validated; not yet the default.** |
+
+```python
+from logoscore import LogoscoreDaemon, LogoscoreClient   # today
+from logosctl  import LogosctlDaemon,  LogosctlClient    # under validation
+```
+
+The two share no code and no state, and neither can reach the other's
+binary. Everything below documents `logoscore`; `logosctl` mirrors it
+method for method, with one structural difference — the new CLI has no
+`--client-*` flags and no `LOGOSCORE_CLIENT_*` env vars, so a client is
+retargeted by writing `<config_dir>/client/config.yaml` rather than by
+passing a transport per call (see `help(LogosctlDaemon.remote_client)`).
+
+`src/logosctl/` and `tests/logosctl/` are the whole of the new client, so
+whichever way the validation goes, the losing half is a delete.
+
 ## Install
 
 ```bash
 pip install logoscore
 ```
 
-The `logoscore` CLI must be on `PATH`. See
+One distribution, both clients — `import logoscore` and `import logosctl`
+both work after installing. The matching CLI must be on `PATH`. See
 [logos-logoscore-cli](https://github.com/logos-co/logos-logoscore-cli)
-for install instructions, or use the included Nix flake which pulls it in.
+for install instructions, or use the included Nix flake, which puts both
+binaries in the dev shell.
 
 ## Quickstart — local daemon
 
@@ -378,23 +405,41 @@ codes:
 
 ## Development
 
-The repo ships a Nix flake that pulls in `logoscore` from
-`logos-logoscore-cli` so tests run out of the box:
+The repo ships a Nix flake that pulls both binaries out of
+`logos-logoscore-cli` — its `default` output for `logoscore`, its `ctl`
+output for `logosctl` — so tests run out of the box:
 
 ```bash
-nix develop        # python + pytest + logoscore on PATH
-pytest             # runs unit + integration (docker smoke skipped)
+nix develop        # python + pytest + logoscore + logosctl on PATH
+pytest             # runs unit + integration, both clients (docker smoke skipped)
 nix flake check    # same, under nix
 ```
 
-Test layout:
+Test layout — one tree per client, duplicated on purpose:
 
 ```
 tests/
 ├── unit/          # no logoscore required; runs anywhere
 ├── integration/   # spawns local logoscore daemons; nix check covers this
-└── docker_smoke/  # docker-required; see tests/docker_smoke/README.md
+├── docker_smoke/  # docker-required; see tests/docker_smoke/README.md
+└── logosctl/      # the same two suites against logosctl
+    ├── unit/
+    └── integration/
 ```
+
+`tests/logosctl/` is a deliberate duplicate rather than a parametrisation:
+the two CLIs configure a daemon through different mechanisms (flags versus
+an installed config document), so a shared suite would be mostly branches.
+The nix checks are duplicated the same way — `unit-logosctl` and
+`integration-logosctl-{local,tcp,tcp_ssl}` alongside the originals, in
+their own CI job, so a red logosctl run cannot mask a logoscore
+regression. The conformance matrix is *not* duplicated: it measures the
+LIDL type contract in the shared runtime, which a second CLI would only
+re-measure.
+
+The logosctl suites skip unless `LOGOSCTL_BIN` and
+`LOGOSCTL_TEST_MODULES_DIR` are set (the dev shell and the nix checks set
+both), mirroring the `LOGOSCORE_*` pair.
 
 Docker smoke tests live in their own directory because they need the
 host's docker socket (not available inside `nix build`). Run them
