@@ -5,24 +5,10 @@
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
-    # ── TEMPORARY: the logosctl CLI, pre-merge ─────────────────────────────
-    # A SECOND pin of the same repo, at the unmerged branch that introduces
-    # the `ctl` output. It exists so adding the logosctl client here stays
-    # genuinely additive: the input above keeps pointing at master, so every
-    # pre-existing `logoscore` output — the wheel, the docker bundles, the
-    # `unit` / `integration-*` / `conformance-*` checks — builds against
-    # exactly the CLI commit it built against before, and the new CLI's
-    # blast radius is confined to the `*-logosctl` checks and the dev shell.
-    #
-    # REMOVE WHEN: logos-logoscore-cli#feat/logosctl-cli-migration merges to
-    # master. Then `ctl` exists on the input above, and the cleanup is
-    # deleting this input, its `outputs` argument, and repointing the two
-    # `logosctlBin` bindings at `logos-logoscore-cli`.
-    logos-logoscore-cli-ctl.url = "github:logos-co/logos-logoscore-cli/feat/logosctl-cli-migration";
     logos-test-modules.url = "github:logos-co/logos-test-modules";
   };
 
-  outputs = { self, nixpkgs, logos-logoscore-cli, logos-logoscore-cli-ctl, logos-test-modules, ... }:
+  outputs = { self, nixpkgs, logos-logoscore-cli, logos-test-modules, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -52,15 +38,11 @@
             src = ./.;
             nativeBuildInputs = [ pkgs.python3Packages.hatchling ];
             # Only `logoscore` is propagated, even though the wheel now also
-            # ships the `logosctl` client. Propagating `ctl` would put the
-            # under-validation binary on the critical path of `nix build` —
-            # the one output every consumer of this flake pulls — so a hiccup
-            # in the new CLI could redden the old client's build. Anyone who
-            # wants the binary takes it from the `logos-logoscore-cli-ctl`
-            # input explicitly (the dev shell and the logosctl checks below do
-            # exactly that) — which is also why this package, and every other
-            # pre-existing output, still resolves through the master-pinned
-            # `logos-logoscore-cli` input alone.
+            # ships the `logosctl` client. Propagating `ctl` would put both
+            # binaries on the critical path of `nix build` — the one output
+            # every consumer of this flake pulls. Anyone who wants logosctl
+            # takes it from `logos-logoscore-cli.packages.*.ctl` explicitly
+            # (the dev shell and the logosctl checks below do exactly that).
             propagatedBuildInputs = [ logoscoreBin ];
             doCheck = false;
             pythonImportsCheck = [ "logoscore" "logosctl" ];
@@ -134,13 +116,10 @@
       devShells = forAllSystems ({ pkgs, system }:
         let
           logoscoreBin             = logos-logoscore-cli.packages.${system}.default;
-          # Same repo, a SECOND input: `ctl` only exists on the unmerged CLI
-          # branch, so it is taken from `logos-logoscore-cli-ctl` and never
-          # from the master pin above — see the input's comment. Both binaries
-          # are on PATH here so a plain `pytest` covers both suites —
-          # tests/logosctl skips silently when LOGOSCTL_BIN is unset, which
-          # would make the new suite look green while never running.
-          logosctlBin              = logos-logoscore-cli-ctl.packages.${system}.ctl;
+          # Both binaries are on PATH here so a plain `pytest` covers both
+          # suites — tests/logosctl skips silently when LOGOSCTL_BIN is unset,
+          # which would make the new suite look green while never running.
+          logosctlBin              = logos-logoscore-cli.packages.${system}.ctl;
           # `test_fullapi_cpp` (universal C++) is the single test module the
           # suite loads — its methods + typed events span the whole
           # parameter/return/event surface. `.install` lays out
@@ -211,15 +190,11 @@
         let
           python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
-          # The `logosctl` binary, from the SECOND CLI input — the unmerged
-          # branch is the only place a `ctl` output exists. Keeping it on its
-          # own input is what makes this change additive: `logoscoreBin` above
-          # still resolves through the master-pinned input, so the checks that
-          # existed before this branch build against precisely the CLI commit
-          # they built against before. Referenced only from the `*-logosctl`
-          # checks below, so the new CLI is never on the evaluation path of a
-          # logoscore check either.
-          logosctlBin = logos-logoscore-cli-ctl.packages.${system}.ctl;
+          # Same repo, sibling output: `ctl` ships alongside `default`/
+          # `cli` since logos-logoscore-cli#76. Referenced only from the
+          # `*-logosctl` checks below so a logosctl hiccup cannot redden a
+          # logoscore check's evaluation path either.
+          logosctlBin = logos-logoscore-cli.packages.${system}.ctl;
           # `.install` lays out modules/<name>/<name>_plugin.{so,dylib} +
           # manifest.json — the layout logoscore's `-m` flag expects.
           # `test_fullapi_cpp` (universal C++) is the single test module the
@@ -327,10 +302,9 @@
           # ── logosctl ────────────────────────────────────────────────────
           # A parallel suite for the parallel client, in its own derivations
           # so nix builds it concurrently with the logoscore ones and a red
-          # logosctl (the CLI still under validation) cannot mask a logoscore
-          # regression. Deleting logosctl later is deleting these four
-          # attributes, `mkIntegrationLogosctl`, `logosctlBin`, and the
-          # `logos-logoscore-cli-ctl` input.
+          # logosctl cannot mask a logoscore regression. Dropping logosctl
+          # later is deleting these four attributes, `mkIntegrationLogosctl`,
+          # and `logosctlBin`.
           #
           # Deliberately NOT duplicated: the conformance matrix. It measures
           # the LIDL type contract, which lives in the runtime both binaries
