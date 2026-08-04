@@ -82,7 +82,19 @@ def _arg_to_str(arg: Any) -> str:
     values pass as natural Python objects. Strings/numbers/bools are
     passed as-is for the CLI's type coercion (see
     logos-logoscore-cli/src/client/commands/call_command.cpp).
+
+    `None` is the empty inhabitant of an optional slot, and a POSITIONAL
+    slot has no key to omit — the contract spells empty there as null, and
+    the arity must not change — so it takes the same `json:` route rather
+    than falling through to `str(None)`. Without this it crossed argv as
+    the literal string "None", which a `?tstr` provider echoed back as a
+    present four-character string. Nulls NESTED in a container were always
+    fine (they ride the branch below intact); only the top-level one was
+    lost, which is why `Optional/record/explicit-null` was expressible and
+    `Optional/scalar/empty-is-null` was not.
     """
+    if arg is None:
+        return "json:null"
     if isinstance(arg, Path):
         return f"@{arg}"
     if isinstance(arg, bool):
