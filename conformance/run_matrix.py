@@ -338,6 +338,49 @@ def parse_proxy_consumer(spec: str) -> Consumer:
     return Consumer(label, module=module, dirs=[path], call_mode=mode)
 
 
+# ── the table ───────────────────────────────────────────────────────────────
+
+# Every key a case or an event may carry. An unknown one is a HARD ERROR rather
+# than something to ignore, because ignoring it is silent and wrong in the worst
+# direction: a case whose expectation is spelled with a key this driver does not
+# read has no expectation at all, takes `have_want = False`, and is filed
+# `status: "skip"` — which is not in the failing-status set. It would sit in the
+# table looking deliberate, count as coverage, and assert nothing.
+#
+# That is not hypothetical. cases.json's own schema comment documented
+# `expect_error` for years; no such key was ever implemented, and a case written
+# the way the comment described would have been skipped in silence.
+CASE_KEYS = {
+    "id", "type", "position", "method", "args", "cells", "tags", "why",
+    "raw", "timeout_ms", "expect", "expect_by_provider",
+}
+EVENT_KEYS = {
+    "id", "type", "position", "event", "fire", "value", "values", "cells",
+    "tags", "why",
+}
+TABLE_KEYS = {"schema", "contract", "comment", "providers", "cases", "events"}
+
+
+def validate_table(table: dict, path: str) -> None:
+    """Reject a table carrying keys this driver does not read.
+
+    Checked for the WHOLE table before anything runs, so the error names every
+    offending key at once instead of one per re-run.
+    """
+    bad = [f"(table): unknown key {k!r}" for k in sorted(set(table) - TABLE_KEYS)]
+    for kind, allowed in (("cases", CASE_KEYS), ("events", EVENT_KEYS)):
+        for entry in table.get(kind) or []:
+            for k in sorted(set(entry) - allowed):
+                bad.append(f"{kind}[{entry.get('id', '?')!r}]: unknown key {k!r}")
+    if bad:
+        raise SystemExit(
+            f"{path}: {len(bad)} unknown key(s) — this driver would ignore them, "
+            f"and an ignored expectation is a case that silently asserts "
+            f"nothing:\n  " + "\n  ".join(bad)
+            + "\n\nA rejection is spelled `\"expect\": {\"__error__\": \"<code>\"}`."
+        )
+
+
 # ── the registries ──────────────────────────────────────────────────────────
 
 
@@ -580,6 +623,7 @@ def main() -> int:
 
     table = json.loads(Path(args.cases).read_text())
     known = json.loads(Path(args.known).read_text())
+    validate_table(table, args.cases)
     cases, events = table["cases"], table["events"]
 
     xfail = load_xfail(known)
