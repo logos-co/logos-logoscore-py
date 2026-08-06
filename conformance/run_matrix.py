@@ -350,13 +350,22 @@ def parse_proxy_consumer(spec: str) -> Consumer:
 # That is not hypothetical. cases.json's own schema comment documented
 # `expect_error` for years; no such key was ever implemented, and a case written
 # the way the comment described would have been skipped in silence.
+#
+# These sets are what this driver and matrix_report.py READ — not what the
+# shipped tables happen to contain. The distinction is the whole correctness
+# argument: derived from the data, the lists would silently omit any key that is
+# supported but currently unused, and this guard would then reject a legitimate
+# case. `raw` on an EVENT is exactly that — run_events() honours it, no event
+# uses it today. A key belongs here when some code path reads it, and the test
+# suite pins the two shipped tables against these sets so the reverse mistake
+# (rejecting real cases) fails loudly too.
 CASE_KEYS = {
     "id", "type", "position", "method", "args", "cells", "tags", "why",
     "raw", "timeout_ms", "expect", "expect_by_provider",
 }
 EVENT_KEYS = {
     "id", "type", "position", "event", "fire", "value", "values", "cells",
-    "tags", "why",
+    "tags", "why", "raw",
 }
 TABLE_KEYS = {"schema", "contract", "comment", "providers", "cases", "events"}
 
@@ -575,7 +584,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     # The two full_api providers keep dedicated flags (the flake check and every
     # existing invocation use them); `--modules NAME=DIR` is the general form, so
-    # a table with a different provider set — full_api_ext has ONE provider —
+    # a table naming a different provider set — full_api_ext names its own two —
     # runs through the same driver instead of a second one.
     ap.add_argument("--cpp-modules")
     ap.add_argument("--rust-modules")

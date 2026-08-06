@@ -98,6 +98,52 @@ def test_unknown_top_level_key_is_rejected():
     assert "providerz" in str(e.value)
 
 
+@pytest.mark.parametrize("kind, key, reader", [
+    # `raw` on an EVENT is honoured by run_events() and used by no event in
+    # either shipped table. An allowlist derived from the DATA rather than from
+    # the driver's reads omits it, and this guard then rejects a legitimate
+    # case — the same class of silent wrongness it exists to prevent, pointed
+    # the other way. Caught in review on the first version of this change.
+    ("events", "raw", "run_events"),
+    ("cases", "raw", "run_methods"),
+    ("cases", "timeout_ms", "run_methods"),
+    ("cases", "cells", "coverage"),
+    ("events", "cells", "coverage"),
+])
+def test_supported_but_unused_keys_are_accepted(kind, key, reader):
+    """A key some code path reads must validate even if no case uses it."""
+    t = _table()
+    t[kind][0][key] = 1 if key == "timeout_ms" else (
+        [["tstr", "method_arg"]] if key == "cells" else True)
+    run_matrix.validate_table(t, "cases.json")  # must not raise
+
+
+def test_the_allowlists_cover_every_key_the_driver_reads():
+    """The lists are the driver's read set. If a new `x.get("k")` appears
+    without `k` here, this fails rather than waiting for a rejected table.
+
+    `ev` is checked against EVENT_KEYS exactly — it only ever binds an event,
+    which is what makes it the precise half, and `raw` slipping out of
+    EVENT_KEYS is what this test exists to catch.
+
+    `case` is checked against the UNION, because `by_case` merges cases and
+    events into one mapping and the main loop reads `case["values"]` off what
+    is really an event. Narrowing that half would fail on correct code.
+    """
+    import re
+    src = _DRIVER.read_text()
+
+    ev = set(re.findall(r'\bev\.get\("([a-z_]+)"', src))
+    ev |= set(re.findall(r'\bev\["([a-z_]+)"\]', src))
+    missing = ev - run_matrix.EVENT_KEYS
+    assert not missing, f"driver reads event keys not in EVENT_KEYS: {missing}"
+
+    read = set(re.findall(r'\bcase\.get\("([a-z_]+)"', src))
+    read |= set(re.findall(r'\bcase\["([a-z_]+)"\]', src))
+    missing = read - (run_matrix.CASE_KEYS | run_matrix.EVENT_KEYS)
+    assert not missing, f"driver reads keys in neither allowlist: {missing}"
+
+
 @pytest.mark.parametrize("path", ["cases.json", "ext-cases.json"])
 def test_both_shipped_tables_validate(path):
     """The allowlist is derived from the real tables; it must accept them."""

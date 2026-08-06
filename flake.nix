@@ -206,8 +206,11 @@
           # provider must never be able to satisfy an assertion for the other.
           testModulesRustInstall = logos-test-modules.modules.${system}.test_fullapi_rust.install;
           # The ext contract (records, bytes at depth, typed maps, nested
-          # composites) has ONE provider today — the C++ cdylib backend cannot
-          # express these types yet — so its table runs without a differential.
+          # composites). The C++ cdylib backend could not express these types
+          # when the table was split out, so it ran single-provider and without a
+          # differential; logos-cpp-sdk#125 lifted that and both providers are
+          # wired below, so this table carries a provider differential like
+          # full_api. What it still lacks is the consumer axis: `py` only.
           testModulesExtInstall = logos-test-modules.modules.${system}.test_fullapi_ext_rust.install;
           testModulesExtCppInstall = logos-test-modules.modules.${system}.test_fullapi_ext_cpp.install;
           # The QT-TYPED consumer. `type: core` with no `interface` key selects
