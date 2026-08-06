@@ -338,6 +338,58 @@ def parse_proxy_consumer(spec: str) -> Consumer:
     return Consumer(label, module=module, dirs=[path], call_mode=mode)
 
 
+# ── the table ───────────────────────────────────────────────────────────────
+
+# Every key a case or an event may carry. An unknown one is a HARD ERROR rather
+# than something to ignore, because ignoring it is silent and wrong in the worst
+# direction: a case whose expectation is spelled with a key this driver does not
+# read has no expectation at all, takes `have_want = False`, and is filed
+# `status: "skip"` — which is not in the failing-status set. It would sit in the
+# table looking deliberate, count as coverage, and assert nothing.
+#
+# That is not hypothetical. cases.json's own schema comment documented
+# `expect_error` for years; no such key was ever implemented, and a case written
+# the way the comment described would have been skipped in silence.
+#
+# These sets are what this driver and matrix_report.py READ — not what the
+# shipped tables happen to contain. The distinction is the whole correctness
+# argument: derived from the data, the lists would silently omit any key that is
+# supported but currently unused, and this guard would then reject a legitimate
+# case. `raw` on an EVENT is exactly that — run_events() honours it, no event
+# uses it today. A key belongs here when some code path reads it, and the test
+# suite pins the two shipped tables against these sets so the reverse mistake
+# (rejecting real cases) fails loudly too.
+CASE_KEYS = {
+    "id", "type", "position", "method", "args", "cells", "tags", "why",
+    "raw", "timeout_ms", "expect", "expect_by_provider",
+}
+EVENT_KEYS = {
+    "id", "type", "position", "event", "fire", "value", "values", "cells",
+    "tags", "why", "raw",
+}
+TABLE_KEYS = {"schema", "contract", "comment", "providers", "cases", "events"}
+
+
+def validate_table(table: dict, path: str) -> None:
+    """Reject a table carrying keys this driver does not read.
+
+    Checked for the WHOLE table before anything runs, so the error names every
+    offending key at once instead of one per re-run.
+    """
+    bad = [f"(table): unknown key {k!r}" for k in sorted(set(table) - TABLE_KEYS)]
+    for kind, allowed in (("cases", CASE_KEYS), ("events", EVENT_KEYS)):
+        for entry in table.get(kind) or []:
+            for k in sorted(set(entry) - allowed):
+                bad.append(f"{kind}[{entry.get('id', '?')!r}]: unknown key {k!r}")
+    if bad:
+        raise SystemExit(
+            f"{path}: {len(bad)} unknown key(s) — this driver would ignore them, "
+            f"and an ignored expectation is a case that silently asserts "
+            f"nothing:\n  " + "\n  ".join(bad)
+            + "\n\nA rejection is spelled `\"expect\": {\"__error__\": \"<code>\"}`."
+        )
+
+
 # ── the registries ──────────────────────────────────────────────────────────
 
 
@@ -532,7 +584,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     # The two full_api providers keep dedicated flags (the flake check and every
     # existing invocation use them); `--modules NAME=DIR` is the general form, so
-    # a table with a different provider set — full_api_ext has ONE provider —
+    # a table naming a different provider set — full_api_ext names its own two —
     # runs through the same driver instead of a second one.
     ap.add_argument("--cpp-modules")
     ap.add_argument("--rust-modules")
@@ -580,6 +632,7 @@ def main() -> int:
 
     table = json.loads(Path(args.cases).read_text())
     known = json.loads(Path(args.known).read_text())
+    validate_table(table, args.cases)
     cases, events = table["cases"], table["events"]
 
     xfail = load_xfail(known)
