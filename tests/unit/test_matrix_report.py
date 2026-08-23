@@ -283,8 +283,43 @@ def test_a_string_and_a_number_do_not_render_alike():
 
 
 def test_the_call_line_does_not_re_encode_its_arguments():
-    line = R._call_line({"call": "echoBool", "args": [False], "expect": False}, 84)
+    line = R._call_line({"call": "echoBool", "args": [False], "expect": False,
+                         "has_expect": True}, 84)
     assert line == "echoBool(false) → false"      # not echoBool("false")
+
+
+def test_an_expectation_of_null_is_an_expectation():
+    """`"expect": null` is the whole subject of one case, not the absence of one.
+
+    A case_view always CARRIES the `expect` key (build_payload sets it from
+    `case.get`), so truthiness cannot tell "expects null" from "has no expect"
+    — and a truthiness test rendered failure/D/null-is-a-value, whose entire
+    claim is that a legitimate null comes back as a null, as a case with no
+    expectation at all. `has_expect` is what separates them.
+    """
+    assert R._call_line({"call": "echoAny", "args": [None], "expect": None,
+                         "has_expect": True}, 84) == "echoAny(null) → null"
+    # ...and an event, which really has none, still renders without an arrow.
+    assert "→" not in R._call_line(
+        {"call": "stringEvent", "fire": "fireStringEvent", "value": "hi",
+         "expect": None, "has_expect": False}, 84)
+
+
+def test_build_payload_carries_has_expect_for_both_shapes():
+    payload = R.build_payload(
+        consumer="py", providers=["p"], provider_dirs={"p": "/d"},
+        by_case={"c/null": {"id": "c/null", "type": "any",
+                            "position": "method_return", "method": "echoAny",
+                            "args": [None], "expect": None, "tags": []},
+                 "c/none": {"id": "c/none", "type": "any",
+                            "position": "method_return", "method": "echoAny",
+                            "args": [1], "tags": []}},
+        rows=[], diffs=[], counts={}, known={"xfail": [], "skip": [], "fixed": [],
+                                             "unmeasurable": []},
+        declared_cells=None, table={}, norm_type=lambda s: s, paths={})
+    by_id = {c["id"]: c for c in payload["cases"]}
+    assert by_id["c/null"]["has_expect"] is True
+    assert by_id["c/none"]["has_expect"] is False
 
 
 def test_the_call_line_states_an_identical_per_provider_expectation_once():
