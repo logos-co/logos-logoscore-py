@@ -25,7 +25,7 @@ Four things keep it honest:
 
 Usage:
     run_matrix.py --cpp-modules DIR --rust-modules DIR [--logoscore BIN]
-                  [--proxy-consumer LABEL=MODULE=DIR[=sync|async]]
+                  [--proxy-consumer LABEL=MODULE=DIR[=sync|async[=PROBE]]]
                   [--contract full_api.lidl] [--jsonl out.jsonl] [--quiet]
                   [--report out.html] [--report-text] [--md known.md]
 
@@ -43,9 +43,19 @@ reverse would be a cycle).
 THE CONSUMER AXIS. `py` is the direct consumer: this package's client talks to
 the provider. A `--proxy-consumer` point routes the SAME case table through an
 intermediate module, so the value is decoded and re-encoded by that module's
-generated wrappers before python ever sees it. `test_fullapi_qtproxy` is the
-Qt-typed one (`type: core`, no `interface` key => apiStyle=qt), which is the only
-surface the Qt wrappers are on.
+generated wrappers before python ever sees it. There is one Qt-typed proxy per
+CONTRACT, because a Qt consumer wrapper is generated per contract:
+`test_fullapi_qtproxy` for full_api and `test_fullapi_ext_qtproxy` for
+full_api_ext. Both are `interface: universal` (a header-first cdylib PROVIDER
+surface) plus `codegen.consumer_api_style: "qt"` (the CONSUMER surface) — two
+independent keys, which is what lets the Qt wrappers be measured at all.
+
+The ext one is not a duplicate: full_api has no record, no typed container and
+no optional in it, so the widened Qt spellings — a generated record struct,
+QList<Blob>, QMap<QString, Blob>, QList<QByteArray>, QList<QList<qlonglong>>,
+QMap<QString, QList<QByteArray>>, std::optional<QString> — exist only in
+full_api_ext, and each of them is emitted as an element LOOP rather than handed
+to the codec whole.
 
 Two caveats that must not be forgotten when reading a proxy cell:
 
@@ -299,15 +309,22 @@ class Consumer:
     module's generated wrappers on the way through.
     """
 
-    __slots__ = ("label", "module", "dirs", "call_mode", "probe_method")
+    __slots__ = ("label", "module", "dirs", "call_mode", "probe_method", "probe_args")
 
     def __init__(self, label, module=None, dirs=(), call_mode=None,
-                 probe_method="echoInt"):
+                 probe_method="echoInt", probe_args=(1,)):
         self.label = label
         self.module = module            # None => call the provider directly
         self.dirs = list(dirs)          # extra module dirs this consumer needs
         self.call_mode = call_mode      # None | "sync" | "async"
-        self.probe_method = probe_method  # a call whose mode can be read back
+        # A call whose mode can be read back. It is a CONTRACT method, and the
+        # contract is not always full_api: full_api_ext has no `echoInt`, no
+        # method taking a bare scalar, and — because its zero-parameter method
+        # ignores extra arguments (known-ext.json B-arity-overflow) — no method
+        # that could be probed with a spare `1` without leaning on a registered
+        # defect. So the probe carries its own arguments.
+        self.probe_method = probe_method
+        self.probe_args = list(probe_args)
 
     @property
     def is_proxy(self) -> bool:
@@ -353,12 +370,14 @@ class Consumer:
         # would need its own, which is why the failure below names the method
         # rather than reporting a bare call error.
         try:
-            client.call(self.module, self.probe_method, 1, timeout=timeout)
+            client.call(self.module, self.probe_method, *self.probe_args, timeout=timeout)
         except Exception as e:
+            shown = ", ".join(repr(a) for a in self.probe_args)
             raise RuntimeError(
-                f"{self.label}: call-mode probe {self.probe_method}(1) failed ({e}); "
+                f"{self.label}: call-mode probe {self.probe_method}({shown}) failed ({e}); "
                 f"a proxy consumer with a call mode needs a probe method this "
-                f"contract actually has") from None
+                f"contract actually has — pass one as the fifth field of "
+                f"--proxy-consumer") from None
         status = client.call(self.module, "lastCallStatus", timeout=timeout)
         if status != f"ok-{self.call_mode}":
             raise RuntimeError(
@@ -376,15 +395,41 @@ class Consumer:
 
 
 def parse_proxy_consumer(spec: str) -> Consumer:
-    """LABEL=MODULE=DIR[=MODE]"""
+    """LABEL=MODULE=DIR[=MODE[=PROBE]]
+
+    PROBE is `METHOD` or `METHOD:JSON_ARGS`, and it names the call whose mode is
+    read back to prove the selected wrapper table actually ran. It defaults to
+    full_api's `echoInt:[1]`; a proxy for another contract must give its own,
+    because there is no method every contract has.
+    """
     parts = spec.split("=")
-    if len(parts) not in (3, 4):
-        raise ValueError(f"--proxy-consumer expects LABEL=MODULE=DIR[=MODE], got {spec!r}")
+    if len(parts) not in (3, 4, 5):
+        raise ValueError(
+            f"--proxy-consumer expects LABEL=MODULE=DIR[=MODE[=PROBE]], got {spec!r}")
     label, module, path = parts[0], parts[1], parts[2]
-    mode = parts[3] if len(parts) == 4 else None
+    mode = parts[3] if len(parts) >= 4 else None
     if mode is not None and mode not in ("sync", "async"):
         raise ValueError(f"--proxy-consumer mode must be sync or async, got {mode!r}")
-    return Consumer(label, module=module, dirs=[path], call_mode=mode)
+    kw = {}
+    if len(parts) == 5:
+        name, sep, raw = parts[4].partition(":")
+        if not name:
+            raise ValueError(f"--proxy-consumer probe needs a method name, got {parts[4]!r}")
+        args = []
+        if sep:
+            try:
+                args = json.loads(raw)
+            except ValueError as e:
+                raise ValueError(
+                    f"--proxy-consumer probe arguments must be a JSON array, "
+                    f"got {raw!r} ({e})") from None
+            if not isinstance(args, list):
+                raise ValueError(
+                    f"--proxy-consumer probe arguments must be a JSON ARRAY, got {raw!r}")
+        # The table's own tagged-bytes form, so a probe can name a record with a
+        # bstr field without a second spelling for bytes.
+        kw = {"probe_method": name, "probe_args": [materialize(a) for a in args]}
+    return Consumer(label, module=module, dirs=[path], call_mode=mode, **kw)
 
 
 # ── the table ───────────────────────────────────────────────────────────────
@@ -658,9 +703,11 @@ def main() -> int:
     ap.add_argument("--consumer", default="py",
                     help="label for the DIRECT consumer (this package's client)")
     ap.add_argument("--proxy-consumer", action="append", default=[],
-                    metavar="LABEL=MODULE=DIR[=MODE]",
+                    metavar="LABEL=MODULE=DIR[=MODE[=PROBE]]",
                     help="replay the table through a forwarding module; repeatable. "
-                         "MODE (sync|async) selects the generated wrapper table.")
+                         "MODE (sync|async) selects the generated wrapper table. "
+                         "PROBE is METHOD[:JSON_ARGS], the call whose mode is read "
+                         "back (default echoInt:[1], which only full_api has).")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
     # Reporting. `--report` is the artifact (self-contained HTML, no CDN, same
