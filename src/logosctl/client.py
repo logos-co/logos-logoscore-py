@@ -403,9 +403,14 @@ class LogosctlClient:
         # On success, the CLI prints {"status":"success", "result": ...} — but
         # non-success paths are already raised by run_json (exit code 3 or 4).
         if isinstance(envelope, dict) and envelope.get("status") == "error":
+            # Both codes, for the reason `_proc._error_codes_from_stdout`
+            # spells out: `code` is the envelope verdict (METHOD_FAILED for
+            # every failure) and `error.code` is the failure CLASS under it.
+            err = envelope.get("error")
             raise MethodError(
                 envelope.get("message", "method call failed"),
                 code=envelope.get("code"),
+                detail_code=(err.get("code") if isinstance(err, dict) else None),
             )
         if isinstance(envelope, dict) and "result" in envelope:
             result = envelope["result"]

@@ -108,18 +108,38 @@ def _format_failure(cmd: Sequence[str], proc: subprocess.CompletedProcess[str]) 
     return msg
 
 
-def _error_code_from_stdout(stdout: str) -> str | None:
+def _error_codes_from_stdout(stdout: str) -> tuple[str | None, str | None]:
+    """`(code, detail_code)` from a failed call's JSON envelope.
+
+    The envelope's top-level `code` is the verdict — `METHOD_FAILED` for every
+    way a call can fail — and the nested `error.code` is the FAILURE CLASS:
+
+        {"status":"error","code":"METHOD_FAILED",
+         "error":{"code":"invalid_args","message":...,"origin":...}}
+
+    Returning only the first collapses `object_unavailable` (the module is not
+    there), `timeout`, `dispatch_failed` (the provider refused the argument
+    VALUES) and `invalid_args` (it refused the argument COUNT) into one token,
+    and a caller then cannot tell a transport failure from a provider rejection.
+
+    `detail_code` is None whenever the envelope has no `error` object — the
+    METHOD_NOT_FOUND and RPC_FAILED envelopes, and every daemon older than
+    logos-logoscore-cli#99, which reported no error object at all.
+    """
     stdout = stdout.strip()
     if not stdout:
-        return None
+        return None, None
     try:
         obj = json.loads(stdout)
     except json.JSONDecodeError:
-        return None
-    if isinstance(obj, dict) and obj.get("status") == "error":
-        code = obj.get("code")
-        return code if isinstance(code, str) else None
-    return None
+        return None, None
+    if not (isinstance(obj, dict) and obj.get("status") == "error"):
+        return None, None
+    code = obj.get("code")
+    code = code if isinstance(code, str) else None
+    err = obj.get("error")
+    detail = err.get("code") if isinstance(err, dict) else None
+    return code, (detail if isinstance(detail, str) else None)
 
 
 def run_json(
@@ -148,11 +168,13 @@ def run_json(
     )
     _emit_captured(cmd, proc.stdout, proc.stderr)
     if proc.returncode != 0:
+        code, detail = _error_codes_from_stdout(proc.stdout)
         raise from_exit_code(
             proc.returncode,
             _format_failure(cmd, proc),
             stderr=proc.stderr,
-            error_code=_error_code_from_stdout(proc.stdout),
+            error_code=code,
+            detail_error_code=detail,
         )
     stdout = (proc.stdout or "").strip()
     if not stdout:

@@ -69,6 +69,21 @@ Transport is likewise fixed: the daemon is constructed with no `transports=`, so
 every cell here is measured over LocalSocket/QtRO. The plain (tcp/tcp_ssl) wire
 has its own uint64 defect that this matrix therefore cannot reach — see
 known.json.
+
+THE FAILURE CLASSES. Alongside "did this value survive" the table asks a second
+question — can a caller tell "the provider answered, and the answer is nothing"
+from "the call did not succeed"? — and the `failure/*` cases make it executable.
+Three driver behaviours exist for them and nothing else:
+
+  * `error_code_of` reads the envelope's nested `error.code` in preference to
+    its top-level `code`. The verdict is METHOD_FAILED for every way a call can
+    fail; only the detail names the class. See that function.
+  * a case may carry `"module": "<name>"`, which re-targets it at a module that
+    is not the surface under test. A class-A transport failure cannot be stated
+    by naming a method.
+  * a case may carry `"isolate": true`, which gives it a daemon of its own. A
+    hostile case can KILL the module rather than fail, and a poisoned block is
+    reported as dozens of red cells belonging to other cases.
 """
 from __future__ import annotations
 
@@ -220,6 +235,40 @@ def contract_cells(lidl_path: Path) -> set[tuple[str, str]]:
 DISPATCH_ERROR_KEYS = {"code", "message"}
 
 
+def error_code_of(exc) -> str:
+    """The FAILURE CLASS a raised client error carries, not the envelope verdict.
+
+    A failed `call` envelope has two codes:
+
+        {"status":"error","code":"METHOD_FAILED",
+         "error":{"code":"invalid_args","message":...,"origin":...}}
+
+    `code` is one token for every way a call can fail; `error.code` says WHICH
+    way. Reading only the first makes this whole table unable to state the
+    thing it exists to state — `object_unavailable` (class A, the module is not
+    there), `invalid_args` (class B, wrong argument COUNT), `dispatch_failed`
+    (class E, wrong argument VALUES) and `timeout` all become the single string
+    METHOD_FAILED, and a case can then assert nothing sharper than "it failed".
+
+    Preferring the detail is also what keeps the EXISTING `dispatch_failed`
+    cells honest across a daemon upgrade. Before logos-logoscore-cli#99 a
+    provider rejection arrived as a successful call returning the 3-key map and
+    `Result.__init__` below folded it, so those cells read `dispatch_failed`;
+    #99 folds it in the daemon instead and the envelope verdict becomes
+    METHOD_FAILED. Without this function every one of them flips to a
+    METHOD_FAILED that no longer names a class — 44 cells, measured — and the
+    flip would look like a matrix regression rather than a driver that stopped
+    looking at the right field.
+
+    `detail_code` is absent on the envelopes that carry no `error` object
+    (METHOD_NOT_FOUND, RPC_FAILED, and every daemon older than #99), so the
+    envelope code is the fallback and a case may assert either spelling.
+    """
+    return (getattr(exc, "detail_code", None)
+            or getattr(exc, "code", None)
+            or type(exc).__name__)
+
+
 class Result:
     __slots__ = ("value", "error", "status")
 
@@ -361,7 +410,7 @@ def parse_proxy_consumer(spec: str) -> Consumer:
 # (rejecting real cases) fails loudly too.
 CASE_KEYS = {
     "id", "type", "position", "method", "args", "cells", "tags", "why",
-    "raw", "timeout_ms", "expect", "expect_by_provider",
+    "raw", "timeout_ms", "expect", "expect_by_provider", "module", "isolate",
 }
 EVENT_KEYS = {
     "id", "type", "position", "event", "fire", "value", "values", "cells",
@@ -484,9 +533,16 @@ def matches(got: Result, want, raw: bool = False) -> bool:
 def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeout: float):
     from logoscore.errors import LogoscoreError, MethodError
 
-    module = consumer.target(provider)
     out: dict[str, Result] = {}
     for case in cases:
+        # `module` re-targets ONE case away from the surface under test. It is
+        # what makes a class-A transport failure expressible at all: "the module
+        # is not there" cannot be said by naming a method, only by naming a
+        # module that is not loaded. The cell's provider/consumer coordinate then
+        # names the ENVIRONMENT the call was made in, not the callee — which is
+        # the honest reading, and the answer is expected to be identical on every
+        # coordinate precisely because the call never reaches either.
+        module = case.get("module") or consumer.target(provider)
         raw = case.get("raw", False)
         args = [materialize(a, raw) for a in case.get("args", [])]
         t = case.get("timeout_ms", timeout * 1000) / 1000.0
@@ -499,10 +555,8 @@ def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeou
             # and no change to any C++ repo could ever have moved them.
             r = Result(value=client.call(
                 module, case["method"], *args, timeout=t, decode_bytes=not raw))
-        except MethodError as e:
-            r = Result(error=e.code or "MethodError")
-        except LogoscoreError as e:
-            r = Result(error=type(e).__name__)
+        except (MethodError, LogoscoreError) as e:
+            r = Result(error=error_code_of(e))
         except Exception as e:
             # An adversarial payload can HANG the call rather than fail it (the
             # pending-call sentinel does exactly that), which surfaces as a
@@ -514,7 +568,11 @@ def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeou
         # empty list) when no value arrives, so "the callback answered 0" and
         # "the callback never ran" produce the same cell value and are told
         # apart only here.
-        r.status = consumer.call_status(client, timeout)
+        # ...but not for a case that re-targeted itself: the proxy did not serve
+        # this call, so its `lastCallStatus` is still the previous cell's and
+        # reporting it here would attribute a table to a call that never ran.
+        if not case.get("module"):
+            r.status = consumer.call_status(client, timeout)
         out[case["id"]] = r
     return out
 
@@ -531,10 +589,8 @@ def run_events(client, consumer: "Consumer", provider: str, events: list, timeou
         try:
             out[ev["id"]] = Result(value=capture_event(
                 client, module, ev["event"], ev["fire"], values, timeout))
-        except MethodError as e:
-            out[ev["id"]] = Result(error=e.code or "MethodError")
-        except LogoscoreError as e:
-            out[ev["id"]] = Result(error=type(e).__name__)
+        except (MethodError, LogoscoreError) as e:
+            out[ev["id"]] = Result(error=error_code_of(e))
         except Exception as e:
             out[ev["id"]] = Result(error=type(e).__name__)
     return out
@@ -696,7 +752,20 @@ def main() -> int:
             # A daemon is per (consumer, provider) too, so a proxy's bound target
             # and call mode are set on a fresh process rather than inherited from
             # the previous cell block.
-            for runner, work in ((run_methods, cases), (run_events, events)):
+            # `isolate` puts a case in a daemon of its own. A hostile case can
+            # KILL the module rather than fail — a missing required argument
+            # kills test_fullapi_qtproxy at logos-test-modules a5605b91, and
+            # every case after it in the same daemon then reads
+            # object_unavailable for a reason that has nothing to do with the
+            # cell. That is a poisoned block reported as ~80 red cells, and the
+            # ordering that produces it is invisible in the table. The cost is
+            # one extra daemon per isolated case per (consumer, provider); the
+            # alternative — putting the case last and hoping — is a silent
+            # dependency on list order.
+            phases = [(run_methods, [c for c in cases if not c.get("isolate")])]
+            phases += [(run_methods, [c]) for c in cases if c.get("isolate")]
+            phases += [(run_events, events)]
+            for runner, work in phases:
                 with LogoscoreDaemon(
                         modules_dir=consumer.modules_dirs(modules),
                         binary=args.logoscore) as daemon:

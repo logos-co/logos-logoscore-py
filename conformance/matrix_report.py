@@ -156,7 +156,11 @@ def _render_call(case, kind=None) -> dict:
             return {"sent": sent, "want": "", "want_kind": "identity"}
         return {"sent": sent, "want": "", "want_kind": "per_provider",
                 "want_pairs": [[_prov(p), _render(v)] for p, v in ebp.items()]}
-    if case.get("expect") is not None:
+    # `"expect" in case`, not `is not None`: `"expect": null` is an
+    # EXPECTATION — failure/D/null-is-a-value asserts that a legitimate null
+    # comes back as a null — and a truthiness test renders the one case whose
+    # whole subject is the null as having no expectation at all.
+    if "expect" in case:
         return {"sent": sent, "want": _render(case["expect"]), "want_kind": "one"}
     return {"sent": sent, "want": "", "want_kind": ""}
 
@@ -288,6 +292,9 @@ def build_payload(*, consumer, providers, provider_dirs, by_case, rows, diffs,
             "args": case.get("args"),
             "value": case.get("values", case.get("value")),
             "expect": case.get("expect"),
+            # Carried because `expect` is legitimately null for one case and the
+            # payload cannot otherwise tell "expects null" from "has no expect".
+            "has_expect": "expect" in case,
             "expect_by_provider": case.get("expect_by_provider"),
             "render": _render_call(
                 case, (diff_by_case.get(cid) or {}).get("kind")),
@@ -882,7 +889,7 @@ def _call_line(cv, width: int) -> str:
         else:
             want = "  |  ".join(f"{_prov(p)} {_short(v, room // len(vals) - 8)}"
                                 for p, v in cv["expect_by_provider"].items())
-    elif cv.get("expect") is not None:
+    elif cv.get("has_expect"):
         want = _short(cv["expect"], room)
     else:
         return sent
