@@ -3,21 +3,21 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
   45 cases x 2 providers x 3 consumers
   differential-consumer-pass   266
   differential-consumer-xfail  4
-  differential-provider-pass   125
-  differential-provider-xfail  4
-  pass                         255
-  xfail                        15
+  differential-provider-pass   128
+  differential-provider-xfail  1
+  pass                         267
+  xfail                        3
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
                      arg    ret    evt record
   ?tstr              4ok    2ok      .      .
-  Blob            3ok+1K    1ok    1ok    3ok
+  Blob               4ok    1ok    1ok    3ok
   Opt                1ok    1ok      .    4ok
   Wrapper            1ok    1ok      .    1ok
   bool                 .    1ok      .      .
   bstr                 .      .      .    3ok
   result               .    1ok      .      .
-  tstr                 . 2ok+1K      .    2ok
+  tstr                 .    3ok      .    2ok
   uint                 .      .      .    2ok
   {tstr:Blob}        1ok    1ok      .      .
   {tstr:[bstr]}      1ok    1ok      .      .
@@ -35,9 +35,9 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
 
   DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
     provider  test_fullapi_ext_rust vs test_fullapi_ext_cpp
-      on extqtproxy-async  42 agree   1 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on extqtproxy-sync   42 agree   1 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on py                41 agree   2 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
+      on extqtproxy-async  43 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
+      on extqtproxy-sync   43 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
+      on py                42 agree   1 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
     consumer
       extqtproxy-async vs extqtproxy-sync
       extqtproxy-async vs py
@@ -58,16 +58,6 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
     nothing declared out of scope
 
   KNOWN-BROKEN REGISTER   — every amber cell above, and the claim behind it
-    B-arity-overflow  12 cell(s) in this run (12 xfail), + 2 differential   cases: failure/B/arity/too-many, failure/B/arity/too-many-zero-parameter
-          an EXTRA argument is dropped and the call succeeds, on providers generated from a
-          different contract than full_api's
-          expected {"__error__": "invalid_args"}
-          got      {"id": "a", "n": 1, "payload": {"_bytes": "aGk"}}   [xfail] 6 cells
-          expected {"__error__": "invalid_args"}
-          got      "test_fullapi_ext_rust"   [xfail] ext_rust/extqtproxy-async, ext_rust/extqtproxy-sync, ext_rust/py
-          expected {"__error__": "invalid_args"}
-          got      "test_fullapi_ext_cpp"   [xfail] ext_cpp/extqtproxy-async, ext_cpp/extqtproxy-sync, ext_cpp/py
-          fix is: the same upper-bound arity check known.json's B-arity-overflow names
     ext-nested-int-range-unchecked-on-one-provider  1 cell(s) in this run (1 xfail), + 1 differential   cases: [[int]]/out-of-signed-range
           2^64-1 in an `int` slot two containers deep is accepted and echoed by
           test_fullapi_ext_rust; test_fullapi_ext_cpp rejects it by coordinate, and so does
