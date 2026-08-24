@@ -4,18 +4,18 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
   differential-consumer-pass   572
   differential-consumer-xfail  4
   differential-provider-pass   282
-  pass                         524
-  xfail                        52
+  pass                         560
+  xfail                        16
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
                   arg    ret    evt   nest     a0     a1     a2     e0     e1     e2
-  any          8ok+2K 7ok+2K    1ok      .      .      .      .      .      .      .
+  any          9ok+1K    9ok    1ok      .      .      .      .      .      .      .
   bool            3ok    2ok    1ok      .      .      .      .      .      .      .
   bstr            5ok    5ok    2ok    3ok      .      .    2ok      .      .    1ok
   float64         2ok    2ok    1ok      .      .      .      .      .      .      .
-  int          8ok+3K    6ok    3ok      .    2ok      .      .    1ok      .      .
+  int            11ok    6ok    3ok      .    2ok      .      .    1ok      .      .
   result            .    2ok      .      .      .      .      .      .      .      .
-  tstr            3ok 6ok+1K    1ok      .      .    2ok      .      .    1ok      .
+  tstr            3ok    7ok    1ok      .      .    2ok      .      .    1ok      .
   uint            6ok    5ok    2ok      .      .      .      .      .      .      .
   void              . 1ok+1K      .      .      .      .      .      .      .      .
   {tstr:any}   4ok+1K 3ok+1K    1ok      .      .      .      .      .      .      .
@@ -100,34 +100,14 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
           got      {}   [xfail] 4 cells
           fix is: a data model where a byte string is not spelled as a map, not a stricter
           predicate — the shape that would be checked IS the encoding
-    pre-99-null-is-not-an-error  18 cell(s) in this run (18 xfail), + 3 differential   cases: failure/A/module-not-loaded, failure/C/unknown-method, failure/D/null-is-a-value
-          the daemon this table is pinned to infers failure from a null RESULT and reports no
-          error object, so classes A, C and D are one indistinguishable METHOD_FAILED
-          expected null
-          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
-          expected {"__error__": "METHOD_NOT_FOUND"}
-          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
-          expected {"__error__": "object_unavailable"}
-          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
-          fix is: logos-logoscore-py relocking `logos-logoscore-cli` past ed19258 — no change
-          in this repo, and no change to these cases
-    B-arity-overflow  18 cell(s) in this run (18 xfail), + 3 differential   cases: failure/B/arity/too-many, failure/B/arity/too-many-untyped-extra, failure/B/arity/too-many-zero-parameter
-          an EXTRA argument is dropped and the call succeeds — on both providers, through both
-          Qt tables, at every arity including zero
-          expected {"__error__": "invalid_args"}
-          got      1   [xfail] 12 cells
+    B-arity-overflow  6 cell(s) in this run (6 xfail), + 1 differential   cases: failure/B/arity/too-many-zero-parameter
+          a VOID method's refusal is discarded by the Qt host glue, so an extra argument still
+          succeeds — the provider now refuses correctly and nothing downstream reports it
           expected {"__error__": "invalid_args"}
           got      true   [xfail] 6 cells
-          fix is: an upper bound in the generated dispatch — `args.size() != N` beside the
-          existing `args.size() < minArgs` in logos-cpp-sdk's lidl_gen_cdylib.cpp and
-          logos-rust-sdk's args.rs — AND a guard emitted at all for a zero-parameter method
-    B-arity-overflow-identity  6 cell(s) in this run (6 xfail), + 1 differential   cases: failure/C/identity-arity-is-a-bare-null
-          the same missing upper bound, in the SEPARATELY generated identity dispatch:
-          version("junk") answers "1.0.0" with status ok
-          expected {"__error__": "invalid_args"}
-          got      "1.0.0"   [xfail] 6 cells
-          fix is: the same upper-bound check B-arity-overflow names, applied to the generated
-          identity dispatch as well as the contract-method dispatch
+          fix is: logos-plugin-qt#28: the cdylib glue's void arm must test the reply for a
+          rejection instead of substituting QVariant(true) unconditionally. NOT another arity
+          guard — the arity guard is present and working.
 
   CONSUMER DELTA py-vs-qtproxy-async (2):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp

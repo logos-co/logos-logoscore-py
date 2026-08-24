@@ -7,9 +7,7 @@ Measured on consumer(s) `py`, `qtproxy-async`, `qtproxy-sync` against provider(s
 |----|----|----|----|
 | M4-residual | 6 | `adversarial/any/pending-call-canonical` | a CANONICAL-shape forgery of the deferred-call sentinel still hijacks a call |
 | M3 | 4 | `adversarial/{tstr:any}/_bytes-key` | a one-key `_bytes` map reaching a Qt-typed map slot is reinterpreted as bytes and arrives EMPTY |
-| pre-99-null-is-not-an-error | 18 | `failure/A/module-not-loaded`<br>`failure/C/unknown-method`<br>`failure/D/null-is-a-value` | the daemon this table is pinned to infers failure from a null RESULT and reports no error object, so classes A, C and D are one indistinguishable METHOD_FAILED |
-| B-arity-overflow | 18 | `failure/B/arity/too-many`<br>`failure/B/arity/too-many-untyped-extra`<br>`failure/B/arity/too-many-zero-parameter` | an EXTRA argument is dropped and the call succeeds — on both providers, through both Qt tables, at every arity including zero |
-| B-arity-overflow-identity | 6 | `failure/C/identity-arity-is-a-bare-null` | the same missing upper bound, in the SEPARATELY generated identity dispatch: version("junk") answers "1.0.0" with status ok |
+| B-arity-overflow | 6 | `failure/B/arity/too-many-zero-parameter` | a VOID method's refusal is discarded by the Qt host glue, so an extra argument still succeeds — the provider now refuses correctly and nothing downstream reports it |
 
 ### Closed
 
@@ -22,6 +20,7 @@ Kept because it explains why several green cases exist at all: they are the regr
 | bytes-on-the-event-path | the same change | canonical tagged bytes {"_bytes": ...} were not decoded by the event bridge — they arrived as a QVariantMap where the method path yields a QByteArray. |
 | M2 | logos-qt-sdk cdylib glue (kVoidMethods) + logos-rust-sdk void arms | a `void` return answered `true` from the C++ provider and METHOD_FAILED from the Rust one. |
 | M4 | logos-protocol — logos::isPendingCallSentinel, replacing a bare contains() at all four detection sites | a user map that merely CARRIED the sentinel key was taken for a deferred call. |
+| pre-99-null-is-not-an-error | logos-logoscore-py relocking logos-logoscore-cli onto master (0f0be25), which carries ed19258 (#99) and b3f1a403 (#101). | Classes A, C and D were one indistinguishable METHOD_FAILED because CoreServiceImpl::callModuleMethod took the invokeRemoteMethod overload with no CallError* and decided the verdict by testing ret.is_null() on the RESULT. |
 
 ### Not measurable by this matrix
 
