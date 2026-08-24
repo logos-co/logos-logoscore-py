@@ -658,17 +658,30 @@ def run_events(client, consumer: "Consumer", provider: str, events: list, timeou
 
 
 def capture_event(client, module: str, event: str, fire: str, values: list, timeout: float):
-    """Subscribe, fire, wait — re-firing until the event lands.
+    """Subscribe, fire, wait — retrying BOTH halves until the event lands.
 
     The watcher subscribes on a background subprocess, so "watch is live" and
     "we fire" race. A single fire that lands before the subscription is up is
     lost and no later wait recovers it; the `fire<X>Event` triggers are
-    idempotent emits, so re-firing on a short cadence closes the race without
-    hard-coding a settle time. (Same approach as the logoscore-py suite, which
-    is where this race was worked out.)
+    idempotent emits, so re-firing on a short cadence closes that half.
+
+    SUBSCRIBING races too, and only the firing half was retried. `on_event` is
+    one-shot: asked too early it is REFUSED, the daemon answers WATCH_FAILED,
+    and nothing tried again -- so a cell that had nothing to do with events
+    reported a transport error instead of a value. Measured on
+    event/tstr against test_fullapi_rust: failed, passed, failed across three
+    otherwise identical runs, while BOTH proxy consumers received the event in
+    the same runs that `py` failed in -- so the module was emitting and it was
+    the subscription that lost the race.
+
+    Retried against the same deadline as the fire loop rather than a fixed
+    count, so a slow start costs time and not a false negative. A subscription
+    that never succeeds still raises, and still fails the cell.
     """
     import threading
     import time
+
+    from logoscore.errors import LogoscoreError, MethodError
 
     received: list = []
     got = threading.Event()
@@ -677,14 +690,27 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
         received.append(e)
         got.set()
 
-    with client.on_event(module, event, on_event):
-        deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout
+    sub = None
+    while True:
+        try:
+            sub = client.on_event(module, event, on_event)
+            sub.__enter__()
+            break
+        except (MethodError, LogoscoreError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+
+    try:
         while True:
             client.call(module, fire, *values, timeout=timeout)
             if got.wait(timeout=1.0):
                 break
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"event {event} not received within {timeout}s")
+    finally:
+        sub.__exit__(None, None, None)
 
     payload = received[0]
     data = payload.get("data", payload) if isinstance(payload, dict) else payload
