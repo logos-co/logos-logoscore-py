@@ -7,8 +7,9 @@ Measured on consumer(s) `py`, `qtproxy-async`, `qtproxy-sync` against provider(s
 |----|----|----|----|
 | M4-residual | 6 | `adversarial/any/pending-call-canonical` | a CANONICAL-shape forgery of the deferred-call sentinel still hijacks a call |
 | M3 | 4 | `adversarial/{tstr:any}/_bytes-key` | a one-key `_bytes` map reaching a Qt-typed map slot is reinterpreted as bytes and arrives EMPTY |
-| Q1 | 12 | `hostile/[uint]/negative-element`<br>`hostile/[uint]/fractional-element`<br>`hostile/[int]/fractional-element` | a typed-numeric-array element is still not validated by a Qt-typed provider: the C++ signature spells [uint] and [any] alike as QVariantList, so array-ness is the whole of the declared type at that layer |
-| Q1b | 4 | `hostile/[any]/scalar`<br>`hostile/{tstr:any}/scalar` | the Qt proxy can no longer reproduce the C++ cdylib provider's LENIENT answer for a non-array/non-object in a [any]/{tstr:any} slot, because its own dispatch refuses the argument before forwarding it |
+| pre-99-null-is-not-an-error | 18 | `failure/A/module-not-loaded`<br>`failure/C/unknown-method`<br>`failure/D/null-is-a-value` | the daemon this table is pinned to infers failure from a null RESULT and reports no error object, so classes A, C and D are one indistinguishable METHOD_FAILED |
+| B-arity-overflow | 18 | `failure/B/arity/too-many`<br>`failure/B/arity/too-many-untyped-extra`<br>`failure/B/arity/too-many-zero-parameter` | an EXTRA argument is dropped and the call succeeds — on both providers, through both Qt tables, at every arity including zero |
+| B-arity-overflow-identity | 6 | `failure/C/identity-arity-is-a-bare-null` | the same missing upper bound, in the SEPARATELY generated identity dispatch: version("junk") answers "1.0.0" with status ok |
 
 ### Closed
 

@@ -1,30 +1,30 @@
 
 LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
-  88 cases x 2 providers x 3 consumers
-  differential-consumer-pass   508
-  differential-consumer-xfail  20
-  differential-provider-pass   246
-  pass                         502
-  xfail                        26
+  96 cases x 2 providers x 3 consumers
+  differential-consumer-pass   572
+  differential-consumer-xfail  4
+  differential-provider-pass   282
+  pass                         524
+  xfail                        52
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
                   arg    ret    evt   nest     a0     a1     a2     e0     e1     e2
-  any          8ok+1K    7ok    1ok      .      .      .      .      .      .      .
+  any          8ok+2K 7ok+2K    1ok      .      .      .      .      .      .      .
   bool            3ok    2ok    1ok      .      .      .      .      .      .      .
   bstr            5ok    5ok    2ok    3ok      .      .    2ok      .      .    1ok
   float64         2ok    2ok    1ok      .      .      .      .      .      .      .
-  int             7ok    6ok    3ok      .    2ok      .      .    1ok      .      .
+  int          8ok+3K    6ok    3ok      .    2ok      .      .    1ok      .      .
   result            .    2ok      .      .      .      .      .      .      .      .
-  tstr            3ok    6ok    1ok      .      .    2ok      .      .    1ok      .
+  tstr            3ok 6ok+1K    1ok      .      .    2ok      .      .    1ok      .
   uint            6ok    5ok    2ok      .      .      .      .      .      .      .
-  void              .    1ok      .      .      .      .      .      .      .      .
-  {tstr:any}   3ok+2K 3ok+1K    1ok      .      .      .      .      .      .      .
-  [any]        3ok+1K    3ok    1ok      .      .      .      .      .      .      .
+  void              . 1ok+1K      .      .      .      .      .      .      .      .
+  {tstr:any}   4ok+1K 3ok+1K    1ok      .      .      .      .      .      .      .
+  [any]           4ok    3ok    1ok      .      .      .      .      .      .      .
   [bool]          1ok    1ok    1ok      .      .      .      .      .      .      .
   [float64]       1ok    1ok    1ok      .      .      .      .      .      .      .
-  [int]        4ok+1K    4ok    1ok      .      .      .      .      .      .      .
+  [int]           5ok    4ok    1ok      .      .      .      .      .      .      .
   [tstr]          3ok    2ok    2ok      .      .      .      .      .      .      .
-  [uint]       3ok+2K    3ok    1ok      .      .      .      .      .      .      .
+  [uint]          5ok    3ok    1ok      .      .      .      .      .      .      .
 
     n ok = n cases green on all 6 provider x consumer surfaces      +n K = n cases with a registered known-broken cell
     --   = declared by the contract, NO CASE                        .    = no such position for this type
@@ -32,34 +32,17 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
 
   DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
     provider  test_fullapi_cpp vs test_fullapi_rust
-      on py                82 agree   0 differ   +6 declared, not compared  (2 by behaviour; 2 no longer diverging; 2 by identity)
-      on qtproxy-async     82 agree   0 differ   +6 declared, not compared  (4 no longer diverging; 2 by identity)
-      on qtproxy-sync      82 agree   0 differ   +6 declared, not compared  (4 no longer diverging; 2 by identity)
+      on py                94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-async     94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-sync      94 agree   0 differ   +2 declared, not compared  (2 by identity)
     consumer
       py vs qtproxy-async
       py vs qtproxy-sync
       qtproxy-async vs qtproxy-sync
 
     DECLARED DIVERGENCES (expect_by_provider) — the driver does not compare these; the divergence IS the expectation
-      hostile/[any]/scalar              DIFFER  by behaviour
-           cpp  "notalist"
-          rust  {"__error__": "dispatch_failed"}
-      hostile/{tstr:any}/scalar         DIFFER  by behaviour
-           cpp  5
-          rust  {"__error__": "dispatch_failed"}
-      hostile/bool/one                  NO LONGER DIVERGES  both {"__error__": "dispatch_failed"}
-      hostile/[tstr]/mixed-elements     NO LONGER DIVERGES  both {"__error__": "dispatch_failed"}
-        ^ the table still declares a per-provider expectation for these; it is now vestigial.
       2 more differ BY IDENTITY — each provider answers with its own name, which is
         what the case is for: identity/whoami, result/ok
-      hostile/[any]/scalar              VARIES BY CONSUMER
-                    py  providers DIFFER
-          qtproxy-sync  providers agree — no longer diverges
-         qtproxy-async  providers agree — no longer diverges
-      hostile/{tstr:any}/scalar         VARIES BY CONSUMER
-                    py  providers DIFFER
-          qtproxy-sync  providers agree — no longer diverges
-         qtproxy-async  providers agree — no longer diverges
 
   NOT MEASURED   — what this run does not answer, on the record
     skip   bstr/*  on consumer(s) qml  [unsupported-by-surface]
@@ -76,19 +59,21 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
            see it. It also recorded, correctly, that adding the existing C++/Rust proxies would
            NOT close the hole: both are lp/Rust-client consumers, so they share the py blind
            spot for the Qt-typed path.
-           Now measured, not argued. The axis runs py + qtproxy-sync + qtproxy-async, and the
-           Qt points move 22 of 172 cells — an order of magnitude more than the lp proxy's 2
-           cases. Two findings came straight out of it: M3 became measurable (and is now an
-           ordinary xfail), and Q1 — the Qt dispatch coercing hostile arguments — was not
-           previously known at all.
+           Now measured, not argued. The axis runs py + qtproxy-sync + qtproxy-async. Two
+           findings came straight out of it: M3 became measurable (and is now an ordinary
+           xfail), and Q1 — the Qt dispatch coercing hostile arguments — was not previously
+           known at all. The live cell counts are in the register rather than restated here,
+           because a count written into prose goes stale silently and this block is reproduced
+           verbatim in every report.
            What is STILL open on this axis: * QML. No driver replays cases.json through the
            LogosQmlBridge, and the two skip[] entries describe exactly that surface. * The
            cdylib/Rust proxy. Buildable and driveable by the same --proxy-consumer flag; not
            wired in. * The lp proxy. Measured here for ATTRIBUTION (it is what proves Q1 and M3
            are the Qt style rather than the extra hop) but not carried as a standing consumer:
            it has 2 divergent cases of its own that would need registry entries first. * The
-           ext table (ext-cases.json) still has no proxy at all, so its 21 cases remain
-           single-consumer.
+           ext table (ext-cases.json) still has no proxy at all, so every one of its cells
+           remains single-consumer. It does now run BOTH providers, so it has a provider
+           differential; the consumer axis is the half still missing.
     limit  axis=transport  OPEN
            Every cell is measured over LocalSocket/QtRO: run_matrix.py builds the daemon with
            no `transports=`, and there is no flag to change it. The plain (tcp/tcp_ssl) wire is
@@ -115,38 +100,36 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
           got      {}   [xfail] 4 cells
           fix is: a data model where a byte string is not spelled as a map, not a stricter
           predicate — the shape that would be checked IS the encoding
-    Q1  12 cell(s) in this run (12 xfail)   cases: hostile/[uint]/negative-element, hostile/[uint]/fractional-element, hostile/[int]/fractional-element
-          a typed-numeric-array element is still not validated by a Qt-typed provider: the C++
-          signature spells [uint] and [any] alike as QVariantList, so array-ness is the whole
-          of the declared type at that layer
-          expected {"__error__": "dispatch_failed"}
-          got      []   [xfail] 12 cells
-          fix is: consumer-side: surface the dispatch_failed envelope instead of flattening it
-          to an empty container. The provider-side option previously listed here (carrying the
-          LIDL element type into the Qt provider dispatch via qtArgListOf) is no longer
-          pursued — see `scope`.
-    Q1b  4 cell(s) in this run (4 xfail)   cases: hostile/[any]/scalar, hostile/{tstr:any}/scalar
-          the Qt proxy can no longer reproduce the C++ cdylib provider's LENIENT answer for a
-          non-array/non-object in a [any]/{tstr:any} slot, because its own dispatch refuses
-          the argument before forwarding it
-          expected 5
-          got      {"__error__": "dispatch_failed"}   [xfail] cpp/qtproxy-async, cpp/qtproxy-sync
-          expected "notalist"
-          got      {"__error__": "dispatch_failed"}   [xfail] cpp/qtproxy-async, cpp/qtproxy-sync
-          fix is: nothing, deliberately. Previously proposed: make the C++ cdylib provider's
-          container decode refuse a non-array/non-object, collapsing the expect_by_provider.
-          Still valid on its own merits, but it is no longer motivated by this cell — see
-          `scope`.
+    pre-99-null-is-not-an-error  18 cell(s) in this run (18 xfail), + 3 differential   cases: failure/A/module-not-loaded, failure/C/unknown-method, failure/D/null-is-a-value
+          the daemon this table is pinned to infers failure from a null RESULT and reports no
+          error object, so classes A, C and D are one indistinguishable METHOD_FAILED
+          expected null
+          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
+          expected {"__error__": "METHOD_NOT_FOUND"}
+          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
+          expected {"__error__": "object_unavailable"}
+          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
+          fix is: logos-logoscore-py relocking `logos-logoscore-cli` past ed19258 — no change
+          in this repo, and no change to these cases
+    B-arity-overflow  18 cell(s) in this run (18 xfail), + 3 differential   cases: failure/B/arity/too-many, failure/B/arity/too-many-untyped-extra, failure/B/arity/too-many-zero-parameter
+          an EXTRA argument is dropped and the call succeeds — on both providers, through both
+          Qt tables, at every arity including zero
+          expected {"__error__": "invalid_args"}
+          got      1   [xfail] 12 cells
+          expected {"__error__": "invalid_args"}
+          got      true   [xfail] 6 cells
+          fix is: an upper bound in the generated dispatch — `args.size() != N` beside the
+          existing `args.size() < minArgs` in logos-cpp-sdk's lidl_gen_cdylib.cpp and
+          logos-rust-sdk's args.rs — AND a guard emitted at all for a zero-parameter method
+    B-arity-overflow-identity  6 cell(s) in this run (6 xfail), + 1 differential   cases: failure/C/identity-arity-is-a-bare-null
+          the same missing upper bound, in the SEPARATELY generated identity dispatch:
+          version("junk") answers "1.0.0" with status ok
+          expected {"__error__": "invalid_args"}
+          got      "1.0.0"   [xfail] 6 cells
+          fix is: the same upper-bound check B-arity-overflow names, applied to the generated
+          identity dispatch as well as the contract-method dispatch
 
-  CONSUMER DELTA py-vs-qtproxy-async (10):
-    xfail     [any]/method_arg/test_fullapi_cpp
-              case=hostile/[any]/scalar
-              py              ="notalist"
-              qtproxy-async   ={"__error__": "dispatch_failed"}
-    xfail     {tstr:any}/method_arg/test_fullapi_cpp
-              case=hostile/{tstr:any}/scalar
-              py              =5
-              qtproxy-async   ={"__error__": "dispatch_failed"}
+  CONSUMER DELTA py-vs-qtproxy-async (2):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
@@ -155,40 +138,8 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
               qtproxy-async   ={}
-    xfail     [uint]/method_arg/test_fullapi_cpp
-              case=hostile/[uint]/negative-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-async   =[]
-    xfail     [uint]/method_arg/test_fullapi_rust
-              case=hostile/[uint]/negative-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-async   =[]
-    xfail     [uint]/method_arg/test_fullapi_cpp
-              case=hostile/[uint]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-async   =[]
-    xfail     [uint]/method_arg/test_fullapi_rust
-              case=hostile/[uint]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-async   =[]
-    xfail     [int]/method_arg/test_fullapi_cpp
-              case=hostile/[int]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-async   =[]
-    xfail     [int]/method_arg/test_fullapi_rust
-              case=hostile/[int]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-async   =[]
 
-  CONSUMER DELTA py-vs-qtproxy-sync (10):
-    xfail     [any]/method_arg/test_fullapi_cpp
-              case=hostile/[any]/scalar
-              py              ="notalist"
-              qtproxy-sync    ={"__error__": "dispatch_failed"}
-    xfail     {tstr:any}/method_arg/test_fullapi_cpp
-              case=hostile/{tstr:any}/scalar
-              py              =5
-              qtproxy-sync    ={"__error__": "dispatch_failed"}
+  CONSUMER DELTA py-vs-qtproxy-sync (2):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
@@ -197,29 +148,5 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
               qtproxy-sync    ={}
-    xfail     [uint]/method_arg/test_fullapi_cpp
-              case=hostile/[uint]/negative-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-sync    =[]
-    xfail     [uint]/method_arg/test_fullapi_rust
-              case=hostile/[uint]/negative-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-sync    =[]
-    xfail     [uint]/method_arg/test_fullapi_cpp
-              case=hostile/[uint]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-sync    =[]
-    xfail     [uint]/method_arg/test_fullapi_rust
-              case=hostile/[uint]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-sync    =[]
-    xfail     [int]/method_arg/test_fullapi_cpp
-              case=hostile/[int]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-sync    =[]
-    xfail     [int]/method_arg/test_fullapi_rust
-              case=hostile/[int]/fractional-element
-              py              ={"__error__": "dispatch_failed"}
-              qtproxy-sync    =[]
 
   all cells pass (or are registered xfail/skip)
