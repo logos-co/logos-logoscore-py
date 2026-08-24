@@ -288,6 +288,24 @@ def test_the_call_line_does_not_re_encode_its_arguments():
     assert line == "echoBool(false) → false"      # not echoBool("false")
 
 
+def test_a_list_of_error_codes_matches_any_of_them():
+    # The any-of form, which exists for a cell whose answer depends on which of
+    # two deadlines fires first. Both codes satisfy the claim; neither a VALUE
+    # nor an unrelated code does.
+    want = {"__error__": ["object_unavailable", "RPC_FAILED"]}
+    assert R.matches(R.Result(value=None, error="object_unavailable: ghost"), want)
+    assert R.matches(R.Result(value=None, error="RPC_FAILED"), want)
+    assert not R.matches(R.Result(value=None, error="dispatch_failed"), want)
+    # A successful call is still a failure for an error expectation, which is
+    # the property the widening must not cost.
+    assert not R.matches(R.Result(value=7, error=None), want)
+    # The single-string form is unchanged.
+    assert R.matches(R.Result(value=None, error="object_unavailable"),
+                     {"__error__": "object_unavailable"})
+    assert not R.matches(R.Result(value=None, error="RPC_FAILED"),
+                         {"__error__": "object_unavailable"})
+
+
 def test_an_expectation_of_null_is_an_expectation():
     """`"expect": null` is the whole subject of one case, not the absence of one.
 

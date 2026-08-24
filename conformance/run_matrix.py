@@ -569,7 +569,23 @@ def expectation(case: dict, provider: str):
 
 def matches(got: Result, want, raw: bool = False) -> bool:
     if isinstance(want, dict) and set(want) == {"__error__"}:
-        return got.error is not None and want["__error__"] in got.error
+        if got.error is None:
+            return False
+        # A LIST of codes means "any of these", and it exists for exactly one
+        # situation: a cell whose answer is decided by which of two deadlines
+        # fires first, where BOTH outcomes satisfy the claim the case makes.
+        #
+        # It is deliberately not a general escape hatch. Widening a single-code
+        # expectation to a list weakens it, so a case that does this owes an
+        # explanation in `why` of what the codes have in common -- see
+        # failure/A/module-not-loaded, where the shared property is "reported on
+        # the error channel, naming a transport reason, rather than returned as
+        # a value", and the timing that picks between them is the daemon's own
+        # RPC deadline racing a ~20s acquire.
+        codes = want["__error__"]
+        if isinstance(codes, list):
+            return any(c in got.error for c in codes)
+        return codes in got.error
     if got.error is not None:
         return False
     return same(got.value, materialize(want, raw))
