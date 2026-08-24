@@ -1,23 +1,23 @@
 
 LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
   45 cases x 2 providers x 3 consumers
-  differential-consumer-pass   258
-  differential-consumer-xfail  12
-  differential-provider-pass   115
-  differential-provider-xfail  14
-  pass                         222
-  xfail                        48
+  differential-consumer-pass   266
+  differential-consumer-xfail  4
+  differential-provider-pass   125
+  differential-provider-xfail  4
+  pass                         255
+  xfail                        15
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
                      arg    ret    evt record
-  ?tstr               4K     2K      .      .
-  Blob            2ok+2K    1ok    1ok    3ok
+  ?tstr              4ok    2ok      .      .
+  Blob            3ok+1K    1ok    1ok    3ok
   Opt                1ok    1ok      .    4ok
   Wrapper            1ok    1ok      .    1ok
   bool                 .    1ok      .      .
   bstr                 .      .      .    3ok
-  result               .     1K      .      .
-  tstr                 . 1ok+2K      .    2ok
+  result               .    1ok      .      .
+  tstr                 . 2ok+1K      .    2ok
   uint                 .      .      .    2ok
   {tstr:Blob}        1ok    1ok      .      .
   {tstr:[bstr]}      1ok    1ok      .      .
@@ -31,13 +31,13 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
 
     n ok = n cases green on all 6 provider x consumer surfaces      +n K = n cases with a registered known-broken cell
     --   = declared by the contract, NO CASE                        .    = no such position for this type
-    covered but not declared by the contract: ?tstr@method_return, Blob@record_field, Opt@record_field, Wrapper@record_field, bstr@record_field, tstr@record_field, uint@record_field
+    covered but not declared by the contract: Blob@record_field, Opt@record_field, Wrapper@record_field, bstr@record_field, result@method_return, tstr@record_field, uint@record_field
 
   DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
     provider  test_fullapi_ext_rust vs test_fullapi_ext_cpp
-      on extqtproxy-async  39 agree   4 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on extqtproxy-sync   39 agree   4 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on py                37 agree   6 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
+      on extqtproxy-async  42 agree   1 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
+      on extqtproxy-sync   42 agree   1 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
+      on py                41 agree   2 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
     consumer
       extqtproxy-async vs extqtproxy-sync
       extqtproxy-async vs py
@@ -58,29 +58,6 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
     nothing declared out of scope
 
   KNOWN-BROKEN REGISTER   — every amber cell above, and the claim behind it
-    OPT2  2 cell(s) in this run (2 xfail), + 1 differential   cases: Optional/scalar/empty-is-null
-          an EMPTY optional in a positional slot has no expressible form on this stack — null
-          is already the failure token
-          expected null
-          got      {"error": null, "success": true, "value": null}   [xfail] ext_rust/py
-          expected null
-          got      {"__error__": "METHOD_FAILED"}   [xfail] ext_cpp/py
-          fix is: argument side: DONE, logos-logoscore-py e7a5fee — `if arg is None: return
-          "json:null"` in _arg_to_str.
-          return side: a real decision, not a patch. Either the dispatch result carries
-          presence out of band (the same missing channel as M4-residual:
-          logos_rpc_status.h:24-27 says the slot returns a single QVariant and `deferred` has
-          nowhere out-of-band to live), or `?T` is declared unusable as a bare return type and
-          the contract says so. Making null mean `empty` on a wire where null already means
-          `failed` is not a third option.
-    pre-99-null-is-not-an-error  12 cell(s) in this run (12 xfail), + 2 differential   cases: failure/A/module-not-loaded, failure/C/unknown-method
-          the same daemon defect known.json registers, seen from the table that owns the
-          empty-optional cells: classes A, C and D are one METHOD_FAILED
-          expected {"__error__": "object_unavailable"}
-          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
-          expected {"__error__": "METHOD_NOT_FOUND"}
-          got      {"__error__": "METHOD_FAILED"}   [xfail] 6 cells
-          fix is: logos-logoscore-py relocking `logos-logoscore-cli` past ed19258 (#99)
     B-arity-overflow  12 cell(s) in this run (12 xfail), + 2 differential   cases: failure/B/arity/too-many, failure/B/arity/too-many-zero-parameter
           an EXTRA argument is dropped and the call succeeds, on providers generated from a
           different contract than full_api's
@@ -91,51 +68,6 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
           expected {"__error__": "invalid_args"}
           got      "test_fullapi_ext_cpp"   [xfail] ext_cpp/extqtproxy-async, ext_cpp/extqtproxy-sync, ext_cpp/py
           fix is: the same upper-bound arity check known.json's B-arity-overflow names
-    ext-optional-return-changed-on-one-provider  3 cell(s) in this run (3 xfail), + 3 differential   cases: Optional/scalar/present, Optional/scalar/empty-string-is-a-value, hostile/Optional/scalar/wrong-type
-          echoOptional's return moved from `?tstr` to `result` in the Rust contract and
-          nowhere else, so the two providers of one contract now answer different SHAPES and
-          the case table still expects the old one
-          expected "hi"
-          got      {"error": null, "success": true, "value": "hi"}   [xfail] ext_rust/py
-          expected ""
-          got      {"error": null, "success": true, "value": ""}   [xfail] ext_rust/py
-          expected {"__error__": "dispatch_failed"}
-          got      {"error": null, "success": false, "value": null}   [xfail] ext_rust/py
-          fix is: make the two providers agree — either update test_fullapi_ext_cpp_impl.h's
-          echoOptional to the result-returning shape, or revert the Rust LIDL to `-> ?tstr` —
-          and then move these three expectations to whichever shape wins. Not decided here: it
-          is the ext contract's owner's call, and guessing it would bless one provider's
-          encoding as the contract.
-    ext-optional-return-shape-through-the-qt-proxy  16 cell(s) in this run (16 xfail)   cases: Optional/scalar/present, Optional/scalar/empty-is-null, Optional/scalar/empty-string-is-a-value, hostile/Optional/scalar/wrong-type
-          every echoOptional cell fails on the Qt consumer, and for TWO different reasons —
-          one of which is that a `-> result` wrapper bound to a `-> ?tstr` provider answers
-          success=false for every input, including a rejection
-          expected "hi"
-          got      {"error": null, "success": true, "value": "hi"}   [xfail] ext_rust/extqtproxy-async, ext_rust/extqtproxy-sync
-          expected "hi"
-          got      {"error": null, "success": false, "value": null}   [xfail] ext_cpp/extqtproxy-async, ext_cpp/extqtproxy-sync
-          expected null
-          got      {"error": null, "success": true, "value": null}   [xfail] ext_rust/extqtproxy-async, ext_rust/extqtproxy-sync
-          expected null
-          got      {"error": null, "success": false, "value": null}   [xfail] ext_cpp/extqtproxy-async, ext_cpp/extqtproxy-sync
-          expected ""
-          got      {"error": null, "success": true, "value": ""}   [xfail] ext_rust/extqtproxy-async, ext_rust/extqtproxy-sync
-          expected ""
-          got      {"error": null, "success": false, "value": null}   [xfail] ext_cpp/extqtproxy-async, ext_cpp/extqtproxy-sync
-          expected {"__error__": "dispatch_failed"}
-          got      {"error": null, "success": false, "value": null}   [xfail] 4 cells
-          fix is: the same unresolved decision ext-optional-return-changed-on-one-provider
-          names: make the two providers agree on echoOptional's return, then move these
-          expectations to whichever shape wins. This entry adds the evidence that decides it —
-          `-> ?tstr` was reverted to `-> result` on the Rust side for a reason that no longer
-          holds (the qt-generator's `-> ?T` gate is retired, and lidlTypeToQt now maps `?T` to
-          std::optional<T>), so `-> ?tstr` is emittable on the Qt surface today and is what
-          the C++ provider already derives.
-          INDEPENDENTLY of that: a Qt consumer wrapper that cannot decode a return should not
-          spell the failure as a default-constructed value of the return type. For LogosResult
-          that default is `success: false`, which is a value the contract can legitimately
-          carry — so a decode failure impersonates a provider answer. The sink (`__derr`) and
-          `logos::CallError` both know; the value does not.
     ext-nested-int-range-unchecked-on-one-provider  1 cell(s) in this run (1 xfail), + 1 differential   cases: [[int]]/out-of-signed-range
           2^64-1 in an `int` slot two containers deep is accepted and echoed by
           test_fullapi_ext_rust; test_fullapi_ext_cpp rejects it by coordinate, and so does
@@ -158,7 +90,7 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
           the table for py, and is registered here for the surfaces that structurally cannot
           see it.
 
-  CONSUMER DELTA py-vs-extqtproxy-async (6):
+  CONSUMER DELTA py-vs-extqtproxy-async (2):
     xfail     [[int]]/method_arg/test_fullapi_ext_rust
               case=[[int]]/out-of-signed-range
               py              =[[18446744073709551615]]
@@ -167,24 +99,8 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
               case=[bstr]/lenient-plain-string
               py              =["hi"]
               extqtproxy-async=[{"_bytes": "aGk"}]
-    xfail     ?tstr/method_arg,method_return/test_fullapi_ext_cpp
-              case=Optional/scalar/present
-              py              ="hi"
-              extqtproxy-async={"error": null, "success": false, "value": null}
-    xfail     ?tstr/method_arg,method_return/test_fullapi_ext_cpp
-              case=Optional/scalar/empty-is-null
-              py              ={"__error__": "METHOD_FAILED"}
-              extqtproxy-async={"error": null, "success": false, "value": null}
-    xfail     ?tstr/method_arg,method_return/test_fullapi_ext_cpp
-              case=Optional/scalar/empty-string-is-a-value
-              py              =""
-              extqtproxy-async={"error": null, "success": false, "value": null}
-    xfail     ?tstr/method_arg/test_fullapi_ext_cpp
-              case=hostile/Optional/scalar/wrong-type
-              py              ={"__error__": "dispatch_failed"}
-              extqtproxy-async={"error": null, "success": false, "value": null}
 
-  CONSUMER DELTA py-vs-extqtproxy-sync (6):
+  CONSUMER DELTA py-vs-extqtproxy-sync (2):
     xfail     [[int]]/method_arg/test_fullapi_ext_rust
               case=[[int]]/out-of-signed-range
               py              =[[18446744073709551615]]
@@ -193,21 +109,5 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
               case=[bstr]/lenient-plain-string
               py              =["hi"]
               extqtproxy-sync =[{"_bytes": "aGk"}]
-    xfail     ?tstr/method_arg,method_return/test_fullapi_ext_cpp
-              case=Optional/scalar/present
-              py              ="hi"
-              extqtproxy-sync ={"error": null, "success": false, "value": null}
-    xfail     ?tstr/method_arg,method_return/test_fullapi_ext_cpp
-              case=Optional/scalar/empty-is-null
-              py              ={"__error__": "METHOD_FAILED"}
-              extqtproxy-sync ={"error": null, "success": false, "value": null}
-    xfail     ?tstr/method_arg,method_return/test_fullapi_ext_cpp
-              case=Optional/scalar/empty-string-is-a-value
-              py              =""
-              extqtproxy-sync ={"error": null, "success": false, "value": null}
-    xfail     ?tstr/method_arg/test_fullapi_ext_cpp
-              case=hostile/Optional/scalar/wrong-type
-              py              ={"__error__": "dispatch_failed"}
-              extqtproxy-sync ={"error": null, "success": false, "value": null}
 
   all cells pass (or are registered xfail/skip)
