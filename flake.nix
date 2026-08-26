@@ -210,7 +210,7 @@
           # when the table was split out, so it ran single-provider and without a
           # differential; logos-cpp-sdk#125 lifted that and both providers are
           # wired below, so this table carries a provider differential like
-          # full_api. What it still lacks is the consumer axis: `py` only.
+          # full_api. Its consumer axis is `testModulesExtQtProxyInstall` below.
           testModulesExtInstall = logos-test-modules.modules.${system}.test_fullapi_ext_rust.install;
           testModulesExtCppInstall = logos-test-modules.modules.${system}.test_fullapi_ext_cpp.install;
           # The QT-TYPED consumer. `type: core` with no `interface` key selects
@@ -221,6 +221,15 @@
           # once per generated wrapper table (sync / async).
           testModulesQtProxyInstall =
             logos-test-modules.modules.${system}.test_fullapi_qtproxy.install;
+          # The ext table's Qt-typed consumer, and the reason it is a SECOND
+          # module rather than a second binding of the first: a Qt consumer
+          # wrapper is generated per CONTRACT, and full_api_ext is a different
+          # contract. It is also where the widened Qt mapping actually lives —
+          # records, QList<Blob>, QMap<QString, QList<QByteArray>>,
+          # QList<QList<qlonglong>>, std::optional<QString> — none of which
+          # full_api can spell, so none of which qtproxy-sync/async execute.
+          testModulesExtQtProxyInstall =
+            logos-test-modules.modules.${system}.test_fullapi_ext_qtproxy.install;
 
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
@@ -381,6 +390,16 @@
               2>&1 | tee $out/matrix.txt
           '';
 
+          # The ext contract, with the SAME three-consumer shape the full_api
+          # gate has:
+          #   py                 this package's client, talking to the provider
+          #   extqtproxy-sync    Qt-typed wrappers, sync table
+          #   extqtproxy-async   Qt-typed wrappers, async table
+          #
+          # The proxy is a DIFFERENT module from the full_api one because a Qt
+          # consumer wrapper is generated per contract. The probe method is
+          # given explicitly (fifth field of --proxy-consumer): the driver's
+          # default is `echoInt`, which full_api_ext does not have.
           conformance-matrix-ext = pkgs.runCommand "logoscore-py-conformance-matrix-ext" {
             nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
@@ -402,6 +421,8 @@
               --contract ${logos-test-modules}/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl \
               --modules test_fullapi_ext_rust=${testModulesExtInstall}/modules \
               --modules test_fullapi_ext_cpp=${testModulesExtCppInstall}/modules \
+              --proxy-consumer 'extqtproxy-sync=test_fullapi_ext_qtproxy=${testModulesExtQtProxyInstall}/modules=sync=echoStringMap:[{"k":"v"}]' \
+              --proxy-consumer 'extqtproxy-async=test_fullapi_ext_qtproxy=${testModulesExtQtProxyInstall}/modules=async=echoStringMap:[{"k":"v"}]' \
               --jsonl $out/matrix-ext.jsonl \
               --report $out/matrix-ext.html \
               --no-color \

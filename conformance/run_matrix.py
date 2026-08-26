@@ -25,7 +25,7 @@ Four things keep it honest:
 
 Usage:
     run_matrix.py --cpp-modules DIR --rust-modules DIR [--logoscore BIN]
-                  [--proxy-consumer LABEL=MODULE=DIR[=sync|async]]
+                  [--proxy-consumer LABEL=MODULE=DIR[=sync|async[=PROBE]]]
                   [--contract full_api.lidl] [--jsonl out.jsonl] [--quiet]
                   [--report out.html] [--report-text] [--md known.md]
 
@@ -43,9 +43,19 @@ reverse would be a cycle).
 THE CONSUMER AXIS. `py` is the direct consumer: this package's client talks to
 the provider. A `--proxy-consumer` point routes the SAME case table through an
 intermediate module, so the value is decoded and re-encoded by that module's
-generated wrappers before python ever sees it. `test_fullapi_qtproxy` is the
-Qt-typed one (`type: core`, no `interface` key => apiStyle=qt), which is the only
-surface the Qt wrappers are on.
+generated wrappers before python ever sees it. There is one Qt-typed proxy per
+CONTRACT, because a Qt consumer wrapper is generated per contract:
+`test_fullapi_qtproxy` for full_api and `test_fullapi_ext_qtproxy` for
+full_api_ext. Both are `interface: universal` (a header-first cdylib PROVIDER
+surface) plus `codegen.consumer_api_style: "qt"` (the CONSUMER surface) — two
+independent keys, which is what lets the Qt wrappers be measured at all.
+
+The ext one is not a duplicate: full_api has no record, no typed container and
+no optional in it, so the widened Qt spellings — a generated record struct,
+QList<Blob>, QMap<QString, Blob>, QList<QByteArray>, QList<QList<qlonglong>>,
+QMap<QString, QList<QByteArray>>, std::optional<QString> — exist only in
+full_api_ext, and each of them is emitted as an element LOOP rather than handed
+to the codec whole.
 
 Two caveats that must not be forgotten when reading a proxy cell:
 
@@ -299,15 +309,22 @@ class Consumer:
     module's generated wrappers on the way through.
     """
 
-    __slots__ = ("label", "module", "dirs", "call_mode", "probe_method")
+    __slots__ = ("label", "module", "dirs", "call_mode", "probe_method", "probe_args")
 
     def __init__(self, label, module=None, dirs=(), call_mode=None,
-                 probe_method="echoInt"):
+                 probe_method="echoInt", probe_args=(1,)):
         self.label = label
         self.module = module            # None => call the provider directly
         self.dirs = list(dirs)          # extra module dirs this consumer needs
         self.call_mode = call_mode      # None | "sync" | "async"
-        self.probe_method = probe_method  # a call whose mode can be read back
+        # A call whose mode can be read back. It is a CONTRACT method, and the
+        # contract is not always full_api: full_api_ext has no `echoInt`, no
+        # method taking a bare scalar, and — because its zero-parameter method
+        # ignores extra arguments (known-ext.json B-arity-overflow) — no method
+        # that could be probed with a spare `1` without leaning on a registered
+        # defect. So the probe carries its own arguments.
+        self.probe_method = probe_method
+        self.probe_args = list(probe_args)
 
     @property
     def is_proxy(self) -> bool:
@@ -353,12 +370,14 @@ class Consumer:
         # would need its own, which is why the failure below names the method
         # rather than reporting a bare call error.
         try:
-            client.call(self.module, self.probe_method, 1, timeout=timeout)
+            client.call(self.module, self.probe_method, *self.probe_args, timeout=timeout)
         except Exception as e:
+            shown = ", ".join(repr(a) for a in self.probe_args)
             raise RuntimeError(
-                f"{self.label}: call-mode probe {self.probe_method}(1) failed ({e}); "
+                f"{self.label}: call-mode probe {self.probe_method}({shown}) failed ({e}); "
                 f"a proxy consumer with a call mode needs a probe method this "
-                f"contract actually has") from None
+                f"contract actually has — pass one as the fifth field of "
+                f"--proxy-consumer") from None
         status = client.call(self.module, "lastCallStatus", timeout=timeout)
         if status != f"ok-{self.call_mode}":
             raise RuntimeError(
@@ -376,15 +395,41 @@ class Consumer:
 
 
 def parse_proxy_consumer(spec: str) -> Consumer:
-    """LABEL=MODULE=DIR[=MODE]"""
+    """LABEL=MODULE=DIR[=MODE[=PROBE]]
+
+    PROBE is `METHOD` or `METHOD:JSON_ARGS`, and it names the call whose mode is
+    read back to prove the selected wrapper table actually ran. It defaults to
+    full_api's `echoInt:[1]`; a proxy for another contract must give its own,
+    because there is no method every contract has.
+    """
     parts = spec.split("=")
-    if len(parts) not in (3, 4):
-        raise ValueError(f"--proxy-consumer expects LABEL=MODULE=DIR[=MODE], got {spec!r}")
+    if len(parts) not in (3, 4, 5):
+        raise ValueError(
+            f"--proxy-consumer expects LABEL=MODULE=DIR[=MODE[=PROBE]], got {spec!r}")
     label, module, path = parts[0], parts[1], parts[2]
-    mode = parts[3] if len(parts) == 4 else None
+    mode = parts[3] if len(parts) >= 4 else None
     if mode is not None and mode not in ("sync", "async"):
         raise ValueError(f"--proxy-consumer mode must be sync or async, got {mode!r}")
-    return Consumer(label, module=module, dirs=[path], call_mode=mode)
+    kw = {}
+    if len(parts) == 5:
+        name, sep, raw = parts[4].partition(":")
+        if not name:
+            raise ValueError(f"--proxy-consumer probe needs a method name, got {parts[4]!r}")
+        args = []
+        if sep:
+            try:
+                args = json.loads(raw)
+            except ValueError as e:
+                raise ValueError(
+                    f"--proxy-consumer probe arguments must be a JSON array, "
+                    f"got {raw!r} ({e})") from None
+            if not isinstance(args, list):
+                raise ValueError(
+                    f"--proxy-consumer probe arguments must be a JSON ARRAY, got {raw!r}")
+        # The table's own tagged-bytes form, so a probe can name a record with a
+        # bstr field without a second spelling for bytes.
+        kw = {"probe_method": name, "probe_args": [materialize(a) for a in args]}
+    return Consumer(label, module=module, dirs=[path], call_mode=mode, **kw)
 
 
 # ── the table ───────────────────────────────────────────────────────────────
@@ -522,9 +567,50 @@ def expectation(case: dict, provider: str):
     return None, False
 
 
+def declared_multi_divergence(case, res_a, res_b) -> bool:
+    """Does this case DECLARE that coordinates may answer differently?
+
+    An `expect` naming a LIST of error codes says exactly that: more than one
+    answer satisfies the claim, and which one arrives is not the table's
+    business. That is the same kind of statement `expect_by_provider` makes for
+    the provider axis, and the differential gives it the same treatment --
+    recorded so the divergence stays visible, not judged.
+
+    Narrow on purpose. It applies only when the expectation names several codes
+    AND BOTH sides satisfy it; a coordinate answering something else, or a
+    value instead of an error, still fails. The differential is deliberately
+    independent of `expect` everywhere else -- that independence is what caught
+    the `void` divergence -- so this does not generalise to "both matched,
+    therefore they agree".
+    """
+    want = case.get("expect")
+    if not (isinstance(want, dict) and set(want) == {"__error__"}):
+        return False
+    codes = want["__error__"]
+    if not isinstance(codes, list) or len(codes) < 2:
+        return False
+    return matches(res_a, want) and matches(res_b, want)
+
+
 def matches(got: Result, want, raw: bool = False) -> bool:
     if isinstance(want, dict) and set(want) == {"__error__"}:
-        return got.error is not None and want["__error__"] in got.error
+        if got.error is None:
+            return False
+        # A LIST of codes means "any of these", and it exists for exactly one
+        # situation: a cell whose answer is decided by which of two deadlines
+        # fires first, where BOTH outcomes satisfy the claim the case makes.
+        #
+        # It is deliberately not a general escape hatch. Widening a single-code
+        # expectation to a list weakens it, so a case that does this owes an
+        # explanation in `why` of what the codes have in common -- see
+        # failure/A/module-not-loaded, where the shared property is "reported on
+        # the error channel, naming a transport reason, rather than returned as
+        # a value", and the timing that picks between them is the daemon's own
+        # RPC deadline racing a ~20s acquire.
+        codes = want["__error__"]
+        if isinstance(codes, list):
+            return any(c in got.error for c in codes)
+        return codes in got.error
     if got.error is not None:
         return False
     return same(got.value, materialize(want, raw))
@@ -597,17 +683,30 @@ def run_events(client, consumer: "Consumer", provider: str, events: list, timeou
 
 
 def capture_event(client, module: str, event: str, fire: str, values: list, timeout: float):
-    """Subscribe, fire, wait — re-firing until the event lands.
+    """Subscribe, fire, wait — retrying BOTH halves until the event lands.
 
     The watcher subscribes on a background subprocess, so "watch is live" and
     "we fire" race. A single fire that lands before the subscription is up is
     lost and no later wait recovers it; the `fire<X>Event` triggers are
-    idempotent emits, so re-firing on a short cadence closes the race without
-    hard-coding a settle time. (Same approach as the logoscore-py suite, which
-    is where this race was worked out.)
+    idempotent emits, so re-firing on a short cadence closes that half.
+
+    SUBSCRIBING races too, and only the firing half was retried. `on_event` is
+    one-shot: asked too early it is REFUSED, the daemon answers WATCH_FAILED,
+    and nothing tried again -- so a cell that had nothing to do with events
+    reported a transport error instead of a value. Measured on
+    event/tstr against test_fullapi_rust: failed, passed, failed across three
+    otherwise identical runs, while BOTH proxy consumers received the event in
+    the same runs that `py` failed in -- so the module was emitting and it was
+    the subscription that lost the race.
+
+    Retried against the same deadline as the fire loop rather than a fixed
+    count, so a slow start costs time and not a false negative. A subscription
+    that never succeeds still raises, and still fails the cell.
     """
     import threading
     import time
+
+    from logoscore.errors import LogoscoreError, MethodError
 
     received: list = []
     got = threading.Event()
@@ -616,14 +715,27 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
         received.append(e)
         got.set()
 
-    with client.on_event(module, event, on_event):
-        deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout
+    sub = None
+    while True:
+        try:
+            sub = client.on_event(module, event, on_event)
+            sub.__enter__()
+            break
+        except (MethodError, LogoscoreError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+
+    try:
         while True:
             client.call(module, fire, *values, timeout=timeout)
             if got.wait(timeout=1.0):
                 break
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"event {event} not received within {timeout}s")
+    finally:
+        sub.__exit__(None, None, None)
 
     payload = received[0]
     data = payload.get("data", payload) if isinstance(payload, dict) else payload
@@ -658,9 +770,11 @@ def main() -> int:
     ap.add_argument("--consumer", default="py",
                     help="label for the DIRECT consumer (this package's client)")
     ap.add_argument("--proxy-consumer", action="append", default=[],
-                    metavar="LABEL=MODULE=DIR[=MODE]",
+                    metavar="LABEL=MODULE=DIR[=MODE[=PROBE]]",
                     help="replay the table through a forwarding module; repeatable. "
-                         "MODE (sync|async) selects the generated wrapper table.")
+                         "MODE (sync|async) selects the generated wrapper table. "
+                         "PROBE is METHOD[:JSON_ARGS], the call whose mode is read "
+                         "back (default echoInt:[1], which only full_api has).")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
     # Reporting. `--report` is the artifact (self-contained HTML, no CDN, same
@@ -846,7 +960,14 @@ def main() -> int:
             res_a.error is not None or same(res_a.value, res_b.value))
         registered = next(
             (xfail[k] for k in ((cid, *label_a), (cid, *label_b)) if k in xfail), None)
-        status = "pass" if agree else ("xfail" if registered else "fail")
+        if agree:
+            status = "pass"
+        elif declared_multi_divergence(case, res_a, res_b):
+            status = "declared"
+        elif registered:
+            status = "xfail"
+        else:
+            status = "fail"
         bump(f"differential-{kind}-{status}")
         if kind == "provider":
             diffs.append({"case": cid, "consumer": label_a[1], "declared": False,
