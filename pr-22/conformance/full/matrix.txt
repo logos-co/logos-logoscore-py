@@ -34,9 +34,9 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
 
   DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
     provider  test_fullapi_cpp vs test_fullapi_rust
-      on py                94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on py                93 agree   1 differ   +2 declared, not compared  (2 by identity)
       on qtproxy-async     94 agree   0 differ   +2 declared, not compared  (2 by identity)
-      on qtproxy-sync      93 agree   1 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-sync      94 agree   0 differ   +2 declared, not compared  (2 by identity)
     consumer
       py vs qtproxy-async
       py vs qtproxy-sync
@@ -103,7 +103,7 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
           fix is: a data model where a byte string is not spelled as a map, not a stricter
           predicate — the shape that would be checked IS the encoding
 
-  CONSUMER DELTA py-vs-qtproxy-async (2):
+  CONSUMER DELTA py-vs-qtproxy-async (3):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
@@ -112,6 +112,10 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
               qtproxy-async   ={}
+    declared  int/method_arg/test_fullapi_rust
+              case=failure/A/module-not-loaded
+              py              ={"__error__": "RPC_FAILED"}
+              qtproxy-async   ={"__error__": "object_unavailable"}
 
   CONSUMER DELTA py-vs-qtproxy-sync (3):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
@@ -122,15 +126,9 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
               qtproxy-sync    ={}
-    declared  int/method_arg/test_fullapi_cpp
+    declared  int/method_arg/test_fullapi_rust
               case=failure/A/module-not-loaded
-              py              ={"__error__": "object_unavailable"}
-              qtproxy-sync    ={"__error__": "RPC_FAILED"}
-
-  CONSUMER DELTA qtproxy-sync-vs-qtproxy-async (1):
-    declared  int/method_arg/test_fullapi_cpp
-              case=failure/A/module-not-loaded
-              qtproxy-sync    ={"__error__": "RPC_FAILED"}
-              qtproxy-async   ={"__error__": "object_unavailable"}
+              py              ={"__error__": "RPC_FAILED"}
+              qtproxy-sync    ={"__error__": "object_unavailable"}
 
   all cells pass (or are registered xfail/skip)
