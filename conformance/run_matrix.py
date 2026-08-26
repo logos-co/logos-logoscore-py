@@ -567,6 +567,31 @@ def expectation(case: dict, provider: str):
     return None, False
 
 
+def declared_multi_divergence(case, res_a, res_b) -> bool:
+    """Does this case DECLARE that coordinates may answer differently?
+
+    An `expect` naming a LIST of error codes says exactly that: more than one
+    answer satisfies the claim, and which one arrives is not the table's
+    business. That is the same kind of statement `expect_by_provider` makes for
+    the provider axis, and the differential gives it the same treatment --
+    recorded so the divergence stays visible, not judged.
+
+    Narrow on purpose. It applies only when the expectation names several codes
+    AND BOTH sides satisfy it; a coordinate answering something else, or a
+    value instead of an error, still fails. The differential is deliberately
+    independent of `expect` everywhere else -- that independence is what caught
+    the `void` divergence -- so this does not generalise to "both matched,
+    therefore they agree".
+    """
+    want = case.get("expect")
+    if not (isinstance(want, dict) and set(want) == {"__error__"}):
+        return False
+    codes = want["__error__"]
+    if not isinstance(codes, list) or len(codes) < 2:
+        return False
+    return matches(res_a, want) and matches(res_b, want)
+
+
 def matches(got: Result, want, raw: bool = False) -> bool:
     if isinstance(want, dict) and set(want) == {"__error__"}:
         if got.error is None:
@@ -935,7 +960,14 @@ def main() -> int:
             res_a.error is not None or same(res_a.value, res_b.value))
         registered = next(
             (xfail[k] for k in ((cid, *label_a), (cid, *label_b)) if k in xfail), None)
-        status = "pass" if agree else ("xfail" if registered else "fail")
+        if agree:
+            status = "pass"
+        elif declared_multi_divergence(case, res_a, res_b):
+            status = "declared"
+        elif registered:
+            status = "xfail"
+        else:
+            status = "fail"
         bump(f"differential-{kind}-{status}")
         if kind == "provider":
             diffs.append({"case": cid, "consumer": label_a[1], "declared": False,
