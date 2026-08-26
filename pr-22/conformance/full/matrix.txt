@@ -1,11 +1,13 @@
 
 LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
   96 cases x 2 providers x 3 consumers
-  differential-consumer-pass   572
+  differential-consumer-declared 2
+  differential-consumer-pass   570
   differential-consumer-xfail  4
-  differential-provider-pass   282
-  pass                         560
-  xfail                        16
+  differential-provider-declared 1
+  differential-provider-pass   281
+  pass                         566
+  xfail                        10
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
                   arg    ret    evt   nest     a0     a1     a2     e0     e1     e2
@@ -17,7 +19,7 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
   result            .    2ok      .      .      .      .      .      .      .      .
   tstr            3ok    7ok    1ok      .      .    2ok      .      .    1ok      .
   uint            6ok    5ok    2ok      .      .      .      .      .      .      .
-  void              . 1ok+1K      .      .      .      .      .      .      .      .
+  void              .    2ok      .      .      .      .      .      .      .      .
   {tstr:any}   4ok+1K 3ok+1K    1ok      .      .      .      .      .      .      .
   [any]           4ok    3ok    1ok      .      .      .      .      .      .      .
   [bool]          1ok    1ok    1ok      .      .      .      .      .      .      .
@@ -34,7 +36,7 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
     provider  test_fullapi_cpp vs test_fullapi_rust
       on py                94 agree   0 differ   +2 declared, not compared  (2 by identity)
       on qtproxy-async     94 agree   0 differ   +2 declared, not compared  (2 by identity)
-      on qtproxy-sync      94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-sync      93 agree   1 differ   +2 declared, not compared  (2 by identity)
     consumer
       py vs qtproxy-async
       py vs qtproxy-sync
@@ -100,14 +102,6 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
           got      {}   [xfail] 4 cells
           fix is: a data model where a byte string is not spelled as a map, not a stricter
           predicate — the shape that would be checked IS the encoding
-    B-arity-overflow  6 cell(s) in this run (6 xfail), + 1 differential   cases: failure/B/arity/too-many-zero-parameter
-          a VOID method's refusal is discarded by the Qt host glue, so an extra argument still
-          succeeds — the provider now refuses correctly and nothing downstream reports it
-          expected {"__error__": "invalid_args"}
-          got      true   [xfail] 6 cells
-          fix is: logos-plugin-qt#28: the cdylib glue's void arm must test the reply for a
-          rejection instead of substituting QVariant(true) unconditionally. NOT another arity
-          guard — the arity guard is present and working.
 
   CONSUMER DELTA py-vs-qtproxy-async (2):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
@@ -119,7 +113,7 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
               py              ={"_bytes": "aGk"}
               qtproxy-async   ={}
 
-  CONSUMER DELTA py-vs-qtproxy-sync (2):
+  CONSUMER DELTA py-vs-qtproxy-sync (3):
     xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
@@ -128,5 +122,15 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
               case=adversarial/{tstr:any}/_bytes-key
               py              ={"_bytes": "aGk"}
               qtproxy-sync    ={}
+    declared  int/method_arg/test_fullapi_cpp
+              case=failure/A/module-not-loaded
+              py              ={"__error__": "object_unavailable"}
+              qtproxy-sync    ={"__error__": "RPC_FAILED"}
+
+  CONSUMER DELTA qtproxy-sync-vs-qtproxy-async (1):
+    declared  int/method_arg/test_fullapi_cpp
+              case=failure/A/module-not-loaded
+              qtproxy-sync    ={"__error__": "RPC_FAILED"}
+              qtproxy-async   ={"__error__": "object_unavailable"}
 
   all cells pass (or are registered xfail/skip)

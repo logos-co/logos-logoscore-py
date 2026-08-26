@@ -7,7 +7,6 @@ Measured on consumer(s) `py`, `qtproxy-async`, `qtproxy-sync` against provider(s
 |----|----|----|----|
 | M4-residual | 6 | `adversarial/any/pending-call-canonical` | a CANONICAL-shape forgery of the deferred-call sentinel still hijacks a call |
 | M3 | 4 | `adversarial/{tstr:any}/_bytes-key` | a one-key `_bytes` map reaching a Qt-typed map slot is reinterpreted as bytes and arrives EMPTY |
-| B-arity-overflow | 6 | `failure/B/arity/too-many-zero-parameter` | a VOID method's refusal is discarded by the Qt host glue, so an extra argument still succeeds — the provider now refuses correctly and nothing downstream reports it |
 
 ### Closed
 
@@ -21,6 +20,7 @@ Kept because it explains why several green cases exist at all: they are the regr
 | M2 | logos-qt-sdk cdylib glue (kVoidMethods) + logos-rust-sdk void arms | a `void` return answered `true` from the C++ provider and METHOD_FAILED from the Rust one. |
 | M4 | logos-protocol — logos::isPendingCallSentinel, replacing a bare contains() at all four detection sites | a user map that merely CARRIED the sentinel key was taken for a deferred call. |
 | pre-99-null-is-not-an-error | logos-logoscore-py relocking logos-logoscore-cli onto master (0f0be25), which carries ed19258 (#99) and b3f1a403 (#101). | Classes A, C and D were one indistinguishable METHOD_FAILED because CoreServiceImpl::callModuleMethod took the invokeRemoteMethod overload with no CallError* and decided the verdict by testing ret.is_null() on the RESULT. |
+| B-arity-overflow | logos-plugin-qt#29 (f668ef2), carried by logos-module-builder 6044ffc. The provider half was logos-cpp-sdk#150 and logos-rust-sdk#50; this is the consumer half. | An EXTRA argument was dropped and the call succeeded. The last six cells were failure/B/arity/too-many-zero-parameter on `doVoid`, where the provider refused correctly and the Qt host glue discarded the refusal. |
 
 ### Not measurable by this matrix
 
