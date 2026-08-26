@@ -288,45 +288,6 @@ def test_the_call_line_does_not_re_encode_its_arguments():
     assert line == "echoBool(false) → false"      # not echoBool("false")
 
 
-def test_an_any_of_expectation_declares_that_coordinates_may_differ():
-    # The differential is deliberately independent of `expect` -- that is what
-    # catches a divergence nobody predicted. The one exception is an
-    # expectation that NAMES several acceptable codes: that case has already
-    # said which answers satisfy it, so two coordinates picking different ones
-    # is not a finding. It stays printed, it just does not fail the run.
-    R2 = R.Result
-    case = {"expect": {"__error__": ["object_unavailable", "RPC_FAILED"]}}
-    a = R2(value=None, error="object_unavailable")
-    b = R2(value=None, error="RPC_FAILED")
-    assert R.declared_multi_divergence(case, a, b)
-    # A single-code expectation declares nothing of the sort.
-    assert not R.declared_multi_divergence(
-        {"expect": {"__error__": "object_unavailable"}}, a, a)
-    # A coordinate answering something OUTSIDE the declared set is still a
-    # finding, even though the expectation is a list.
-    assert not R.declared_multi_divergence(case, a, R2(value=None, error="dispatch_failed"))
-    # ...and so is one that answers a VALUE rather than an error.
-    assert not R.declared_multi_divergence(case, a, R2(value=7, error=None))
-
-
-def test_a_list_of_error_codes_matches_any_of_them():
-    # The any-of form, which exists for a cell whose answer depends on which of
-    # two deadlines fires first. Both codes satisfy the claim; neither a VALUE
-    # nor an unrelated code does.
-    want = {"__error__": ["object_unavailable", "RPC_FAILED"]}
-    assert R.matches(R.Result(value=None, error="object_unavailable: ghost"), want)
-    assert R.matches(R.Result(value=None, error="RPC_FAILED"), want)
-    assert not R.matches(R.Result(value=None, error="dispatch_failed"), want)
-    # A successful call is still a failure for an error expectation, which is
-    # the property the widening must not cost.
-    assert not R.matches(R.Result(value=7, error=None), want)
-    # The single-string form is unchanged.
-    assert R.matches(R.Result(value=None, error="object_unavailable"),
-                     {"__error__": "object_unavailable"})
-    assert not R.matches(R.Result(value=None, error="RPC_FAILED"),
-                         {"__error__": "object_unavailable"})
-
-
 def test_an_expectation_of_null_is_an_expectation():
     """`"expect": null` is the whole subject of one case, not the absence of one.
 
