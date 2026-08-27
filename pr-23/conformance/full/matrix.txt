@@ -1,0 +1,124 @@
+
+LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
+  96 cases x 2 providers x 3 consumers
+  differential-consumer-pass   572
+  differential-consumer-xfail  4
+  differential-provider-pass   282
+  pass                         566
+  xfail                        10
+
+  TYPE x POSITION   — does a value of this type, in this position, survive?
+                  arg    ret    evt   nest     a0     a1     a2     e0     e1     e2
+  any          9ok+1K    9ok    1ok      .      .      .      .      .      .      .
+  bool            3ok    2ok    1ok      .      .      .      .      .      .      .
+  bstr            5ok    5ok    2ok    3ok      .      .    2ok      .      .    1ok
+  float64         2ok    2ok    1ok      .      .      .      .      .      .      .
+  int            11ok    6ok    3ok      .    2ok      .      .    1ok      .      .
+  result            .    2ok      .      .      .      .      .      .      .      .
+  tstr            3ok    7ok    1ok      .      .    2ok      .      .    1ok      .
+  uint            6ok    5ok    2ok      .      .      .      .      .      .      .
+  void              .    2ok      .      .      .      .      .      .      .      .
+  {tstr:any}   4ok+1K 3ok+1K    1ok      .      .      .      .      .      .      .
+  [any]           4ok    3ok    1ok      .      .      .      .      .      .      .
+  [bool]          1ok    1ok    1ok      .      .      .      .      .      .      .
+  [float64]       1ok    1ok    1ok      .      .      .      .      .      .      .
+  [int]           5ok    4ok    1ok      .      .      .      .      .      .      .
+  [tstr]          3ok    2ok    2ok      .      .      .      .      .      .      .
+  [uint]          5ok    3ok    1ok      .      .      .      .      .      .      .
+
+    n ok = n cases green on all 6 provider x consumer surfaces      +n K = n cases with a registered known-broken cell
+    --   = declared by the contract, NO CASE                        .    = no such position for this type
+    covered but not declared by the contract: bstr@nested_in_container
+
+  DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
+    provider  test_fullapi_cpp vs test_fullapi_rust
+      on py                94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-async     94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-sync      94 agree   0 differ   +2 declared, not compared  (2 by identity)
+    consumer
+      py vs qtproxy-async
+      py vs qtproxy-sync
+      qtproxy-async vs qtproxy-sync
+
+    DECLARED DIVERGENCES (expect_by_provider) — the driver does not compare these; the divergence IS the expectation
+      2 more differ BY IDENTITY — each provider answers with its own name, which is
+        what the case is for: identity/whoami, result/ok
+
+  NOT MEASURED   — what this run does not answer, on the record
+    skip   bstr/*  on consumer(s) qml  [unsupported-by-surface]
+    skip   uint/boundary/*, event/uint/boundary  on consumer(s) qml  [unsupported-by-surface]
+           ^ this run has no such consumer, so these produced no cells at all. "Declared unsupported on a surface
+             nobody measured" is not the same as "nothing was skipped".
+    limit  axis=consumer   PARTLY CLOSED — three consumer points now, was one
+           History, kept because the reasoning is the reusable part: the matrix had ONE
+           consumer driver (`py`), so a cell proved a provider agreed with the python client,
+           not that two consumer surfaces agreed with each other. That hid a real defect — the
+           event bridge failing to decode tagged bytes into a QByteArray was invisible because
+           the undecoded map round-trips and the py client decodes the tag itself; it took
+           asserting the bridge directly (logos-protocol test_event_payload_fidelity.cpp) to
+           see it. It also recorded, correctly, that adding the existing C++/Rust proxies would
+           NOT close the hole: both are lp/Rust-client consumers, so they share the py blind
+           spot for the Qt-typed path.
+           Now measured, not argued. The axis runs py + qtproxy-sync + qtproxy-async. Two
+           findings came straight out of it: M3 became measurable (and is now an ordinary
+           xfail), and Q1 — the Qt dispatch coercing hostile arguments — was not previously
+           known at all. The live cell counts are in the register rather than restated here,
+           because a count written into prose goes stale silently and this block is reproduced
+           verbatim in every report.
+           What is STILL open on this axis: * QML. No driver replays cases.json through the
+           LogosQmlBridge, and the two skip[] entries describe exactly that surface. * The
+           cdylib/Rust proxy. Buildable and driveable by the same --proxy-consumer flag; not
+           wired in. * The lp proxy. Measured here for ATTRIBUTION (it is what proves Q1 and M3
+           are the Qt style rather than the extra hop) but not carried as a standing consumer:
+           it has 2 divergent cases of its own that would need registry entries first. * The
+           ext table (ext-cases.json) still has no proxy at all, so every one of its cells
+           remains single-consumer. It does now run BOTH providers, so it has a provider
+           differential; the consumer axis is the half still missing.
+    limit  axis=transport  OPEN
+           Every cell is measured over LocalSocket/QtRO: run_matrix.py builds the daemon with
+           no `transports=`, and there is no flag to change it. The plain (tcp/tcp_ssl) wire is
+           unreachable from this table. That mattered for uint: RpcValue's variant had no
+           unsigned alternative (logos-protocol cpp/implementations/plain/rpc_value.h), so a
+           uint64 above int64max wrapped to -1 there — a DIFFERENT wrong answer than the one M6
+           described, which this matrix would not have matched. Fixed in the same
+           logos-protocol PR as M6, but found only by reading the code: no cell here could
+           reach it. The regression guard for it lives where it can run — logos-logoscore-py's
+           integration table, which now carries 2^63, 2^64-1 and 2^53+1 and is replayed over
+           local, tcp and tcp_ssl.
+
+  KNOWN-BROKEN REGISTER   — every amber cell above, and the claim behind it
+    M4-residual  6 cell(s) in this run (6 xfail), + 1 differential   cases: adversarial/any/pending-call-canonical
+          a CANONICAL-shape forgery of the deferred-call sentinel still hijacks a call
+          expected {"__logos_pending_call__": "lc-0"}
+          got      {"__error__": "TimeoutExpired"}   [xfail] 6 cells
+          fix is: an out-of-band way to signal deferral (a second return channel or a
+          protocol-major dispatch signature), not a stricter predicate
+    M3  4 cell(s) in this run (4 xfail)   cases: adversarial/{tstr:any}/_bytes-key
+          a one-key `_bytes` map reaching a Qt-typed map slot is reinterpreted as bytes and
+          arrives EMPTY
+          expected {"_bytes": "aGk"}
+          got      {}   [xfail] 4 cells
+          fix is: a data model where a byte string is not spelled as a map, not a stricter
+          predicate — the shape that would be checked IS the encoding
+
+  CONSUMER DELTA py-vs-qtproxy-async (2):
+    xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
+              case=adversarial/{tstr:any}/_bytes-key
+              py              ={"_bytes": "aGk"}
+              qtproxy-async   ={}
+    xfail     {tstr:any}/method_arg,method_return/test_fullapi_rust
+              case=adversarial/{tstr:any}/_bytes-key
+              py              ={"_bytes": "aGk"}
+              qtproxy-async   ={}
+
+  CONSUMER DELTA py-vs-qtproxy-sync (2):
+    xfail     {tstr:any}/method_arg,method_return/test_fullapi_cpp
+              case=adversarial/{tstr:any}/_bytes-key
+              py              ={"_bytes": "aGk"}
+              qtproxy-sync    ={}
+    xfail     {tstr:any}/method_arg,method_return/test_fullapi_rust
+              case=adversarial/{tstr:any}/_bytes-key
+              py              ={"_bytes": "aGk"}
+              qtproxy-sync    ={}
+
+  all cells pass (or are registered xfail/skip)
