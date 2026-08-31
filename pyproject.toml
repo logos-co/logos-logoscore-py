@@ -33,6 +33,10 @@ Issues = "https://github.com/logos-co/logos-logoscore-py/issues"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 
+[project.scripts]
+logoscore-cli = "logoscore.cli:main"
+logoscore-mcp = "logoscore.mcp:main"
+
 [tool.hatch.build.targets.wheel]
 # Two clients, one distribution. `logoscore` drives the `logoscore` binary,
 # `logosctl` drives `logosctl`; they share nothing but this wheel. Both ship
