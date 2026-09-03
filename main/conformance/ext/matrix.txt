@@ -1,11 +1,9 @@
 
 LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
   45 cases x 2 providers x 3 consumers
-  differential-consumer-declared 2
-  differential-consumer-pass   264
+  differential-consumer-pass   266
   differential-consumer-xfail  4
-  differential-provider-declared 1
-  differential-provider-pass   127
+  differential-provider-pass   128
   differential-provider-xfail  1
   pass                         267
   xfail                        3
@@ -39,7 +37,7 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
     provider  test_fullapi_ext_rust vs test_fullapi_ext_cpp
       on extqtproxy-async  43 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
       on extqtproxy-sync   43 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on py                41 agree   2 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
+      on py                42 agree   1 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
     consumer
       extqtproxy-async vs extqtproxy-sync
       extqtproxy-async vs py
@@ -82,7 +80,7 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
           the table for py, and is registered here for the surfaces that structurally cannot
           see it.
 
-  CONSUMER DELTA py-vs-extqtproxy-async (3):
+  CONSUMER DELTA py-vs-extqtproxy-async (2):
     xfail     [[int]]/method_arg/test_fullapi_ext_rust
               case=[[int]]/out-of-signed-range
               py              =[[18446744073709551615]]
@@ -91,12 +89,8 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
               case=[bstr]/lenient-plain-string
               py              =["hi"]
               extqtproxy-async=[{"_bytes": "aGk"}]
-    declared  Blob/method_arg/test_fullapi_ext_rust
-              case=failure/A/module-not-loaded
-              py              ={"__error__": "RPC_FAILED"}
-              extqtproxy-async={"__error__": "object_unavailable"}
 
-  CONSUMER DELTA py-vs-extqtproxy-sync (3):
+  CONSUMER DELTA py-vs-extqtproxy-sync (2):
     xfail     [[int]]/method_arg/test_fullapi_ext_rust
               case=[[int]]/out-of-signed-range
               py              =[[18446744073709551615]]
@@ -105,9 +99,5 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
               case=[bstr]/lenient-plain-string
               py              =["hi"]
               extqtproxy-sync =[{"_bytes": "aGk"}]
-    declared  Blob/method_arg/test_fullapi_ext_rust
-              case=failure/A/module-not-loaded
-              py              ={"__error__": "RPC_FAILED"}
-              extqtproxy-sync ={"__error__": "object_unavailable"}
 
   all cells pass (or are registered xfail/skip)
