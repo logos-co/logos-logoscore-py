@@ -10,3 +10,7 @@ result
 result-*
 .direnv/
 .envrc
+
+# Doc-test output: generated artifacts are disposable, but keep the rendered .md
+doctests/outputs/*
+!doctests/outputs/*.md
