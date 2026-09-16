@@ -21,6 +21,7 @@ Kept because it explains why several green cases exist at all: they are the regr
 | M4 | logos-protocol — logos::isPendingCallSentinel, replacing a bare contains() at all four detection sites | a user map that merely CARRIED the sentinel key was taken for a deferred call. |
 | pre-99-null-is-not-an-error | logos-logoscore-py relocking logos-logoscore-cli onto master (0f0be25), which carries ed19258 (#99) and b3f1a403 (#101). | Classes A, C and D were one indistinguishable METHOD_FAILED because CoreServiceImpl::callModuleMethod took the invokeRemoteMethod overload with no CallError* and decided the verdict by testing ret.is_null() on the RESULT. |
 | B-arity-overflow | logos-plugin-qt#29 (f668ef2), carried by logos-module-builder 6044ffc. The provider half was logos-cpp-sdk#150 and logos-rust-sdk#50; this is the consumer half. | An EXTRA argument was dropped and the call succeeded. The last six cells were failure/B/arity/too-many-zero-parameter on `doVoid`, where the provider refused correctly and the Qt host glue discarded the refusal. |
+| B-arity-overflow-lidl-builtin | logos-plugin-qt#42 (e46678a), carried by logos-module-builder#252 (8007924). The generated C++ and Rust dispatches already refused the call; the glue answered first. | lidl("junk") answered null with status ok. The Qt host glue answers the lidl() built-in before the module's dispatch runs, and its own argument check returned an empty QVariant. |
 
 ### Not measurable by this matrix
 

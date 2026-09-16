@@ -1,11 +1,11 @@
 
 LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
-  45 cases x 2 providers x 3 consumers
-  differential-consumer-pass   266
+  46 cases x 2 providers x 3 consumers
+  differential-consumer-pass   272
   differential-consumer-xfail  4
-  differential-provider-pass   128
+  differential-provider-pass   131
   differential-provider-xfail  1
-  pass                         267
+  pass                         273
   xfail                        3
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
@@ -17,7 +17,7 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
   bool                 .    1ok      .      .
   bstr                 .      .      .    3ok
   result               .    1ok      .      .
-  tstr                 .    3ok      .    2ok
+  tstr                 .    4ok      .    2ok
   uint                 .      .      .    2ok
   {tstr:Blob}        1ok    1ok      .      .
   {tstr:[bstr]}      1ok    1ok      .      .
@@ -35,9 +35,9 @@ LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
 
   DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
     provider  test_fullapi_ext_rust vs test_fullapi_ext_cpp
-      on extqtproxy-async  43 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on extqtproxy-sync   43 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
-      on py                42 agree   1 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
+      on extqtproxy-async  44 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
+      on extqtproxy-sync   44 agree   0 differ   +2 declared, not compared  (1 no longer diverging; 1 by identity)
+      on py                43 agree   1 differ   +2 declared, not compared  (1 by behaviour; 1 by identity)
     consumer
       extqtproxy-async vs extqtproxy-sync
       extqtproxy-async vs py

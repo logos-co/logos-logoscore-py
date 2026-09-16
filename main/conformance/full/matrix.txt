@@ -1,10 +1,10 @@
 
 LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
-  96 cases x 2 providers x 3 consumers
-  differential-consumer-pass   572
+  97 cases x 2 providers x 3 consumers
+  differential-consumer-pass   578
   differential-consumer-xfail  4
-  differential-provider-pass   282
-  pass                         566
+  differential-provider-pass   285
+  pass                         572
   xfail                        10
 
   TYPE x POSITION   — does a value of this type, in this position, survive?
@@ -15,7 +15,7 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
   float64         2ok    2ok    1ok      .      .      .      .      .      .      .
   int            11ok    6ok    3ok      .    2ok      .      .    1ok      .      .
   result            .    2ok      .      .      .      .      .      .      .      .
-  tstr            3ok    7ok    1ok      .      .    2ok      .      .    1ok      .
+  tstr            3ok    8ok    1ok      .      .    2ok      .      .    1ok      .
   uint            6ok    5ok    2ok      .      .      .      .      .      .      .
   void              .    2ok      .      .      .      .      .      .      .      .
   {tstr:any}   4ok+1K 3ok+1K    1ok      .      .      .      .      .      .      .
@@ -32,9 +32,9 @@ LIDL conformance matrix — consumers: py, qtproxy-sync, qtproxy-async
 
   DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
     provider  test_fullapi_cpp vs test_fullapi_rust
-      on py                94 agree   0 differ   +2 declared, not compared  (2 by identity)
-      on qtproxy-async     94 agree   0 differ   +2 declared, not compared  (2 by identity)
-      on qtproxy-sync      94 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on py                95 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-async     95 agree   0 differ   +2 declared, not compared  (2 by identity)
+      on qtproxy-sync      95 agree   0 differ   +2 declared, not compared  (2 by identity)
     consumer
       py vs qtproxy-async
       py vs qtproxy-sync
