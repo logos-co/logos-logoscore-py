@@ -75,10 +75,12 @@ two distinct consumer surfaces running two distinct bodies of generated code.
 Every method cell replays through both. Events do not have the axis: a
 subscription is a callback either way.
 
-Transport is likewise fixed: the daemon is constructed with no `transports=`, so
-every cell here is measured over LocalSocket/QtRO. The plain (tcp/tcp_ssl) wire
-has its own uint64 defect that this matrix therefore cannot reach — see
-known.json.
+The Python client-to-daemon transport is fixed: the daemon is constructed with
+no `transports=`, so that outer hop uses its local endpoint. Module-process
+transport is selected by each module's metadata. The standard conformance check
+uses the default QRO builds; the four `conformance-transport-*` checks pair QRO
+and `qt_remote_plain` builds of the providers and LP proxy independently. This
+driver needs no transport switch because it receives the selected install trees.
 
 THE FAILURE CLASSES. Alongside "did this value survive" the table asks a second
 question — can a caller tell "the provider answered, and the answer is nothing"
