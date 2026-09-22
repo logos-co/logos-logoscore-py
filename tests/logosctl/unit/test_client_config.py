@@ -763,7 +763,42 @@ def _seed_session(
 def _started_daemon(tmp_path: Path, **kwargs: Any) -> LogosctlDaemon:
     daemon = LogosctlDaemon("/abs/mods", config_dir=tmp_path, **kwargs)
     daemon._process = object()  # bypass the "daemon not running" guard
+    if any(p in ("tcp", "tcp_ssl") for p in daemon.transports):
+        daemon._network_token = "network-t"
     return daemon
+
+
+def test_network_ready_uses_issued_token_then_revokes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001), token="boot")
+    daemon = LogosctlDaemon("/abs/mods", config_dir=tmp_path, transports=["tcp"])
+    daemon._process = _FakeDaemonProcess()
+    events: list[tuple[str, Any]] = []
+
+    def issue(name, **kwargs):
+        events.append(("issue", name))
+        assert kwargs["config_dir"] == tmp_path
+        return {"token": "network"}
+
+    monkeypatch.setattr("logosctl.daemon.issue_token", issue)
+    monkeypatch.setattr(
+        "logosctl.daemon._proc.run_json",
+        lambda binary, args, **kwargs: events.append(
+            ("status", kwargs["token"])),
+    )
+    monkeypatch.setattr(
+        "logosctl.daemon.revoke_token",
+        lambda name, **kwargs: events.append(("revoke", name)),
+    )
+
+    daemon._wait_for_ready()
+    assert events[0][0] == "issue"
+    assert events[1] == ("status", "network")
+    assert daemon._read_token() == "network"
+    daemon._process = None
+    daemon.stop()
+    assert events[2] == ("revoke", events[0][1])
 
 
 def test_daemon_client_carries_only_config_dir_and_token(
@@ -775,7 +810,7 @@ def test_daemon_client_carries_only_config_dir_and_token(
 
     env = rec.calls[0]["env"]
     assert env["LOGOSCTL_CONFIG_DIR"] == str(tmp_path)
-    assert env["LOGOSCTL_TOKEN"] == "t"
+    assert env["LOGOSCTL_TOKEN"] == "network-t"
     assert {k for k, v in env.items() if os.environ.get(k) != v} == {
         "LOGOSCTL_CONFIG_DIR", "LOGOSCTL_TOKEN"}
 
@@ -922,6 +957,7 @@ def test_remote_client_writes_its_own_session(
 
     daemon = LogosctlDaemon("/abs/mods", config_dir=session, transports=["tcp"])
     daemon._process = object()
+    daemon._network_token = "network-raw"
     client = daemon.remote_client(elsewhere)
     client.status()
 
@@ -929,18 +965,18 @@ def test_remote_client_writes_its_own_session(
     assert cfg["daemon"]["core_service"]["port"] == 6000
     assert cfg["daemon"]["capability_module"]["port"] == 6001
     assert cfg["instance_id"] == "iid"
-    # The daemon's boot token, copied in — the documented provisioning move.
+    # A separately issued network token is copied; the boot token is local-only.
     assert json.loads(
-        (elsewhere / "client" / "auto.json").read_text()) == {"token": "raw"}
+        (elsewhere / "client" / "auto.json").read_text()) == {"token": "network-raw"}
     assert rec.calls[0]["env"]["LOGOSCTL_CONFIG_DIR"] == str(elsewhere)
     # And the daemon's own session is untouched.
     assert not (session / "client" / "config.yaml").exists()
 
 
 def test_remote_client_without_a_token_fails_loudly(tmp_path: Path):
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
+    _seed_session(tmp_path, _resolved_modules("local", 0, 0))
     (tmp_path / "client" / "auto.json").unlink()
-    daemon = _started_daemon(tmp_path, transports=["tcp"])
+    daemon = _started_daemon(tmp_path, transports=["local"])
     with pytest.raises(LogosctlError, match="auto.json"):
         daemon.remote_client()
 
@@ -1046,7 +1082,7 @@ def test_docker_client_endpoints_raise_before_start(tmp_path: Path):
         daemon._client_endpoints("localhost", "json", None)
 
 
-def test_docker_build_host_client_config_raises_when_token_missing(
+def test_docker_build_host_client_config_raises_when_token_issue_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     mods = tmp_path / "mods"
@@ -1057,14 +1093,47 @@ def test_docker_build_host_client_config_raises_when_token_missing(
         daemon._container_id = "fake"
         daemon._host_port = 7000
         daemon._host_cap_port = 7001
-        # Token never readable → fail fast instead of writing a config that
-        # references a missing auto.json.
-        monkeypatch.setattr(daemon, "read_container_file", lambda _p: None)
-        with pytest.raises(LogosctlError):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
+                            subprocess.CompletedProcess(cmd, 1, "", "issue failed"))
+        with pytest.raises(LogosctlError, match="could not issue docker network token"):
             daemon._build_host_client_config()
     finally:
         daemon._container_id = None
         # _host_client_dir is a real tmpdir; clean it up.
+        shutil.rmtree(daemon._host_client_dir, ignore_errors=True)
+        shutil.rmtree(daemon._config_dir, ignore_errors=True)
+        shutil.rmtree(daemon._persistence_dir, ignore_errors=True)
+
+
+def test_docker_issues_network_token_and_revokes_on_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    daemon = LogosctlDockerDaemon(image="img", modules_dir=mods)
+    daemon._container_id = "fake"
+    daemon._host_port = 7000
+    daemon._host_cap_port = 7001
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        output = json.dumps({"token": "network"}) if "issue" in cmd else "{}"
+        return subprocess.CompletedProcess(cmd, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    try:
+        daemon._build_host_client_config()
+        assert json.loads((daemon._host_client_dir / "client" / "auto.json").read_text()) == {
+            "token": "network"}
+        assert calls[0][:5] == ["docker", "exec", "fake", "/proc/1/exe",
+                                "--config-dir"]
+        assert calls[0][7:10] == ["token", "issue", "--name"]
+        issued_name = calls[0][-1]
+        daemon.stop()
+        assert any(c[-2:] == ["revoke", issued_name] for c in calls)
+    finally:
+        daemon._container_id = None
         shutil.rmtree(daemon._host_client_dir, ignore_errors=True)
         shutil.rmtree(daemon._config_dir, ignore_errors=True)
         shutil.rmtree(daemon._persistence_dir, ignore_errors=True)

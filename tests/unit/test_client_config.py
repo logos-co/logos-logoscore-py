@@ -558,7 +558,7 @@ def test_client_endpoints_raises_before_start(tmp_path: Path):
         d._client_endpoints("localhost", "json", None)
 
 
-def test_build_host_client_config_raises_when_token_missing(
+def test_build_host_client_config_raises_when_token_issue_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     from logoscore import LogoscoreDockerDaemon, LogoscoreError
@@ -570,14 +570,49 @@ def test_build_host_client_config_raises_when_token_missing(
         d._container_id = "fake"
         d._host_port = 7000
         d._host_cap_port = 7001
-        # Token never readable → fail fast instead of writing a config that
-        # references a missing auto.json.
-        monkeypatch.setattr(d, "read_container_file", lambda _p: None)
-        with pytest.raises(LogoscoreError):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
+                            subprocess.CompletedProcess(cmd, 1, "", "issue failed"))
+        with pytest.raises(LogoscoreError, match="could not issue docker network token"):
             d._build_host_client_config()
     finally:
         d._container_id = None
         # _host_client_dir is a real tmpdir; clean it up.
+        shutil.rmtree(d._host_client_dir, ignore_errors=True)
+        shutil.rmtree(d._config_dir, ignore_errors=True)
+        shutil.rmtree(d._persistence_dir, ignore_errors=True)
+
+
+def test_docker_issues_network_token_and_revokes_on_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from logoscore import LogoscoreDockerDaemon
+
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
+    d._container_id = "fake"
+    d._host_port = 7000
+    d._host_cap_port = 7001
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        output = json.dumps({"token": "network"}) if "issue-token" in cmd else "{}"
+        return subprocess.CompletedProcess(cmd, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    try:
+        d._build_host_client_config()
+        assert json.loads((d._host_client_dir / "client" / "auto.json").read_text()) == {
+            "token": "network"}
+        assert calls[0][:5] == ["docker", "exec", "fake", "/proc/1/exe",
+                                "--config-dir"]
+        assert "issue-token" in calls[0]
+        issued_name = calls[0][calls[0].index("--name") + 1]
+        d.stop()
+        assert any("revoke-token" in c and issued_name in c for c in calls)
+    finally:
+        d._container_id = None
         shutil.rmtree(d._host_client_dir, ignore_errors=True)
         shutil.rmtree(d._config_dir, ignore_errors=True)
         shutil.rmtree(d._persistence_dir, ignore_errors=True)
