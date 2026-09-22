@@ -267,10 +267,8 @@ class LogosctlClient:
         would silently replace a spec written into its dir.
 
         `token` is the raw token string the daemon issued for this client
-        (see `issue_token`). Prefer a named token over a copy of the
-        daemon's `client/auto.json` for tcp/tcp_ssl: auto.json is issued
-        local-only, and the fact that it currently authenticates over the
-        network is a runtime quirk, not a promise. When `config_dir` is
+        (see `issue_token`). TCP and TLS clients need a named token: the
+        daemon's `client/auto.json` boot token is local-only. When `config_dir` is
         None a private temp dir is created and removed when the returned
         client is garbage collected; pass a `config_dir` to keep the
         config around (it is never deleted).

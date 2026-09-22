@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,7 @@ from typing import Any, IO
 from . import _proc
 from .client import DaemonEndpoint, LogosctlClient
 from .errors import LogosctlError
+from .tokens import issue_token, revoke_token
 
 
 # ── YAML emitting ────────────────────────────────────────────────────────
@@ -305,6 +307,8 @@ class LogosctlDaemon:
         self._process: subprocess.Popen[str] | None = None
         self._stdout_file: IO[str] | None = None
         self._stderr_file: IO[str] | None = None
+        self._network_token: str | None = None
+        self._network_token_name: str | None = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -414,6 +418,7 @@ class LogosctlDaemon:
                     _proc.run_json(
                         self.binary, ["daemon", "stop"],
                         config_dir=self._config_dir,
+                        token=self._read_token(),
                         # Same env the daemon got: a caller who pinned
                         # TMPDIR (to keep the local socket path under
                         # sockaddr_un's 104-byte cap) has to reach the
@@ -441,6 +446,15 @@ class LogosctlDaemon:
                 f.close()
         self._stdout_file = None
         self._stderr_file = None
+
+        if self._network_token_name is not None:
+            try:
+                revoke_token(self._network_token_name, binary=self.binary,
+                             config_dir=self._config_dir)
+            except Exception:
+                pass
+            self._network_token_name = None
+            self._network_token = None
 
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
@@ -480,6 +494,8 @@ class LogosctlDaemon:
             self._write_own_client_config(
                 transport=transport, host=tcp_host, codec=codec,
                 verify_peer=False if no_verify_peer else None)
+        if (transport or self._network_transport()) in ("tcp", "tcp_ssl"):
+            self._ensure_network_token()
         return LogosctlClient(
             binary=self.binary,
             config_dir=self._config_dir,
@@ -523,13 +539,11 @@ class LogosctlDaemon:
         endpoints = self._endpoints_from_state(
             state, transport=transport, host=host,
             codec=codec, verify_peer=verify_peer)
-        # The daemon's own boot token. It is issued local-only, yet the
-        # runtime accepts it over tcp/tcp_ssl (the raw value is registered
-        # with the in-process TokenManager, ahead of the store validator
-        # that would reject it) — which is what makes "copy auto.json" the
-        # documented provisioning move. A client that would rather not
-        # rest on that quirk should issue a named token instead (see
-        # `tokens.issue_token`, without `local_only`).
+        # The boot token is local-only. A network client needs a separately
+        # issued credential, including when the caller explicitly overrides
+        # the wrapper's default transport here.
+        if any(e.transport in ("tcp", "tcp_ssl") for e in endpoints.values()):
+            self._ensure_network_token()
         token = self._read_token()
         if token is None:
             raise LogosctlError(
@@ -739,8 +753,10 @@ class LogosctlDaemon:
             )
 
     def _read_token(self) -> str | None:
-        # Tokens live in <configDir>/client/auto.json (the daemon-emitted
-        # local-client raw token). The hashed-at-rest token list is in
+        if self._network_token is not None:
+            return self._network_token
+        # Local tokens live in <configDir>/client/auto.json. Network calls use
+        # the wrapper's issued credential above. The hashed-at-rest list is in
         # <configDir>/daemon/tokens.json — that file is what the daemon
         # validates against, but the raw token we use for client RPC comes
         # from client/auto.json.
@@ -751,6 +767,15 @@ class LogosctlDaemon:
             return json.loads(path.read_text()).get("token")
         except (json.JSONDecodeError, OSError):
             return None
+
+    def _ensure_network_token(self) -> None:
+        if self._network_token is not None:
+            return
+        name = "ctl-py-" + secrets.token_hex(8)
+        issued = issue_token(name, binary=self.binary,
+                             config_dir=self._config_dir)
+        self._network_token_name = name
+        self._network_token = issued["token"]
 
     def _read_state(self) -> dict:
         try:
@@ -824,6 +849,7 @@ class LogosctlDaemon:
         # is wrong. We patch in the actual resolved per-module
         # endpoints before the next phase tries to call `status`.
         if self._network_transport() is not None:
+            self._ensure_network_token()
             self._write_own_client_config()
 
         # Phase 2: verify we can talk to it via `status`.
