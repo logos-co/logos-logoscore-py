@@ -75468,11 +75468,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1790103098,
-        "narHash": "sha256-h+Xhqq9pyGZBFtLQ/auloihryMgTRaqHw5oj+xHoj44=",
+        "lastModified": 1790104448,
+        "narHash": "sha256-COYv7syuB7kDZxB7x850P4KjLLC2mThFLxC8tm+KJZA=",
         "owner": "logos-co",
         "repo": "logos-logoscore-cli",
-        "rev": "1f0533d2ef81f544d11d82bbcd74fd9a73dc91ea",
+        "rev": "028497d415e3f5b8c656b5666f5279ad3f387828",
         "type": "github"
       },
       "original": {

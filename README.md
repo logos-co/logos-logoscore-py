@@ -256,10 +256,11 @@ with LogoscoreDaemon(
                                  # daemon wrote into client/config.json
 ```
 
-`daemon.client()` needs no transport args: on startup the daemon writes a
-`client/config.json` with the actual per-module endpoints (`core_service`
-and `capability_module` each on their own bound port), and the client
-dials from that. TLS (`tcp_ssl`) additionally accepts `ssl_cert` /
+`daemon.client()` needs no transport args: the wrapper records the daemon's
+resolved per-module endpoints in `client/config.json` and issues a revocable
+network token, leaving the daemon's boot token local-only. `core_service`
+and `capability_module` each use their own bound port. TLS (`tcp_ssl`)
+additionally accepts `ssl_cert` /
 `ssl_key` / `ssl_ca`.
 
 `client(transport=, tcp_host=, codec=, no_verify_peer=)` accepts uniform

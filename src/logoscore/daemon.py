@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,7 @@ from typing import IO
 from . import _proc
 from .client import DaemonEndpoint, LogoscoreClient
 from .errors import LogoscoreError
+from .tokens import issue_token, revoke_token
 
 
 class LogoscoreDaemon:
@@ -122,6 +124,8 @@ class LogoscoreDaemon:
         self._process: subprocess.Popen[str] | None = None
         self._stdout_file: IO[str] | None = None
         self._stderr_file: IO[str] | None = None
+        self._network_token: str | None = None
+        self._network_token_name: str | None = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -239,6 +243,7 @@ class LogoscoreDaemon:
                     _proc.run_json(
                         self.binary, ["stop"],
                         config_dir=self._config_dir,
+                        token=self._read_token(),
                         timeout=timeout,
                     )
                 except Exception:
@@ -261,6 +266,15 @@ class LogoscoreDaemon:
                 f.close()
         self._stdout_file = None
         self._stderr_file = None
+
+        if self._network_token_name is not None:
+            try:
+                revoke_token(self._network_token_name, binary=self.binary,
+                             config_dir=self._config_dir)
+            except Exception:
+                pass
+            self._network_token_name = None
+            self._network_token = None
 
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
@@ -330,11 +344,10 @@ class LogoscoreDaemon:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _read_token(self) -> str | None:
-        # Tokens live in <configDir>/client/auto.json (the
-        # daemon-emitted local-client raw token). The hashed-at-rest
-        # token list is in <configDir>/daemon/tokens.json — that file
-        # is what the daemon validates against, but the raw token
-        # we use for client RPC comes from client/auto.json.
+        if self._network_token is not None:
+            return self._network_token
+        # The daemon-emitted credential is local-only. Network runs use the
+        # wrapper's separately issued token above; local runs read auto.json.
         path = self.client_token_file
         if not path.exists():
             return None
@@ -383,12 +396,19 @@ class LogoscoreDaemon:
                     + "\n".join(err_tail))
             raise LogoscoreError("\n".join(sections))
 
-        # Phase 1.5: rewrite client/config.json from state.json. The
-        # daemon's auto-emitted config always advertises LocalSocket
-        # for the same-host client; for `tcp` / `tcp_ssl` runs the
-        # daemon binds different transports and the LocalSocket entry
-        # is wrong. We patch in the actual resolved per-module
-        # endpoints before the next phase tries to call `status`.
+        # Phase 1.5: issue a network credential and rewrite client/config.json
+        # from state.json. The daemon's auto-emitted config advertises the
+        # local endpoint; network runs need their resolved per-module ports
+        # before the next phase calls `status`.
+        if any(p in ("tcp", "tcp_ssl") for p in self.transports):
+            # The daemon's boot token is local-only. Give this wrapper its own
+            # revocable network credential before switching the client dial
+            # spec to the network listener.
+            name = "py-" + secrets.token_hex(8)
+            issued = issue_token(name, binary=self.binary,
+                                 config_dir=self._config_dir)
+            self._network_token_name = name
+            self._network_token = issued["token"]
         self._rewrite_client_config_from_state()
 
         # Phase 2: verify we can talk to it via `status`.

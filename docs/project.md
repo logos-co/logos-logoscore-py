@@ -258,11 +258,12 @@ LogoscoreDaemon(
   emitting one `--module-transport NAME=PROTOCOL[,k=v…]` per (protocol, well-known
   module) pair. Each well-known module rides its **own** port (`tcp_port`/`tcp_ssl_port`
   for `core_service`, `tcp_cap_port`/`tcp_ssl_cap_port` for `capability_module`) because
-  two `QTcpServer`s can't share an address:port. Waits for `daemon/state.json`, rewrites
-  `client/config.json` from the resolved transports (for `tcp`/`tcp_ssl`), then verifies
-  with `status`.
+  two listeners can't share an address:port. Waits for `daemon/state.json`, issues
+  a revocable network token for `tcp`/`tcp_ssl`, rewrites `client/config.json`
+  from the resolved transports, then verifies with `status`.
 - **Shutdown** (`stop(timeout=10.0)` / `__exit__`): runs `logoscore stop`, then escalates
-  `terminate()` → `kill()`, and removes the temp config dir it created. Safe to call
+  `terminate()` → `kill()`, revokes its network token, and removes the temp
+  config dir it created. Safe to call
   repeatedly.
 - **Properties**: `config_dir`, `state_file` (`<config_dir>/daemon/state.json`),
   `connection_file` (backward-compat alias for `state_file`), `client_token_file`
