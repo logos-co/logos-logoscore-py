@@ -8,9 +8,16 @@
     # and the explicit transport variants exported by logos-test-modules.
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/codex/qt-free-logoscore";
     logos-test-modules.url = "github:logos-co/logos-test-modules/codex/qt-remote-plain-matrix";
+    # logos-test-modules at its last commit before the qt_remote_plain chain,
+    # built from its own lock: unchanged binaries (protocol 0.9) for the
+    # transport matrix to pair with the new runtime. No follows, on purpose:
+    # following would rebuild them against this flake's protocol.
+    logos-test-modules-release.url =
+      "github:logos-co/logos-test-modules/23870fcb085c93c7b8e6ea71d37d2fe1aa03e200";
   };
 
-  outputs = { self, nixpkgs, logos-logoscore-cli, logos-test-modules, ... }:
+  outputs = { self, nixpkgs, logos-logoscore-cli, logos-test-modules,
+              logos-test-modules-release, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -250,6 +257,15 @@
           transportProxyPlain =
             logos-test-modules.modules.${system}.test_fullapi_proxy_qt_remote_plain.install;
 
+          # The released modules, and the other consumers every coordinate runs:
+          # the Rust LP proxy and the generated Qt glue (qt_remote only), so a
+          # typed Qt consumer meets a plain provider in some coordinate.
+          releasedCpp = logos-test-modules-release.modules.${system}.test_fullapi_cpp.install;
+          releasedRust = logos-test-modules-release.modules.${system}.test_fullapi_rust.install;
+          releasedProxy = logos-test-modules-release.modules.${system}.test_fullapi_proxy.install;
+          testModulesProxyRustInstall =
+            logos-test-modules.modules.${system}.test_fullapi_proxy_rust.install;
+
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
           # plus openssl (needed by the `self_signed_cert` fixture
@@ -338,6 +354,9 @@
                 --cpp-modules ${cppInstall}/modules \
                 --rust-modules ${rustInstall}/modules \
                 --proxy-consumer lp-proxy=test_fullapi_proxy=${proxyInstall}/modules \
+                --proxy-consumer rust-proxy=test_fullapi_proxy_rust=${testModulesProxyRustInstall}/modules \
+                --proxy-consumer qtproxy-sync=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=sync \
+                --proxy-consumer qtproxy-async=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=async \
                 --jsonl $out/matrix.jsonl \
                 --report $out/matrix.html \
                 --no-color \
@@ -496,14 +515,48 @@
           conformance-transport-plain-plain = mkModuleTransportMatrix
             "provider-plain-proxy-plain"
             transportCppPlain transportRustPlain transportProxyPlain;
+          # Unchanged released binaries against the new runtime, both ways.
+          conformance-transport-released-plain = mkModuleTransportMatrix
+            "provider-released-proxy-plain"
+            releasedCpp releasedRust transportProxyPlain;
+          conformance-transport-plain-released = mkModuleTransportMatrix
+            "provider-plain-proxy-released"
+            transportCppPlain transportRustPlain releasedProxy;
+
+          # The released coordinates are only worth their name if nothing
+          # rebuilt those modules against this flake's protocol.
+          released-modules-unchanged = pkgs.runCommand "logoscore-py-released-modules-unchanged" {
+            nativeBuildInputs = [ pkgs.jq ];
+          } ''
+            current=$(${logoscoreBin}/bin/logos_host --inspect \
+              "$(find -L ${transportCppQro}/modules -name '*_plugin.so' -o -name '*_plugin.dylib' | head -1)" \
+              | jq -r .logos_protocol_version)
+            case "$current" in ""|null) echo "no protocol stamp on the current build" >&2; exit 1 ;; esac
+            released=""
+            for install in ${releasedCpp} ${releasedRust} ${releasedProxy}; do
+              plugin=$(find -L "$install/modules" -name '*_plugin.so' -o -name '*_plugin.dylib' | head -1)
+              stamp=$(${logoscoreBin}/bin/logos_host --inspect "$plugin" | jq -r .logos_protocol_version)
+              echo "$plugin: $stamp (current $current)"
+              if [ -z "$stamp" ] || [ "$stamp" = null ] || [ "$stamp" = "$current" ] \
+                 || { [ -n "$released" ] && [ "$stamp" != "$released" ]; }; then
+                echo "not the released build: $plugin" >&2; exit 1
+              fi
+              released=$stamp
+            done
+            echo "$released" > $out
+          '';
 
           conformance-transport-matrix =
             pkgs.runCommand "logoscore-py-module-transport-matrix" {} ''
-              mkdir -p $out/qro-qro $out/qro-plain $out/plain-qro $out/plain-plain
+              mkdir -p $out/qro-qro $out/qro-plain $out/plain-qro $out/plain-plain \
+                       $out/released-plain $out/plain-released
               cp -r ${conformance-transport-qro-qro}/. $out/qro-qro/
               cp -r ${conformance-transport-qro-plain}/. $out/qro-plain/
               cp -r ${conformance-transport-plain-qro}/. $out/plain-qro/
               cp -r ${conformance-transport-plain-plain}/. $out/plain-plain/
+              cp -r ${conformance-transport-released-plain}/. $out/released-plain/
+              cp -r ${conformance-transport-plain-released}/. $out/plain-released/
+              echo ${released-modules-unchanged} > $out/released-modules-unchanged
             '';
 
           # ── the merged report ───────────────────────────────────────────
