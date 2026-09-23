@@ -343,6 +343,9 @@ class LogosctlDockerDaemon:
         # client-side flags or env vars, so the file is the only place
         # either of them can land.
         verify_peer: bool = False,
+        # Lifetime of the named token issued for tcp/tls clients. stop()
+        # revokes it; the expiry bounds one a killed process leaves behind.
+        network_token_ttl: str = "24h",
         container_name: str | None = None,
         # Name of an EXISTING docker network to attach the container to.
         # Caller-managed: the daemon never creates or removes networks.
@@ -401,6 +404,7 @@ class LogosctlDockerDaemon:
         self.ssl_key = Path(ssl_key) if ssl_key else None
         self.ssl_ca = Path(ssl_ca) if ssl_ca else None
         self.verify_peer = verify_peer
+        self.network_token_ttl = network_token_ttl
         self.startup_timeout = startup_timeout
         # Additional dirs *inside the container* to scan for modules, on
         # top of the image's own bundled modules and `/user-modules`
@@ -918,7 +922,8 @@ class LogosctlDockerDaemon:
         result = subprocess.run(
             ["docker", "exec", self._container_id, "/proc/1/exe",
              "--config-dir", CONTAINER_CONFIG_DIR, "--json",
-             "token", "issue", "--name", name],
+             "token", "issue", "--name", name,
+             "--expires", self.network_token_ttl],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
