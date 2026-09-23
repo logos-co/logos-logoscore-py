@@ -779,6 +779,8 @@ def test_network_ready_uses_issued_token_then_revokes_it(
     def issue(name, **kwargs):
         events.append(("issue", name))
         assert kwargs["config_dir"] == tmp_path
+        # Revoked by stop(); the expiry bounds one a killed wrapper leaves.
+        assert kwargs.get("expires") == "24h"
         return {"token": "network"}
 
     monkeypatch.setattr("logosctl.daemon.issue_token", issue)
@@ -1129,7 +1131,9 @@ def test_docker_issues_network_token_and_revokes_on_stop(
         assert calls[0][:5] == ["docker", "exec", "fake", "/proc/1/exe",
                                 "--config-dir"]
         assert calls[0][7:10] == ["token", "issue", "--name"]
-        issued_name = calls[0][-1]
+        issued_name = calls[0][10]
+        # Revoked by stop(); the expiry bounds one a killed wrapper leaves.
+        assert calls[0][-2:] == ["--expires", "24h"]
         daemon.stop()
         assert any(c[-2:] == ["revoke", issued_name] for c in calls)
     finally:

@@ -268,6 +268,9 @@ class LogosctlDaemon:
         # the `LOGOSCORE_CLIENT_*` env family is gone, so the on-disk
         # value is the only thing the CLI reads (see `client()`).
         verify_peer: bool = False,
+        # Lifetime of the named token issued for tcp/tls clients. stop()
+        # revokes it; the expiry bounds one a killed process leaves behind.
+        network_token_ttl: str = "24h",
     ) -> None:
         if isinstance(modules_dir, (str, Path)):
             self.modules_dirs: list[Path] = [Path(modules_dir)]
@@ -295,6 +298,7 @@ class LogosctlDaemon:
         self.ssl_key = Path(ssl_key) if ssl_key else None
         self.ssl_ca = Path(ssl_ca) if ssl_ca else None
         self.verify_peer = verify_peer
+        self.network_token_ttl = network_token_ttl
 
         if config_dir is None:
             self._config_dir = Path(tempfile.mkdtemp(prefix="logosctl-"))
@@ -773,7 +777,8 @@ class LogosctlDaemon:
             return
         name = "ctl-py-" + secrets.token_hex(8)
         issued = issue_token(name, binary=self.binary,
-                             config_dir=self._config_dir)
+                             config_dir=self._config_dir,
+                             expires=self.network_token_ttl)
         self._network_token_name = name
         self._network_token = issued["token"]
 
