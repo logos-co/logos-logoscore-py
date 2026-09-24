@@ -137,7 +137,7 @@ jobs:
           extra-nix-config: |
             experimental-features = nix-command flakes
 
-      - name: Run all four module transport pairings
+      - name: Run every module transport pairing
         run: nix build '.#checks.${{ matrix.system }}.conformance-transport-matrix' --print-build-logs --out-link result-transport
 
       - name: Collect pairing reports
