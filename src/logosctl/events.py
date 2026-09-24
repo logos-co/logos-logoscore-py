@@ -139,7 +139,11 @@ class Subscription:
                 # `watch` parks in QCoreApplication::exec() with no handler of
                 # its own (see watch_command.cpp), so SIGINT ends it via the
                 # default disposition. Fall back to SIGTERM / SIGKILL.
-                self._process.send_signal(signal.SIGINT)
+                try:
+                    self._process.send_signal(signal.SIGINT)
+                except ValueError:
+                    # Windows: Popen can send no SIGINT, so end it outright.
+                    self._process.terminate()
                 try:
                     self._process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
