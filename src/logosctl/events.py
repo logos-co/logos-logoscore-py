@@ -84,6 +84,7 @@ class Subscription:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             env=env,
             bufsize=1,  # line-buffered
             start_new_session=True,

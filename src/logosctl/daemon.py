@@ -584,8 +584,8 @@ class LogosctlDaemon:
         """Return (stdout, stderr) captured from the daemon so far."""
         out = (self._config_dir / "daemon.stdout.log")
         err = (self._config_dir / "daemon.stderr.log")
-        stdout = out.read_text() if out.exists() else ""
-        stderr = err.read_text() if err.exists() else ""
+        stdout = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
+        stderr = err.read_text(encoding="utf-8", errors="replace") if err.exists() else ""
         # Unlike logoscore, the daemon keeps its own log file too. With
         # `logging.console` on (the default) it and the pipes above carry
         # the same bytes; if a caller turned the console mirror off via
@@ -600,7 +600,7 @@ class LogosctlDaemon:
         boot's `daemon_<stamp>.log`). Empty when the daemon hasn't opened
         it yet or logging was disabled."""
         try:
-            return self.log_file.read_text()
+            return self.log_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ""
 
@@ -731,12 +731,12 @@ class LogosctlDaemon:
 
         source = self._config_dir / "daemon.yaml"
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(_yaml_document(doc))
+        source.write_text(_yaml_document(doc), encoding="utf-8")
 
         cmd = [self.binary, "--config-dir", str(self._config_dir),
                "daemon", "config", "set", str(source)]
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, capture_output=True, text=True, encoding="utf-8",
             env=self._child_env(), timeout=self.startup_timeout,
         )
         if proc.returncode != 0:
@@ -768,7 +768,7 @@ class LogosctlDaemon:
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text()).get("token")
+            return json.loads(path.read_text(encoding="utf-8")).get("token")
         except (json.JSONDecodeError, OSError):
             return None
 
@@ -784,7 +784,7 @@ class LogosctlDaemon:
 
     def _read_state(self) -> dict:
         try:
-            return json.loads(self.state_file.read_text())
+            return json.loads(self.state_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             raise LogosctlError(f"daemon state.json unreadable: {e}") from e
 

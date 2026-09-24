@@ -328,8 +328,8 @@ class LogoscoreDaemon:
         out = (self._config_dir / "daemon.stdout.log")
         err = (self._config_dir / "daemon.stderr.log")
         return (
-            out.read_text() if out.exists() else "",
-            err.read_text() if err.exists() else "",
+            out.read_text(encoding="utf-8", errors="replace") if out.exists() else "",
+            err.read_text(encoding="utf-8", errors="replace") if err.exists() else "",
         )
 
     # ── Context manager ─────────────────────────────────────────────────────
@@ -352,7 +352,7 @@ class LogoscoreDaemon:
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text()).get("token")
+            return json.loads(path.read_text(encoding="utf-8")).get("token")
         except (json.JSONDecodeError, OSError):
             return None
 
@@ -442,7 +442,7 @@ class LogoscoreDaemon:
         emitted that the high-level API doesn't model — e.g. a tcp_ssl `ca`."""
         cfg_path = self._config_dir / "client" / "config.json"
         try:
-            cfg = json.loads(cfg_path.read_text())
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return  # daemon's own config stands
         daemon_block = cfg.get("daemon")
@@ -466,7 +466,7 @@ class LogoscoreDaemon:
                 entry["codec"] = codec
             if no_verify_peer and entry.get("transport") == "tcp_ssl":
                 entry["verify_peer"] = False
-        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
+        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n", encoding="utf-8")
 
     def _rewrite_client_config_from_state(self) -> None:
         """For `tcp` / `tcp_ssl` runs, replace the daemon's auto-emitted
@@ -493,7 +493,7 @@ class LogoscoreDaemon:
             return
 
         try:
-            state = json.loads(self.state_file.read_text())
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             raise LogoscoreError(
                 f"daemon state.json unreadable: {e}"
