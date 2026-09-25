@@ -5,9 +5,11 @@
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
     # The module-transport matrix depends on the qt_remote_plain feature chain
-    # and the explicit transport variants exported by logos-test-modules.
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/codex/qt-free-logoscore";
-    logos-test-modules.url = "github:logos-co/logos-test-modules/codex/qt-remote-plain-matrix";
+    # and the explicit transport variants exported by logos-test-modules; its
+    # in-process coordinate on the runtime-control wave (logoscore-cli#145 and
+    # logos-test-modules' feat/inproc-coordinates).
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/core-service-in-liblogos";
+    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/inproc-coordinates";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries (protocol 0.9) for the
     # transport matrix to pair with the new runtime. No follows, on purpose:
@@ -349,7 +351,7 @@
           # adds the independently selected forwarding module, so each result
           # covers provider <-> logoscore and proxy <-> logoscore as well as the
           # proxy -> provider call.
-          mkModuleTransportMatrixWith = daemon: label: cppInstall: rustInstall: proxyInstall:
+          mkModuleTransportMatrixArgs = daemon: extraArgs: label: cppInstall: rustInstall: proxyInstall:
             pkgs.runCommand "logoscore-py-module-transport-${label}" {
               nativeBuildInputs = [ python daemon pkgs.openssl ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
@@ -375,11 +377,13 @@
                 --proxy-consumer rust-proxy=test_fullapi_proxy_rust=${testModulesProxyRustInstall}/modules \
                 --proxy-consumer qtproxy-sync=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=sync \
                 --proxy-consumer qtproxy-async=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=async \
+                ${extraArgs} \
                 --jsonl $out/matrix.jsonl \
                 --report $out/matrix.html \
                 --no-color \
                 2>&1 | tee $out/matrix.txt
             '';
+          mkModuleTransportMatrixWith = daemon: mkModuleTransportMatrixArgs daemon "";
           mkModuleTransportMatrix = mkModuleTransportMatrixWith logoscoreBin;
 
           # The ext table for a given pair of providers; its consumers are py
@@ -551,6 +555,17 @@
           conformance-transport-released-daemon = mkModuleTransportMatrixWith releasedLogoscore
             "daemon-released-provider-qro-proxy-qro"
             transportCppQro transportRustQro transportProxyQro;
+          # The plain C++ provider hosted in the daemon's own process: its
+          # directory counts as bundled and the runtime places modules in-process
+          # when their build allows it, which the run then checks it did.
+          conformance-transport-inproc = mkModuleTransportMatrixArgs logoscoreBin
+            (pkgs.lib.escapeShellArgs [
+              "--daemon-arg=--bundled-modules-dir" "--daemon-arg=${transportCppPlain}/modules"
+              "--daemon-arg=--placement" ''--daemon-arg={"default":"inproc"}''
+              "--expect-placement" "test_fullapi_cpp=inproc"
+            ])
+            "provider-inproc-proxy-plain"
+            transportCppPlain transportRustPlain transportProxyPlain;
           # The ext table with both providers over the plain transport.
           conformance-transport-ext-plain = mkExtMatrix "logoscore-py-module-transport-ext-plain"
             transportExtRustPlain transportExtCppPlain;
@@ -581,7 +596,8 @@
           conformance-transport-matrix =
             pkgs.runCommand "logoscore-py-module-transport-matrix" {} ''
               mkdir -p $out/qro-qro $out/qro-plain $out/plain-qro $out/plain-plain \
-                       $out/released-plain $out/plain-released $out/released-daemon $out/ext-plain
+                       $out/released-plain $out/plain-released $out/released-daemon $out/ext-plain \
+                       $out/inproc-plain
               cp -r ${conformance-transport-qro-qro}/. $out/qro-qro/
               cp -r ${conformance-transport-qro-plain}/. $out/qro-plain/
               cp -r ${conformance-transport-plain-qro}/. $out/plain-qro/
@@ -590,6 +606,7 @@
               cp -r ${conformance-transport-plain-released}/. $out/plain-released/
               cp -r ${conformance-transport-released-daemon}/. $out/released-daemon/
               cp -r ${conformance-transport-ext-plain}/. $out/ext-plain/
+              cp -r ${conformance-transport-inproc}/. $out/inproc-plain/
               echo ${released-modules-unchanged} > $out/released-modules-unchanged
             '';
 
