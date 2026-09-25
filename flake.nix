@@ -555,14 +555,16 @@
           conformance-transport-released-daemon = mkModuleTransportMatrixWith releasedLogoscore
             "daemon-released-provider-qro-proxy-qro"
             transportCppQro transportRustQro transportProxyQro;
-          # The plain C++ provider hosted in the daemon's own process: its
-          # directory counts as bundled and the runtime places modules in-process
+          # The plain providers hosted in the daemon's own process: their
+          # directories count as bundled and the runtime places modules in-process
           # when their build allows it, which the run then checks it did.
           conformance-transport-inproc = mkModuleTransportMatrixArgs logoscoreBin
             (pkgs.lib.escapeShellArgs [
               "--daemon-arg=--bundled-modules-dir" "--daemon-arg=${transportCppPlain}/modules"
+              "--daemon-arg=--bundled-modules-dir" "--daemon-arg=${transportRustPlain}/modules"
               "--daemon-arg=--placement" ''--daemon-arg={"default":"inproc"}''
               "--expect-placement" "test_fullapi_cpp=inproc"
+              "--expect-placement" "test_fullapi_rust=inproc"
             ])
             "provider-inproc-proxy-plain"
             transportCppPlain transportRustPlain transportProxyPlain;
