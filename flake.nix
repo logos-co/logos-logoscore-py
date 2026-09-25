@@ -115,7 +115,17 @@
           dockerBundle         = dockerBundle;
           dockerBundlePortable = dockerBundlePortable;
         }
-      );
+      ) // {
+        # What .github/workflows/windows.yml stages for the logosctl suite:
+        # logosctl.exe, and test_fullapi_cpp installed as a portable module.
+        x86_64-windows = {
+          ctl = logos-logoscore-cli.packages.x86_64-windows.ctl;
+          test-modules = (logos-test-modules.inputs.logos-module-builder.lib.mkLogosModule {
+            src = "${logos-test-modules}/test-fullapi-module-cpp";
+            configFile = "${logos-test-modules}/test-fullapi-module-cpp/metadata.json";
+          }).packages.x86_64-windows.install-portable;
+        };
+      };
 
       # ── Dev shell ─────────────────────────────────────────────────────────
       # `nix develop` drops you into a shell with python + pytest + logoscore
