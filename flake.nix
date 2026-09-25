@@ -8,8 +8,9 @@
     # and the explicit transport variants exported by logos-test-modules; its
     # in-process coordinate on the runtime-control wave (logoscore-cli#145 and
     # logos-test-modules' feat/inproc-coordinates), with legacy mode deleted on
-    # top (the feat/drop-legacy-mode branches).
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/drop-legacy-mode";
+    # top (the feat/drop-legacy-mode branches), and the daemon's runtime in a
+    # process of its own (logoscore-cli's feat/runtime-process).
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/runtime-process";
     logos-test-modules.url = "github:logos-co/logos-test-modules/feat/drop-legacy-mode";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries (protocol 0.9) for the
