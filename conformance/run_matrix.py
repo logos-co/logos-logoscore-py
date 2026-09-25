@@ -618,6 +618,18 @@ def matches(got: Result, want, raw: bool = False) -> bool:
     return same(got.value, materialize(want, raw))
 
 
+def check_placements(client, provider: str, placements: dict) -> None:
+    """A placement coordinate is only worth its name if the provider really runs
+    there: a module the runtime could not place falls back without failing."""
+    want = placements.get(provider)
+    if want is None:
+        return
+    got = client.module_info(provider).get("placement")
+    if got != want:
+        raise RuntimeError(f"{provider} runs {got!r}, not {want!r}")
+    print(f"placement: {provider} runs {got}")
+
+
 def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeout: float):
     from logoscore.errors import LogoscoreError, MethodError
 
@@ -777,6 +789,13 @@ def main() -> int:
                          "MODE (sync|async) selects the generated wrapper table. "
                          "PROBE is METHOD[:JSON_ARGS], the call whose mode is read "
                          "back (default echoInt:[1], which only full_api has).")
+    ap.add_argument("--daemon-arg", action="append", default=[], metavar="ARG",
+                    help="passed to logoscore as it starts (repeatable), e.g. "
+                         "--daemon-arg=--placement --daemon-arg='{\"default\":\"inproc\"}'")
+    ap.add_argument("--expect-placement", action="append", default=[],
+                    metavar="MODULE=PLACEMENT",
+                    help="once loaded, MODULE must run there (inproc|subprocess); "
+                         "a coordinate that silently fell back measures the wrong thing")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
     # Reporting. `--report` is the artifact (self-contained HTML, no CDN, same
@@ -809,6 +828,14 @@ def main() -> int:
 
     xfail = load_xfail(known)
     skips = SkipRegistry(known)
+
+    placements = {}
+    for spec in args.expect_placement:
+        module, sep, where = spec.partition("=")
+        if not sep or where not in ("inproc", "subprocess"):
+            print(f"--expect-placement {spec!r}: expected MODULE=inproc|subprocess")
+            return 2
+        placements[module] = where
 
     consumers = [Consumer(args.consumer)]
     for spec in args.proxy_consumer:
@@ -884,10 +911,12 @@ def main() -> int:
             for runner, work in phases:
                 with LogoscoreDaemon(
                         modules_dir=consumer.modules_dirs(modules),
-                        binary=args.logoscore) as daemon:
+                        binary=args.logoscore,
+                        extra_args=args.daemon_arg) as daemon:
                     client = daemon.client()
                     try:
                         consumer.prepare(client, provider, args.timeout)
+                        check_placements(client, provider, placements)
                     except Exception as e:
                         # A consumer that cannot be pointed at a provider must not
                         # quietly contribute a block of `not-run` cells that read
