@@ -4,11 +4,20 @@
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
     nixpkgs.follows = "logos-nix/nixpkgs";
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli";
-    logos-test-modules.url = "github:logos-co/logos-test-modules";
+    # The module-transport matrix depends on the qt_remote_plain feature chain
+    # and the explicit transport variants exported by logos-test-modules.
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/codex/qt-free-logoscore";
+    logos-test-modules.url = "github:logos-co/logos-test-modules/codex/qt-remote-plain-matrix";
+    # logos-test-modules at its last commit before the qt_remote_plain chain,
+    # built from its own lock: unchanged binaries (protocol 0.9) for the
+    # transport matrix to pair with the new runtime. No follows, on purpose:
+    # following would rebuild them against this flake's protocol.
+    logos-test-modules-release.url =
+      "github:logos-co/logos-test-modules/23870fcb085c93c7b8e6ea71d37d2fe1aa03e200";
   };
 
-  outputs = { self, nixpkgs, logos-logoscore-cli, logos-test-modules, ... }:
+  outputs = { self, nixpkgs, logos-logoscore-cli, logos-test-modules,
+              logos-test-modules-release, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -106,7 +115,17 @@
           dockerBundle         = dockerBundle;
           dockerBundlePortable = dockerBundlePortable;
         }
-      );
+      ) // {
+        # What .github/workflows/windows.yml stages for the logosctl suite:
+        # logosctl.exe, and test_fullapi_cpp installed as a portable module.
+        x86_64-windows = {
+          ctl = logos-logoscore-cli.packages.x86_64-windows.ctl;
+          test-modules = (logos-test-modules.inputs.logos-module-builder.lib.mkLogosModule {
+            src = "${logos-test-modules}/test-fullapi-module-cpp";
+            configFile = "${logos-test-modules}/test-fullapi-module-cpp/metadata.json";
+          }).packages.x86_64-windows.install-portable;
+        };
+      };
 
       # ── Dev shell ─────────────────────────────────────────────────────────
       # `nix develop` drops you into a shell with python + pytest + logoscore
@@ -231,6 +250,40 @@
           testModulesExtQtProxyInstall =
             logos-test-modules.modules.${system}.test_fullapi_ext_qtproxy.install;
 
+          # Explicit module-process transport builds. These are separate from
+          # the Python client's local/tcp/tcp_ssl axis: they choose how each
+          # module host talks to logoscore. Provider and proxy builds are paired
+          # independently below so mixed QRO/plain topologies cannot hide.
+          transportCppQro =
+            logos-test-modules.modules.${system}.test_fullapi_cpp_qt_remote.install;
+          transportRustQro =
+            logos-test-modules.modules.${system}.test_fullapi_rust_qt_remote.install;
+          transportProxyQro =
+            logos-test-modules.modules.${system}.test_fullapi_proxy_qt_remote.install;
+          transportCppPlain =
+            logos-test-modules.modules.${system}.test_fullapi_cpp_qt_remote_plain.install;
+          transportRustPlain =
+            logos-test-modules.modules.${system}.test_fullapi_rust_qt_remote_plain.install;
+          transportProxyPlain =
+            logos-test-modules.modules.${system}.test_fullapi_proxy_qt_remote_plain.install;
+          transportExtCppPlain =
+            logos-test-modules.modules.${system}.test_fullapi_ext_cpp_qt_remote_plain.install;
+          transportExtRustPlain =
+            logos-test-modules.modules.${system}.test_fullapi_ext_rust_qt_remote_plain.install;
+
+          # The released modules, and the other consumers every coordinate runs:
+          # the Rust LP proxy and the generated Qt glue (qt_remote only), so a
+          # typed Qt consumer meets a plain provider in some coordinate.
+          releasedCpp = logos-test-modules-release.modules.${system}.test_fullapi_cpp.install;
+          releasedRust = logos-test-modules-release.modules.${system}.test_fullapi_rust.install;
+          releasedProxy = logos-test-modules-release.modules.${system}.test_fullapi_proxy.install;
+          # The daemon those modules were released with, from that input's own
+          # lock, with its own host: it can only host qt_remote modules.
+          releasedLogoscore =
+            logos-test-modules-release.inputs.logos-logoscore-cli.packages.${system}.default;
+          testModulesProxyRustInstall =
+            logos-test-modules.modules.${system}.test_fullapi_proxy_rust.install;
+
           # Helper: run the integration suite once with the given
           # `--transport` value. Same env wiring as the unit check
           # plus openssl (needed by the `self_signed_cert` fixture
@@ -290,6 +343,75 @@
               ${python}/bin/pytest tests/logosctl/integration -v --transport=${transport}
               touch $out
             '';
+
+          # Run the complete full_api contract through one module-transport
+          # coordinate. `py` measures both providers directly and `lp-proxy`
+          # adds the independently selected forwarding module, so each result
+          # covers provider <-> logoscore and proxy <-> logoscore as well as the
+          # proxy -> provider call.
+          mkModuleTransportMatrixWith = daemon: label: cppInstall: rustInstall: proxyInstall:
+            pkgs.runCommand "logoscore-py-module-transport-${label}" {
+              nativeBuildInputs = [ python daemon pkgs.openssl ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+            } ''
+              cp -r ${./.}/. .
+              chmod -R +w .
+              export QT_QPA_PLATFORM=offscreen
+              export QT_FORCE_STDERR_LOGGING=1
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+              ''}
+              export PYTHONPATH=$PWD/src
+              export HOME=$PWD/home
+              mkdir -p $HOME $out
+              ${python}/bin/python conformance/run_matrix.py \
+                --logoscore ${daemon}/bin/logoscore \
+                --cases ${logos-test-modules}/conformance/cases.json \
+                --known ${logos-test-modules}/conformance/known.json \
+                --contract ${logos-test-modules}/test-fullapi-proxy-module-rust/full_api.lidl \
+                --cpp-modules ${cppInstall}/modules \
+                --rust-modules ${rustInstall}/modules \
+                --proxy-consumer lp-proxy=test_fullapi_proxy=${proxyInstall}/modules \
+                --proxy-consumer rust-proxy=test_fullapi_proxy_rust=${testModulesProxyRustInstall}/modules \
+                --proxy-consumer qtproxy-sync=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=sync \
+                --proxy-consumer qtproxy-async=test_fullapi_qtproxy=${testModulesQtProxyInstall}/modules=async \
+                --jsonl $out/matrix.jsonl \
+                --report $out/matrix.html \
+                --no-color \
+                2>&1 | tee $out/matrix.txt
+            '';
+          mkModuleTransportMatrix = mkModuleTransportMatrixWith logoscoreBin;
+
+          # The ext table for a given pair of providers; its consumers are py
+          # and the ext Qt proxy (see conformance-matrix-ext).
+          mkExtMatrix = name: rustInstall: cppInstall: pkgs.runCommand name {
+            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+          } ''
+            cp -r ${./.}/. .
+            chmod -R +w .
+            export QT_QPA_PLATFORM=offscreen
+            export QT_FORCE_STDERR_LOGGING=1
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+            ''}
+            export PYTHONPATH=$PWD/src
+            export HOME=$PWD/home
+            mkdir -p $HOME $out
+            ${python}/bin/python conformance/run_matrix.py \
+              --logoscore ${logoscoreBin}/bin/logoscore \
+              --cases   ${logos-test-modules}/conformance/ext-cases.json \
+              --known   ${logos-test-modules}/conformance/known-ext.json \
+              --contract ${logos-test-modules}/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl \
+              --modules test_fullapi_ext_rust=${rustInstall}/modules \
+              --modules test_fullapi_ext_cpp=${cppInstall}/modules \
+              --proxy-consumer 'extqtproxy-sync=test_fullapi_ext_qtproxy=${testModulesExtQtProxyInstall}/modules=sync=echoStringMap:[{"k":"v"}]' \
+              --proxy-consumer 'extqtproxy-async=test_fullapi_ext_qtproxy=${testModulesExtQtProxyInstall}/modules=async=echoStringMap:[{"k":"v"}]' \
+              --jsonl $out/matrix-ext.jsonl \
+              --report $out/matrix-ext.html \
+              --no-color \
+              2>&1 | tee $out/matrix-ext.txt
+          '';
         in
         # `rec` so `conformance-matrix-merged` can name the two runs it is built
         # from. It depends on them; it does not re-measure anything.
@@ -400,34 +522,76 @@
           # consumer wrapper is generated per contract. The probe method is
           # given explicitly (fifth field of --proxy-consumer): the driver's
           # default is `echoInt`, which full_api_ext does not have.
-          conformance-matrix-ext = pkgs.runCommand "logoscore-py-conformance-matrix-ext" {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+          conformance-matrix-ext = mkExtMatrix "logoscore-py-conformance-matrix-ext"
+            testModulesExtInstall testModulesExtCppInstall;
+
+          # Module-process transport matrix. The first name is the provider
+          # transport and the second is the forwarding LP proxy transport.
+          conformance-transport-qro-qro = mkModuleTransportMatrix
+            "provider-qro-proxy-qro"
+            transportCppQro transportRustQro transportProxyQro;
+          conformance-transport-qro-plain = mkModuleTransportMatrix
+            "provider-qro-proxy-plain"
+            transportCppQro transportRustQro transportProxyPlain;
+          conformance-transport-plain-qro = mkModuleTransportMatrix
+            "provider-plain-proxy-qro"
+            transportCppPlain transportRustPlain transportProxyQro;
+          conformance-transport-plain-plain = mkModuleTransportMatrix
+            "provider-plain-proxy-plain"
+            transportCppPlain transportRustPlain transportProxyPlain;
+          # Unchanged released binaries against the new runtime, both ways.
+          conformance-transport-released-plain = mkModuleTransportMatrix
+            "provider-released-proxy-plain"
+            releasedCpp releasedRust transportProxyPlain;
+          conformance-transport-plain-released = mkModuleTransportMatrix
+            "provider-plain-proxy-released"
+            transportCppPlain transportRustPlain releasedProxy;
+          # This chain's modules under the released daemon and host, over the
+          # one transport those have.
+          conformance-transport-released-daemon = mkModuleTransportMatrixWith releasedLogoscore
+            "daemon-released-provider-qro-proxy-qro"
+            transportCppQro transportRustQro transportProxyQro;
+          # The ext table with both providers over the plain transport.
+          conformance-transport-ext-plain = mkExtMatrix "logoscore-py-module-transport-ext-plain"
+            transportExtRustPlain transportExtCppPlain;
+
+          # The released coordinates are only worth their name if nothing
+          # rebuilt those modules against this flake's protocol.
+          released-modules-unchanged = pkgs.runCommand "logoscore-py-released-modules-unchanged" {
+            nativeBuildInputs = [ pkgs.jq ];
           } ''
-            cp -r ${./.}/. .
-            chmod -R +w .
-            export QT_QPA_PLATFORM=offscreen
-            export QT_FORCE_STDERR_LOGGING=1
-            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
-            ''}
-            export PYTHONPATH=$PWD/src
-            export HOME=$PWD/home
-            mkdir -p $HOME $out
-            ${python}/bin/python conformance/run_matrix.py \
-              --logoscore ${logoscoreBin}/bin/logoscore \
-              --cases   ${logos-test-modules}/conformance/ext-cases.json \
-              --known   ${logos-test-modules}/conformance/known-ext.json \
-              --contract ${logos-test-modules}/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl \
-              --modules test_fullapi_ext_rust=${testModulesExtInstall}/modules \
-              --modules test_fullapi_ext_cpp=${testModulesExtCppInstall}/modules \
-              --proxy-consumer 'extqtproxy-sync=test_fullapi_ext_qtproxy=${testModulesExtQtProxyInstall}/modules=sync=echoStringMap:[{"k":"v"}]' \
-              --proxy-consumer 'extqtproxy-async=test_fullapi_ext_qtproxy=${testModulesExtQtProxyInstall}/modules=async=echoStringMap:[{"k":"v"}]' \
-              --jsonl $out/matrix-ext.jsonl \
-              --report $out/matrix-ext.html \
-              --no-color \
-              2>&1 | tee $out/matrix-ext.txt
+            current=$(${logoscoreBin}/bin/logos_host --inspect \
+              "$(find -L ${transportCppQro}/modules -name '*_plugin.so' -o -name '*_plugin.dylib' | head -1)" \
+              | jq -r .logos_protocol_version)
+            case "$current" in ""|null) echo "no protocol stamp on the current build" >&2; exit 1 ;; esac
+            released=""
+            for install in ${releasedCpp} ${releasedRust} ${releasedProxy}; do
+              plugin=$(find -L "$install/modules" -name '*_plugin.so' -o -name '*_plugin.dylib' | head -1)
+              stamp=$(${logoscoreBin}/bin/logos_host --inspect "$plugin" | jq -r .logos_protocol_version)
+              echo "$plugin: $stamp (current $current)"
+              if [ -z "$stamp" ] || [ "$stamp" = null ] || [ "$stamp" = "$current" ] \
+                 || { [ -n "$released" ] && [ "$stamp" != "$released" ]; }; then
+                echo "not the released build: $plugin" >&2; exit 1
+              fi
+              released=$stamp
+            done
+            echo "$released" > $out
           '';
+
+          conformance-transport-matrix =
+            pkgs.runCommand "logoscore-py-module-transport-matrix" {} ''
+              mkdir -p $out/qro-qro $out/qro-plain $out/plain-qro $out/plain-plain \
+                       $out/released-plain $out/plain-released $out/released-daemon $out/ext-plain
+              cp -r ${conformance-transport-qro-qro}/. $out/qro-qro/
+              cp -r ${conformance-transport-qro-plain}/. $out/qro-plain/
+              cp -r ${conformance-transport-plain-qro}/. $out/plain-qro/
+              cp -r ${conformance-transport-plain-plain}/. $out/plain-plain/
+              cp -r ${conformance-transport-released-plain}/. $out/released-plain/
+              cp -r ${conformance-transport-plain-released}/. $out/plain-released/
+              cp -r ${conformance-transport-released-daemon}/. $out/released-daemon/
+              cp -r ${conformance-transport-ext-plain}/. $out/ext-plain/
+              echo ${released-modules-unchanged} > $out/released-modules-unchanged
+            '';
 
           # ── the merged report ───────────────────────────────────────────
           # ONE page, BOTH contracts, and nothing computed across them. A

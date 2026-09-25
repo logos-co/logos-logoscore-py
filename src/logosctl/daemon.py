@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,7 @@ from typing import Any, IO
 from . import _proc
 from .client import DaemonEndpoint, LogosctlClient
 from .errors import LogosctlError
+from .tokens import issue_token, revoke_token
 
 
 # ── YAML emitting ────────────────────────────────────────────────────────
@@ -266,6 +268,9 @@ class LogosctlDaemon:
         # the `LOGOSCORE_CLIENT_*` env family is gone, so the on-disk
         # value is the only thing the CLI reads (see `client()`).
         verify_peer: bool = False,
+        # Lifetime of the named token issued for tcp/tls clients. stop()
+        # revokes it; the expiry bounds one a killed process leaves behind.
+        network_token_ttl: str = "24h",
     ) -> None:
         if isinstance(modules_dir, (str, Path)):
             self.modules_dirs: list[Path] = [Path(modules_dir)]
@@ -293,6 +298,7 @@ class LogosctlDaemon:
         self.ssl_key = Path(ssl_key) if ssl_key else None
         self.ssl_ca = Path(ssl_ca) if ssl_ca else None
         self.verify_peer = verify_peer
+        self.network_token_ttl = network_token_ttl
 
         if config_dir is None:
             self._config_dir = Path(tempfile.mkdtemp(prefix="logosctl-"))
@@ -305,6 +311,8 @@ class LogosctlDaemon:
         self._process: subprocess.Popen[str] | None = None
         self._stdout_file: IO[str] | None = None
         self._stderr_file: IO[str] | None = None
+        self._network_token: str | None = None
+        self._network_token_name: str | None = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -414,6 +422,7 @@ class LogosctlDaemon:
                     _proc.run_json(
                         self.binary, ["daemon", "stop"],
                         config_dir=self._config_dir,
+                        token=self._read_token(),
                         # Same env the daemon got: a caller who pinned
                         # TMPDIR (to keep the local socket path under
                         # sockaddr_un's 104-byte cap) has to reach the
@@ -441,6 +450,15 @@ class LogosctlDaemon:
                 f.close()
         self._stdout_file = None
         self._stderr_file = None
+
+        if self._network_token_name is not None:
+            try:
+                revoke_token(self._network_token_name, binary=self.binary,
+                             config_dir=self._config_dir)
+            except Exception:
+                pass
+            self._network_token_name = None
+            self._network_token = None
 
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
@@ -480,6 +498,8 @@ class LogosctlDaemon:
             self._write_own_client_config(
                 transport=transport, host=tcp_host, codec=codec,
                 verify_peer=False if no_verify_peer else None)
+        if (transport or self._network_transport()) in ("tcp", "tcp_ssl"):
+            self._ensure_network_token()
         return LogosctlClient(
             binary=self.binary,
             config_dir=self._config_dir,
@@ -523,13 +543,11 @@ class LogosctlDaemon:
         endpoints = self._endpoints_from_state(
             state, transport=transport, host=host,
             codec=codec, verify_peer=verify_peer)
-        # The daemon's own boot token. It is issued local-only, yet the
-        # runtime accepts it over tcp/tcp_ssl (the raw value is registered
-        # with the in-process TokenManager, ahead of the store validator
-        # that would reject it) — which is what makes "copy auto.json" the
-        # documented provisioning move. A client that would rather not
-        # rest on that quirk should issue a named token instead (see
-        # `tokens.issue_token`, without `local_only`).
+        # The boot token is local-only. A network client needs a separately
+        # issued credential, including when the caller explicitly overrides
+        # the wrapper's default transport here.
+        if any(e.transport in ("tcp", "tcp_ssl") for e in endpoints.values()):
+            self._ensure_network_token()
         token = self._read_token()
         if token is None:
             raise LogosctlError(
@@ -566,8 +584,8 @@ class LogosctlDaemon:
         """Return (stdout, stderr) captured from the daemon so far."""
         out = (self._config_dir / "daemon.stdout.log")
         err = (self._config_dir / "daemon.stderr.log")
-        stdout = out.read_text() if out.exists() else ""
-        stderr = err.read_text() if err.exists() else ""
+        stdout = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
+        stderr = err.read_text(encoding="utf-8", errors="replace") if err.exists() else ""
         # Unlike logoscore, the daemon keeps its own log file too. With
         # `logging.console` on (the default) it and the pipes above carry
         # the same bytes; if a caller turned the console mirror off via
@@ -582,7 +600,7 @@ class LogosctlDaemon:
         boot's `daemon_<stamp>.log`). Empty when the daemon hasn't opened
         it yet or logging was disabled."""
         try:
-            return self.log_file.read_text()
+            return self.log_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ""
 
@@ -713,12 +731,12 @@ class LogosctlDaemon:
 
         source = self._config_dir / "daemon.yaml"
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(_yaml_document(doc))
+        source.write_text(_yaml_document(doc), encoding="utf-8")
 
         cmd = [self.binary, "--config-dir", str(self._config_dir),
                "daemon", "config", "set", str(source)]
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, capture_output=True, text=True, encoding="utf-8",
             env=self._child_env(), timeout=self.startup_timeout,
         )
         if proc.returncode != 0:
@@ -739,8 +757,10 @@ class LogosctlDaemon:
             )
 
     def _read_token(self) -> str | None:
-        # Tokens live in <configDir>/client/auto.json (the daemon-emitted
-        # local-client raw token). The hashed-at-rest token list is in
+        if self._network_token is not None:
+            return self._network_token
+        # Local tokens live in <configDir>/client/auto.json. Network calls use
+        # the wrapper's issued credential above. The hashed-at-rest list is in
         # <configDir>/daemon/tokens.json — that file is what the daemon
         # validates against, but the raw token we use for client RPC comes
         # from client/auto.json.
@@ -748,13 +768,23 @@ class LogosctlDaemon:
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text()).get("token")
+            return json.loads(path.read_text(encoding="utf-8")).get("token")
         except (json.JSONDecodeError, OSError):
             return None
 
+    def _ensure_network_token(self) -> None:
+        if self._network_token is not None:
+            return
+        name = "ctl-py-" + secrets.token_hex(8)
+        issued = issue_token(name, binary=self.binary,
+                             config_dir=self._config_dir,
+                             expires=self.network_token_ttl)
+        self._network_token_name = name
+        self._network_token = issued["token"]
+
     def _read_state(self) -> dict:
         try:
-            return json.loads(self.state_file.read_text())
+            return json.loads(self.state_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             raise LogosctlError(f"daemon state.json unreadable: {e}") from e
 
@@ -824,6 +854,7 @@ class LogosctlDaemon:
         # is wrong. We patch in the actual resolved per-module
         # endpoints before the next phase tries to call `status`.
         if self._network_transport() is not None:
+            self._ensure_network_token()
             self._write_own_client_config()
 
         # Phase 2: verify we can talk to it via `status`.
