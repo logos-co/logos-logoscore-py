@@ -1,0 +1,25 @@
+name: Windows
+
+# The logosctl client's suites on a real Windows runner, against the
+# cross-built logosctl.exe and test_fullapi_cpp (see packages.x86_64-windows).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
+    secrets: inherit
+    with:
+      targets: ctl test-modules
+      smoke-file: .github/windows/logosctl-pytest.sh
+      # pytest runs logosctl.exe itself, which bash under wine cannot.
+      wine-smoke: false
+      # The module imports Qt, which ships in ctl/bin beside the logos_host that loads it.
+      assemble: '{"test-modules":["ctl/bin"]}'
