@@ -55,6 +55,16 @@ def logosctl_test_modules_dir() -> str:
 
 
 @pytest.fixture(scope="session")
+def logosctl_plain_modules_dir() -> str:
+    """test_fullapi_cpp built with `"transport": "qt_remote_plain"`, the only
+    kind a daemon can export to another (tests/logosctl/integration/test_peering.py)."""
+    path = os.environ.get("LOGOSCTL_PLAIN_MODULES_DIR")
+    if not path:
+        pytest.skip("LOGOSCTL_PLAIN_MODULES_DIR not set")
+    return path
+
+
+@pytest.fixture(scope="session")
 def test_modules_dir(logosctl_test_modules_dir: str) -> str:
     """Shadows the root conftest's `test_modules_dir` for this subtree.
 

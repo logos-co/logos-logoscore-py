@@ -415,6 +415,20 @@ class LogosctlClient:
             return _decode_bytes_tags(result) if decode_bytes else result
         return envelope
 
+    # ── Peering ─────────────────────────────────────────────────────────────
+
+    def peer(self, verb: str, *args: str, timeout: float | None = None) -> Any:
+        """Run `logosctl peer <verb> [args…]` and return peering_module's reply.
+
+        `peer status`, `ls`, `routes`, `import NAME --from PEER …`, `policy set
+        FILE` and the rest; see `logosctl peer` for the verbs.
+        """
+        return _proc.run_json(
+            self.binary, ["peer", verb, *args],
+            config_dir=self.config_dir, token=self.token,
+            timeout=timeout if timeout is not None else self.timeout,
+        )
+
     # ── Event subscription ──────────────────────────────────────────────────
 
     def on_event(
