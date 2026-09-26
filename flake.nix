@@ -9,8 +9,9 @@
     # in-process coordinate on the runtime-control wave (logoscore-cli#145 and
     # logos-test-modules' feat/inproc-coordinates), with legacy mode deleted on
     # top (the feat/drop-legacy-mode branches), and the daemon's runtime in a
-    # process of its own (logoscore-cli's feat/runtime-process).
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/runtime-process";
+    # process of its own (logoscore-cli's feat/runtime-process). Peering sits on
+    # top (logoscore-cli#149): `logosctl peer`, which PeeredDaemons drives.
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/peering";
     logos-test-modules.url = "github:logos-co/logos-test-modules/feat/drop-legacy-mode";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries (protocol 0.9) for the
@@ -149,6 +150,9 @@
           # modules/<name>/… ready for the daemon's `-m` flag.
           testModulesInstall         = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
           testModulesInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
+          # Its plain build, the one a daemon can export (test_peering.py).
+          testModulesPlainInstall =
+            logos-test-modules.modules.${system}.test_fullapi_cpp_qt_remote_plain.install;
         in {
         default = pkgs.mkShell {
           packages = [
@@ -177,6 +181,7 @@
           # are the same modules — the module ABI is shared, only the CLI differs.
           LOGOSCTL_BIN                        = "${logosctlBin}/bin/logosctl";
           LOGOSCTL_TEST_MODULES_DIR           = "${testModulesInstall}/modules";
+          LOGOSCTL_PLAIN_MODULES_DIR          = "${testModulesPlainInstall}/modules";
 
           shellHook = ''
             echo "logos-logoscore-py dev shell"
@@ -188,6 +193,7 @@
             echo "  LOGOSCORE_TEST_MODULES_DIR_PORTABLE:     $LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
             echo "  LOGOSCTL_BIN:                            $LOGOSCTL_BIN"
             echo "  LOGOSCTL_TEST_MODULES_DIR:               $LOGOSCTL_TEST_MODULES_DIR"
+            echo "  LOGOSCTL_PLAIN_MODULES_DIR:              $LOGOSCTL_PLAIN_MODULES_DIR"
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
           '';
         };
@@ -335,6 +341,8 @@
               export PYTHONPATH=$PWD/src
               export LOGOSCTL_BIN=${logosctlBin}/bin/logosctl
               export LOGOSCTL_TEST_MODULES_DIR=${testModulesInstall}/modules
+              # test_peering.py exports test_fullapi_cpp, which takes its plain build.
+              export LOGOSCTL_PLAIN_MODULES_DIR=${transportCppPlain}/modules
               # tests/logosctl/conftest.py SKIPS when either of those is unset,
               # so a rename here turns the whole suite green-by-omission.
               #
