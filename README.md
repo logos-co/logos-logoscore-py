@@ -151,6 +151,36 @@ finally:
     subprocess.run(["docker", "network", "rm", "my-net"])
 ```
 
+## Two daemons, one calling the other's modules (logosctl)
+
+`PeeredDaemons` starts two `logosctl` daemons on this machine. The
+exporter loads your modules and shares them, and the importer imports
+them. On the importer, each import is a facade that forwards every call
+and event to the exporter's copy of the module. The two pair through the
+exporter's local invite, which needs no code.
+
+```python
+from logosctl import PeeredDaemons
+
+with PeeredDaemons(modules_dir="./modules", exports=["my_module"]) as pair:
+    importer = pair.importer_client()
+    print(importer.call("my_module", "do_something", 42))  # answered by the exporter
+
+    pair.set_policy({})           # the exporter grants the importer nothing now
+    pair.wait_for_import("my_module", "error")
+    pair.set_policy({f"{pair.importer_id}/*": ["*"]})
+    pair.wait_for_import("my_module")
+
+    pair.restart_exporter()       # same runtime, pairing and control port
+    pair.wait_for_import("my_module")
+```
+
+Only a plain module (`"transport": "qt_remote_plain"`) can be exported.
+`LogosctlClient.peer(verb, …)` runs any `logosctl peer` verb: `status`,
+`ls`, `routes`, `import`, `policy set FILE`, and so on.
+`tests/logosctl/integration/test_peering.py` replays the full_api tables
+through an import.
+
 ## Connect to an already-running daemon
 
 If a `logoscore` daemon is already running on the host (started with
