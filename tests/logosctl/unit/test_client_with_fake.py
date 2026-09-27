@@ -208,6 +208,17 @@ def test_call_multi_arg_mixed_types_argv(rec: Recorder):
     assert json.loads(cmd[10][5:]) == {"k": 1}
 
 
+def test_call_none_arg_is_json_null_and_keeps_arity(rec: Recorder):
+    """A top-level `None` crosses argv as `json:null`, as logoscore's client
+    sends it: `str(None)` made it the present string "None", which the
+    conformance matrix's peered cells (the only ones this client measures)
+    caught as `null-is-a-value` echoing "None". The string "None" stays a
+    string, and the empty slot keeps its place."""
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    LogosctlClient().call("m", "many", "a", None, 3, "None")
+    assert rec.calls[0]["cmd"][4:] == ["many", "a", "json:null", "3", "None"]
+
+
 def test_global_flags_precede_the_subcommand(rec: Recorder):
     # A trailing `--json` does parse — main.cpp lifts the global flags back
     # out of a client subcommand's leftovers — but that same extractor is

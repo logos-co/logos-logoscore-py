@@ -101,8 +101,12 @@ def _arg_to_str(arg: Any) -> str:
 
     Byte-identical to the logoscore encoding on purpose: both binaries
     compile the same `src/client/commands/call_command.cpp`, so the
-    argument grammar is one contract, not two.
+    argument grammar is one contract, not two. That includes a top-level
+    `None`, the empty inhabitant of an optional slot: `json:null`, never
+    the four-character string "None" (see logoscore's `_arg_to_str`).
     """
+    if arg is None:
+        return "json:null"
     if isinstance(arg, Path):
         return f"@{arg}"
     if isinstance(arg, bool):
