@@ -24,11 +24,13 @@ from logosctl  import LogosctlDaemon,  LogosctlClient    # under validation
 ```
 
 The two share no code and no state, and neither can reach the other's
-binary. Everything below documents `logoscore`; `logosctl` mirrors it
-method for method, with one structural difference — the new CLI has no
-`--client-*` flags and no `LOGOSCORE_CLIENT_*` env vars, so a client is
-retargeted by writing `<config_dir>/client/config.yaml` rather than by
-passing a transport per call (see `help(LogosctlDaemon.remote_client)`).
+binary. Everything below documents `logoscore` unless it says otherwise;
+`logosctl` mirrors it method for method, with one structural difference —
+the new CLI configures a daemon with a document installed before it starts
+(`daemon config set`) rather than with flags. A client of either reaches a
+daemon on its own machine over the daemon's local socket. Operating a
+daemon elsewhere, in a container included, is `logosctl`'s alone: Remote
+Runtime Control, below.
 
 `src/logosctl/` and `tests/logosctl/` are the whole of the new client, so
 whichever way the validation goes, the losing half is a delete.
@@ -77,79 +79,55 @@ with LogoscoreDaemon(modules_dir="./modules") as daemon:
 # Daemon stopped + temp config dir cleaned up on __exit__.
 ```
 
-## Quickstart — daemon in docker
+## Quickstart — daemon in docker (logosctl)
 
-Use `LogoscoreDockerDaemon` to run the daemon inside a container and drive
-it over TCP. Good for testing your module against a real distributed
-build of logoscore without polluting your dev environment, and for
-anything that needs the daemon reachable from multiple processes.
+Use `LogosctlDockerDaemon` to run a `logosctl` daemon inside a container
+and operate it from the host over Remote Runtime Control. Good for testing
+your module against a real distributed build of logosctl without polluting
+your dev environment.
 
 ```python
-from logoscore import LogoscoreDockerDaemon
+from logosctl import LogosctlDockerDaemon
 
-with LogoscoreDockerDaemon(
-    image="logoscore:smoke-portable",
+with LogosctlDockerDaemon(
+    image="logosctl:smoke-portable",
     modules_dir="./my-module/result/modules",  # host dir with your Qt plugins
+    binary="logosctl",                         # the host-side client
 ) as daemon:
-    client = daemon.client(binary="logoscore")  # host-side CLI
+    client = daemon.client()
     client.load_module("my_module")
     print(client.call("my_module", "do_something", 42))
 ```
 
 What the helper handles for you:
 
-- Picks a free host TCP port per module; the container binds `6000`
-  (`core_service`) and `6001` (`capability_module`) internally, reached
-  via `-p $host_core:6000 -p $host_cap:6001`. Same pattern as
-  [status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
-- Bind-mounts three host dirs into the container:
-  `/config` (daemon writes `state.json`), `/persistence`
-  (`--persistence-path`; pre-seed for session restore, inspect after),
-  `/user-modules` (your compiled Qt plugins, read-only).
-- Waits for `state.json` to appear before returning.
-- Returns a `LogoscoreClient` whose `client/config.json` carries both
-  modules' distinct forwarded host ports (written via
-  `LogoscoreClient.write_config`), so it dials the external endpoints —
-  not what the daemon wrote into its own connection file. Each module
-  needs its own port, so this is config-file-driven rather than relying
-  on the single-endpoint `LOGOSCORE_CLIENT_TCP_PORT` override.
+- Installs the daemon's config document into the session (`daemon config
+  set`), with a `peering` section that puts its control endpoint on a fixed
+  loopback port and turns `runtime_control` on.
+- Runs the container on the host's network (`--network host`), so the
+  host reaches the control endpoint and the runtime-control listener the
+  daemon picks a port for. That needs Linux; Docker Desktop has host
+  networking only as an opt-in setting.
+- Bind-mounts three host dirs into the container: `/config` (the
+  session), `/persistence` (`persistence_path`; pre-seed for session
+  restore, inspect after), `/user-modules` (your compiled Qt plugins,
+  read-only).
+- Waits for `state.json`, then mints a runtime-control invite inside the
+  container, pairs a host-side logosctl (a config dir of its own) with
+  `logosctl remote pair`, accepts it inside the container, and grants it
+  `DEFAULT_GRANTS` in the daemon's remote policy.
+- Returns clients that run every command with `--remote`; its
+  `runtime_control.grant(...)` changes what they may call.
 
-Building the image: the logoscore CLI repo produces a reusable base
-image via
+Building the image:
 [`tests/docker_smoke/build_smoke_image.sh`](tests/docker_smoke/README.md).
-The image contains only the CLI and its built-in modules — user
-modules are always bind-mounted at runtime.
+The image contains only logosctl and its built-in modules — user modules
+are always bind-mounted at runtime.
 
-Knobs: `host_port=`, `persistence_dir=` (pre-seeded + not cleaned up on
-exit), `codec="cbor"`, `extra_module_dirs=[...]`, `extra_args=[...]`,
-`container_name=`, `network=` (attach to a caller-managed docker
-network). See `help(LogoscoreDockerDaemon)` for the full list.
-
-### Multiple daemons in a shared docker network
-
-Pass `network=<name>` to attach each container to an EXISTING docker
-network. The daemon never creates or removes networks — caller manages
-the lifecycle. Use this when daemon containers need to discover each
-other by container name via docker's embedded DNS:
-
-```python
-import subprocess
-from logoscore import LogoscoreDockerDaemon
-
-subprocess.run(["docker", "network", "create", "my-net"], check=True)
-try:
-    a = LogoscoreDockerDaemon(image="logoscore:smoke-portable",
-                              modules_dir="./my-module/result/modules",
-                              container_name="alice", network="my-net")
-    b = LogoscoreDockerDaemon(image="logoscore:smoke-portable",
-                              modules_dir="./my-module/result/modules",
-                              container_name="bob", network="my-net")
-    with a, b:
-        # alice resolves "bob" via docker DNS, and vice versa
-        ...
-finally:
-    subprocess.run(["docker", "network", "rm", "my-net"])
-```
+Knobs: `control_port=`, `name=` (the daemon's peering name), `grants=`,
+`persistence_dir=` (pre-seeded + not cleaned up on exit),
+`extra_module_dirs=[...]`, `extra_config={...}`, `extra_args=[...]`,
+`container_name=`. See `help(LogosctlDockerDaemon)` for the full list.
 
 ## Two daemons, one calling the other's modules (logosctl)
 
@@ -180,7 +158,9 @@ Only a plain module (`"transport": "qt_remote_plain"`) can be exported.
 `ls`, `routes`, `import`, `policy set FILE`, and so on.
 `importer_placement={"single_process": True}` gives the importer a
 single-process runtime, which runs peering and each facade in its own
-process: no host process for either.
+process: no host process for either. Peering is how a module on one
+runtime calls one on another; operating a daemon from another machine is
+Remote Runtime Control, below.
 `tests/logosctl/integration/test_peering.py` replays the full_api tables
 through an import, with the facade in a host process and in a single-process
 importer, and checks that a `concurrency: multi` provider
@@ -221,100 +201,69 @@ the daemon endpoint and `<config_dir>/client/auto.json` for the
 local-client token (both auto-emitted by the daemon at boot), so you
 don't have to pass a token explicitly for a same-host, same-user daemon.
 
-Cross-host or different-user setups need the [Tokens](#tokens) flow. For
-a daemon on **another host** — or any daemon whose two well-known modules
-(`core_service` and `capability_module`) bound **different ports** — the
-single `transport=` / `tcp_host=` / `tcp_port=` overrides aren't enough
-(they describe one endpoint). Use `LogoscoreClient.connect(...)` instead:
-see [Connect to a daemon on a remote host](#connect-to-a-daemon-on-a-remote-host).
+A client in a config dir the daemon does not own needs a dial spec and a
+token of its own: `LogoscoreClient.connect(endpoints, token=...,
+instance_id=...)` writes both (`LogoscoreClient.write_config` is the
+lower-level primitive). A same-user client can use the daemon's boot
+token; for any other, see [Tokens](#tokens). A daemon on another machine
+is operated over Remote Runtime Control, next.
 
-## Connect to a daemon on a remote host
+## Operate a daemon on another machine (logosctl)
 
-`LogoscoreClient.connect(...)` builds a client from explicit per-module
-endpoints, so you can reach a daemon that isn't on `localhost` (or whose
-`core_service` / `capability_module` bound separate ports — two
-`QTcpServer`s can't share an address:port). Each `DaemonEndpoint` is one
-module's dial spec; pass the raw token the daemon issued for this client
-(see [Tokens](#tokens)).
+Remote Runtime Control: a `logosctl` client on one machine runs its
+commands on a daemon on another, as that daemon's operator. The daemon
+turns it on in its config's `peering` section; the client pairs once
+through a runtime-control invite the daemon mints and accepts, and needs
+no daemon or token of its own — the daemon knows it by its key. Pairing
+grants nothing: the daemon's remote policy names the `core_service`
+methods, and the module methods, the client may call; anything else is
+refused with `NOT_AUTHORISED`. See the Logos developer guide, [§9.6
+Linking runtimes](https://github.com/logos-co/logos-tutorial/blob/master/logos-developer-guide.md#96-linking-runtimes-peering).
 
-```python
-from logoscore import LogoscoreClient, DaemonEndpoint
-
-client = LogoscoreClient.connect(
-    {
-        "core_service":      DaemonEndpoint(transport="tcp", host="daemon.example.com", port=6000),
-        "capability_module": DaemonEndpoint(transport="tcp", host="daemon.example.com", port=6001),
-    },
-    token="<raw-token-issued-for-this-client>",
-)
-print(client.status())
-client.load_module("chat")
-```
-
-`connect()` materializes a `client/config.json` (plus an `auto.json`
-holding the token) in a private temp dir that is cleaned up when the
-client is garbage-collected. Pass `config_dir=...` to write it somewhere
-you control and keep it around. Unlike the `transport=` / `tcp_*=`
-constructor kwargs, `connect()` sets **no** `LOGOSCORE_CLIENT_*` env
-overrides — the on-disk config is authoritative, which is exactly what
-lets it express two modules on two ports.
-
-For TLS, use `transport="tcp_ssl"` and set `verify_peer=` per endpoint
-(only honoured for `tcp_ssl`):
+`RuntimeControl` does the whole flow against a daemon it can operate
+locally (a `LogosctlDaemon`, or a `LogosctlDockerDaemon` from inside its
+container):
 
 ```python
-client = LogoscoreClient.connect(
-    {
-        "core_service":      DaemonEndpoint("tcp_ssl", "daemon.example.com", 6000, verify_peer=True),
-        "capability_module": DaemonEndpoint("tcp_ssl", "daemon.example.com", 6001, verify_peer=True),
-    },
-    token="...",
-)
+from logosctl import LogosctlDaemon, RuntimeControl, runtime_control_config
+
+peering = {"peering": runtime_control_config("node")}  # control on 127.0.0.1
+with LogosctlDaemon("./modules", extra_config=peering) as daemon, \
+        RuntimeControl(daemon) as rc:
+    rc.pair()        # peer invite --runtime-control / remote pair / peer accept
+    rc.grant({"core_service": ["getStatus", "loadModule", "callModuleMethod"],
+              "my_module": ["do_something"]})
+    remote = rc.client()               # every command runs with --remote
+    remote.load_module("my_module")
+    print(remote.call("my_module", "do_something", 42))
 ```
 
-Need the config file without a client? `LogoscoreClient.write_config(
-config_dir, endpoints, token=...)` writes the same `client/config.json`
-into a dir you own — the lower-level primitive `connect()` (and the
-daemon helpers) are built on.
+`rc.grant()` with no argument grants `logosctl.remote.DEFAULT_GRANTS`:
+every `LogosctlClient` command but `stop`, and every method of the
+daemon's user modules (`"*"` never covers `core_service`, nor the
+runtime's own modules). The same by hand, the client on its own machine:
+
+```bash
+logosctl peer invite --runtime-control > invite.txt     # daemon
+logosctl remote pair invite.txt                         # client: waits for the daemon
+logosctl peer pending; logosctl peer accept <id>        # daemon
+logosctl peer policy set policy.json                    # daemon:
+#   {"<client runtime id>/logosctl": {"core_service": ["getStatus", ...], "*": "*"}}
+logosctl --remote node status                           # client
+```
+
+`LogosctlClient(config_dir=..., remote="node")` drives a daemon a config
+dir is already paired with.
 
 ## Transports
 
-By default the daemon listens on a local Unix socket and the client
-connects to it. To open remote-reachable transports, pass
-`transports=[...]` to `LogoscoreDaemon` and point the client at the
-matching endpoint:
-
-```python
-with LogoscoreDaemon(
-    modules_dir="./modules",
-    transports=["tcp"],          # or ["tcp_ssl"], or ["local", "tcp"]
-    tcp_host="0.0.0.0",
-    tcp_port=6000,
-    tcp_codec="json",            # or "cbor"
-) as daemon:
-    client = daemon.client()     # reads the per-module tcp dial spec the
-                                 # daemon wrote into client/config.json
-```
-
-`daemon.client()` needs no transport args: the wrapper records the daemon's
-resolved per-module endpoints in `client/config.json` and issues a revocable
-network token, leaving the daemon's boot token local-only. `core_service`
-and `capability_module` each use their own bound port. TLS (`tcp_ssl`)
-additionally accepts `ssl_cert` /
-`ssl_key` / `ssl_ca`.
-
-`client(transport=, tcp_host=, codec=, no_verify_peer=)` accepts uniform
-overrides (host/transport/codec/verify are shared by both modules); they're
-merged **into** the per-module `client/config.json` on disk, each module's
-own port left intact — never via `LOGOSCORE_CLIENT_*` env vars. There is
-deliberately **no per-call port override**: the CLI applies a single port
-to every module uniformly, which would clobber `capability_module` onto
-`core_service`'s port. So to reach a daemon whose modules sit on different
-ports at a host you specify (the general remote case, including a remote
-host), use [`LogoscoreClient.connect(...)`](#connect-to-a-daemon-on-a-remote-host),
-which writes a full per-module config. That's how `LogoscoreDockerDaemon`
-bridges the container boundary: it forwards each module to its own host
-port and hands back a client wired to a per-module `client/config.json`.
+A client reaches a daemon on its machine over the daemon's local socket,
+the only client transport. The legacy `tcp` and `tcp_ssl` transports
+(plain TCP, and server-only TLS with bearer tokens) are gone, and with
+them the JSON/CBOR codec matrix they carried. What replaced them rides
+`tls_tcp` — mutual TLS 1.3 with pinned keys: Remote Runtime Control to
+operate a daemon from elsewhere, and peering (`PeeredDaemons`) for a
+module on one runtime to call a module on another.
 
 ## Tokens
 
@@ -323,9 +272,8 @@ authenticates the client's connection with that token. When you spawn a
 daemon via `LogoscoreDaemon`, it issues and stores one for you; the
 `client()` factory wires it through.
 
-For daemons you didn't spawn (e.g. a long-running one, or one in a
-container you want to share across several clients), manage tokens
-directly:
+For daemons you didn't spawn (e.g. a long-running one on this machine),
+manage tokens directly:
 
 ```python
 from logoscore import issue_token, revoke_token, list_tokens
@@ -352,51 +300,47 @@ LogoscoreDaemon(
     extra_args=None,          # extra flags to pass to the daemon
     env=None,                 # extra env vars for the daemon process
     startup_timeout=15.0,     # seconds to wait for state.json + status
-    # Transports (see section above)
-    transports=None,          # ["tcp"] | ["tcp_ssl"] | ["local", "tcp"] | ...
-    tcp_host="127.0.0.1",
-    tcp_port=0,               # 0 = let daemon pick
-    tcp_codec="json",         # "json" | "cbor"
-    tcp_ssl_host="127.0.0.1",
-    tcp_ssl_port=0,
-    tcp_ssl_codec="json",
-    ssl_cert=None, ssl_key=None, ssl_ca=None,
 )
 ```
 
-### `LogoscoreDockerDaemon`
+### `LogosctlDockerDaemon` (logosctl)
 
-Same shape, but the daemon runs inside a container. Construction just
-stores config; `.start()` / `__enter__` actually runs `docker run`.
+Same shape, but the daemon runs inside a container and the host operates
+it over Remote Runtime Control. Construction just stores config;
+`.start()` / `__enter__` runs the container and pairs the host client.
 
 ```python
-LogoscoreDockerDaemon(
-    image,                    # e.g. "logoscore:smoke-portable"
+LogosctlDockerDaemon(
+    image,                    # e.g. "logosctl:smoke-portable"
     modules_dir,              # host dir → /user-modules inside container
+    binary="logosctl",        # the host-side client that pairs with it
     config_dir=None,          # defaults to tmpdir (cleaned up on stop)
     persistence_dir=None,     # defaults to tmpdir (cleaned up on stop)
-    host_port=None,           # None → pick_free_port()
-    codec="json",             # "json" | "cbor"
+    control_port=None,        # None → pick_free_port(), on 127.0.0.1
+    name="node",              # the daemon's peering name
+    grants=None,              # None → logosctl.remote.DEFAULT_GRANTS
     container_name=None,
-    network=None,             # attach to existing caller-managed docker network
-    extra_module_dirs=None,   # extra -m paths *inside* the container
-    extra_args=None,          # extra daemon args
-    startup_timeout=20.0,
+    extra_module_dirs=None,   # extra modules_dirs *inside* the container
+    extra_config=None,        # extra daemon config keys, merged last
+    extra_args=None,          # extra app-level flags
+    startup_timeout=30.0,
 )
 ```
 
 Pass a caller-owned `persistence_dir` (or `config_dir`) to keep it
 around after the container exits — useful for session-restore tests
-(pre-seed → run → assert against what the modules wrote).
+(pre-seed → run → assert against what the modules wrote). `peer(verb,
+...)` runs `logosctl peer` inside the container; `runtime_control` is the
+host client's pairing.
 
-Also exported: `docker_available()`, `image_present(image)`,
-`pick_free_port()`, `CONTAINER_TCP_PORT` (= 6000).
+Also exported from `logosctl`: `RuntimeControl`, `runtime_control_config`,
+`docker_available()`, `image_present(image)`, `pick_free_port()`,
+`build_modules_in_docker(...)`.
 
 ### `LogoscoreClient`
 
-Obtained via `daemon.client(...)`, `LogoscoreClient.connect(endpoints,
-token=...)` (a remote daemon — see
-[Connect to a daemon on a remote host](#connect-to-a-daemon-on-a-remote-host)),
+Obtained via `daemon.client()`, `LogoscoreClient.connect(endpoints,
+token=...)` (a daemon on this machine, from a config dir it does not own),
 or constructed directly for a same-host daemon. Every method returns
 parsed JSON (dict or list) on success and raises on failure:
 
@@ -415,12 +359,6 @@ parsed JSON (dict or list) on success and raises on failure:
 
 `call(...)` returns the method's unwrapped `result` value. `Path`
 arguments are passed through as `@file` so the CLI loads their contents.
-
-Transport-related kwargs (`transport=`, `tcp_host=`, `tcp_port=`,
-`codec=`, `no_verify_peer=`) set `LOGOSCORE_CLIENT_*` env vars on the
-subprocess invocation — the CLI resolves them through its
-`effectiveClientTransport` path, overriding whatever the daemon wrote
-into `state.json`.
 
 ### Events
 
@@ -452,7 +390,7 @@ output for `logosctl` — so tests run out of the box:
 
 ```bash
 nix develop        # python + pytest + logoscore + logosctl on PATH
-pytest             # runs unit + integration, both clients (docker smoke skipped)
+pytest             # runs unit + integration, both clients (docker smoke skips without an image)
 nix flake check    # same, under nix
 ```
 
@@ -462,21 +400,20 @@ Test layout — one tree per client, duplicated on purpose:
 tests/
 ├── unit/          # no logoscore required; runs anywhere
 ├── integration/   # spawns local logoscore daemons; nix check covers this
-├── docker_smoke/  # docker-required; see tests/docker_smoke/README.md
+├── docker_smoke/  # logosctl in docker, over Remote Runtime Control; see its README
 └── logosctl/      # the same two suites against logosctl
     ├── unit/
-    └── integration/
+    └── integration/   # + peering (test_peering.py) and Remote Runtime Control
 ```
 
 `tests/logosctl/` is a deliberate duplicate rather than a parametrisation:
 the two CLIs configure a daemon through different mechanisms (flags versus
 an installed config document), so a shared suite would be mostly branches.
 The nix checks are duplicated the same way — `unit-logosctl` and
-`integration-logosctl-{local,tcp,tcp_ssl}` alongside the originals, in
-their own CI job, so a red logosctl run cannot mask a logoscore
-regression. The conformance matrix is *not* duplicated: it measures the
-LIDL type contract in the shared runtime, which a second CLI would only
-re-measure.
+`integration-logosctl-local` alongside the originals, in their own CI
+job, so a red logosctl run cannot mask a logoscore regression. The
+conformance matrix is *not* duplicated: it measures the LIDL type
+contract in the shared runtime, which a second CLI would only re-measure.
 
 The logosctl suites skip unless `LOGOSCTL_BIN` and
 `LOGOSCTL_TEST_MODULES_DIR` are set (the dev shell and the nix checks set
@@ -488,12 +425,12 @@ explicitly:
 
 ```bash
 ./tests/docker_smoke/build_smoke_image.sh  # FLAVOR=portable (default)
-pytest tests/docker_smoke                   # --docker-flavor={portable|dev|both}
+nix develop --command pytest tests/docker_smoke   # --docker-flavor={portable|dev|both}
 ```
 
 See [`tests/docker_smoke/README.md`](tests/docker_smoke/README.md)
-for the full docker-side story (image flavors, mount layout, port
-strategy).
+for the full docker-side story (image flavors, mount layout, host
+networking).
 
 Inside the [logos-workspace](https://github.com/logos-co/logos-workspace):
 
