@@ -384,6 +384,8 @@ class LogosctlDockerDaemon:
         # The host-side client's pairing, from start() to stop(). Its config
         # dir is the host's own: the container writes /config as root.
         self._runtime_control: RuntimeControl | None = None
+        # Set once a container has written into the bind-mounted dirs.
+        self._wrote_as_root = False
 
     # ── Public properties ───────────────────────────────────────────────
 
@@ -686,6 +688,7 @@ class LogosctlDockerDaemon:
 
         doc_path = self._config_dir / "daemon.yaml"
         doc_path.write_text(_yaml_document(doc))
+        self._wrote_as_root = True
 
         cmd = [
             "docker", "run", "--rm",
@@ -742,10 +745,21 @@ class LogosctlDockerDaemon:
         # Only clean up dirs we created ourselves. Anything the caller
         # passed in (e.g. a pre-seeded persistence dir they want to
         # inspect after the test) stays on disk.
-        if self._owns_config_dir and self._config_dir.exists():
-            shutil.rmtree(self._config_dir, ignore_errors=True)
-        if self._owns_persistence_dir and self._persistence_dir.exists():
-            shutil.rmtree(self._persistence_dir, ignore_errors=True)
+        owned = [d for d, own in ((self._config_dir, self._owns_config_dir),
+                                  (self._persistence_dir, self._owns_persistence_dir))
+                 if own and d.exists()]
+        if owned and self._wrote_as_root:
+            # What the container wrote is root's on a Linux host: empty the
+            # dirs through a container, or they outlive the rmtree.
+            mounts = [a for i, d in enumerate(owned) for a in ("-v", f"{d}:/owned/{i}")]
+            subprocess.run(
+                ["docker", "run", "--rm", *mounts, "--entrypoint", "/bin/sh",
+                 self.image, "-c", "rm -rf /owned/*/* /owned/*/.[!.]*"],
+                capture_output=True, text=True,
+            )
+            self._wrote_as_root = False
+        for d in owned:
+            shutil.rmtree(d, ignore_errors=True)
 
     # ── Client factory ──────────────────────────────────────────────────
 

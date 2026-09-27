@@ -807,6 +807,37 @@ def test_docker_policy_goes_through_the_config_bind_mount(
     assert rec.cmds[0][-4:] == ["peer", "policy", "set", "/config/remote-policy.json"]
 
 
+def test_docker_stop_empties_what_the_container_wrote_through_a_container(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon, tmp_path: Path,
+):
+    rec = _Recorder(monkeypatch, stdout="cid\n")
+    docker_daemon._owns_config_dir = docker_daemon._owns_persistence_dir = True
+    docker_daemon.start()
+    docker_daemon.stop()
+    cleanup = rec.cmds[-1]
+    assert cleanup[:3] == ["docker", "run", "--rm"]
+    assert f"{tmp_path / 'cfg'}:/owned/0" in cleanup
+    assert f"{tmp_path / 'pers'}:/owned/1" in cleanup
+    assert not (tmp_path / "cfg").exists() and not (tmp_path / "pers").exists()
+
+
+def test_docker_stop_leaves_a_callers_dirs_and_an_unstarted_daemon_alone(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon, tmp_path: Path,
+):
+    rec = _Recorder(monkeypatch, stdout="cid\n")
+    docker_daemon.start()   # the fixture's dirs are the caller's
+    docker_daemon.stop()
+    assert not any(c[:3] == ["docker", "run", "--rm"] and "/owned/0" in " ".join(c)
+                   for c in rec.cmds)
+    assert (tmp_path / "cfg").exists()
+
+    mods = tmp_path / "mods2"
+    mods.mkdir()
+    never = LogosctlDockerDaemon(image="img", modules_dir=mods)
+    never.stop()
+    assert rec.cmds[-1][:3] != ["docker", "run", "--rm"]
+
+
 def test_docker_client_before_start_raises(docker_daemon):
     with pytest.raises(LogosctlError):
         docker_daemon.client()
