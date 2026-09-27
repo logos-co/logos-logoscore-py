@@ -31,7 +31,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, IO
+from typing import Any, IO, Mapping
 
 from . import _proc
 from .client import DaemonEndpoint, LogosctlClient
@@ -579,6 +579,20 @@ class LogosctlDaemon:
         return self._endpoints_from_state(
             self._read_state(), transport=transport, host=host,
             codec=codec, verify_peer=verify_peer)
+
+    def peer(self, verb: str, *args: str, timeout: float | None = None) -> Any:
+        """`logosctl peer <verb> [args…]` on this daemon, as its operator."""
+        return self.client().peer(verb, *args, timeout=timeout)
+
+    def set_remote_policy(self, policy: Mapping[str, Any]) -> Any:
+        """Replace this daemon's remote policy (`logosctl peer policy set`):
+        `{"<runtime id>/<consumer>": grants}`. Needs a `peering` section."""
+        path = self._config_dir / "remote-policy.json"
+        path.write_text(json.dumps(policy), encoding="utf-8")
+        reply = self.peer("policy", "set", str(path))
+        if not (isinstance(reply, dict) and reply.get("ok") is True):
+            raise LogosctlError(f"the daemon did not take its remote policy: {reply!r}")
+        return reply
 
     def logs(self) -> tuple[str, str]:
         """Return (stdout, stderr) captured from the daemon so far."""

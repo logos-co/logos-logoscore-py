@@ -219,9 +219,7 @@ class PeeredDaemons:
     def set_policy(self, policy: dict[str, list[str]]) -> None:
         """Replace the exporter's remote policy: {"<runtime id>/<consumer>":
         [target, …]}, "*" for any consumer or target. `{}` refuses every route."""
-        path = self.exporter.config_dir / "remote-policy.json"
-        path.write_text(json.dumps(policy), encoding="utf-8")
-        self.exporter_client().peer("policy", "set", str(path))
+        self.exporter.set_remote_policy(policy)
 
     def served_routes(self) -> list[dict[str, Any]]:
         """The exporter's live routes: [{route, peer, consumer, target, expires_ms}]."""

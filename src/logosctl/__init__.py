@@ -64,6 +64,7 @@ from .errors import (
 )
 from .events import Subscription
 from .peering import PeeredDaemons
+from .remote import RuntimeControl, runtime_control_config
 from .tokens import issue_token, revoke_token, list_tokens
 
 __all__ = [
@@ -71,6 +72,8 @@ __all__ = [
     "LogosctlDockerDaemon",
     "LogosctlClient",
     "PeeredDaemons",
+    "RuntimeControl",
+    "runtime_control_config",
     "DaemonEndpoint",
     "Subscription",
     "LogosctlError",

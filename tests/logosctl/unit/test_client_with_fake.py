@@ -133,6 +133,34 @@ def test_deleted_transport_kwargs_are_rejected(kwarg: str):
         LogosctlClient(**{kwarg: "x"})
 
 
+# ── Remote Runtime Control: every command runs on a paired daemon ─────────
+
+
+def test_remote_goes_before_every_subcommand(rec: Recorder):
+    # `--remote` is app-level, and a trailing one would be lifted out of a
+    # call's arguments like `--json` is.
+    client = LogosctlClient(config_dir=Path("/tmp/rc"), remote="node")
+    for method, args, subcmd in [
+        ("status", (), ["status"]),
+        ("list_modules", (), ["module", "ls"]),
+        ("load_module", ("chat",), ["module", "load", "chat"]),
+        ("call", ("m", "meth", "a"), ["call", "m", "meth", "a"]),
+        ("peer", ("status",), ["peer", "status"]),
+        ("stop", (), ["daemon", "stop"]),
+    ]:
+        rec.respond(stdout=json.dumps({"status": "success", "result": 1}))
+        getattr(client, method)(*args)
+        assert rec.calls[-1]["cmd"] == ["logosctl", "--json", "--remote", "node", *subcmd]
+
+
+def test_a_remote_client_sends_no_token(rec: Recorder):
+    # The daemon knows a paired client by its key, kept in the config dir.
+    rec.respond(stdout="{}")
+    LogosctlClient(config_dir=Path("/tmp/rc"), remote="node").status()
+    env = rec.calls[0]["env"]
+    assert {k for k, v in env.items() if os.environ.get(k) != v} == {"LOGOSCTL_CONFIG_DIR"}
+
+
 def test_list_modules_loaded_flag(rec: Recorder):
     rec.respond(stdout=json.dumps([{"name": "chat"}]))
     client = LogosctlClient()
@@ -426,6 +454,9 @@ def test_watch_argv(rec: Recorder, monkeypatch: pytest.MonkeyPatch):
     ]
     assert spawned["env"]["LOGOSCTL_CONFIG_DIR"] == "/tmp/xcfg"
     assert spawned["env"]["LOGOSCTL_TOKEN"] == "t"
+
+    LogosctlClient(remote="node").on_event("chat", None, lambda _e: None).cancel()
+    assert spawned["cmd"] == ["logosctl", "--json", "--remote", "node", "watch", "chat"]
 
 
 # ── Copilot review findings (PR #18) ────────────────────────────────────────
