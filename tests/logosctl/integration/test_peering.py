@@ -150,6 +150,21 @@ def test_the_exporters_policy_decides(peered, importer):
     assert importer.call(MODULE, "echoString", "granted") == "granted"
 
 
+def test_a_changed_import_rule_restarts_its_facade(peered, importer):
+    """Narrowing who may call an import restarts its facade (in the importer's
+    own process when it is single-process), and the new rule holds at once;
+    widening it again lets the caller back in."""
+    peered.import_module(MODULE, allowed_callers=["someone_else"], wait=False)
+    try:
+        # Past the restart ("not loaded" for a moment), the new facade refuses.
+        _call_until(importer, lambda o: isinstance(o, LogosctlError)
+                    and o.detail_code == "dispatch_failed", "narrowed")
+    finally:
+        peered.import_module(MODULE, wait=False)
+    assert _call_until(importer, lambda o: o == "widened", "widened") == "widened"
+    peered.wait_for_import(MODULE)
+
+
 def test_the_import_survives_an_exporter_restart(peered, importer):
     port = peered.exporter_client().peer("status")["control"]["port"]
     peered.stop_exporter()
