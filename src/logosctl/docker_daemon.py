@@ -379,6 +379,8 @@ class LogosctlDockerDaemon:
             or f"logosctl-{uuid.uuid4().hex[:12]}"
         )
         self._container_id: str | None = None
+        # The image's entrypoint: the logosctl that `docker exec` runs.
+        self._container_binary: str | None = None
         # The host-side client's pairing, from start() to stop(). Its config
         # dir is the host's own: the container writes /config as root.
         self._runtime_control: RuntimeControl | None = None
@@ -521,8 +523,7 @@ class LogosctlDockerDaemon:
     def peer(self, verb: str, *args: str) -> Any:
         """`logosctl peer <verb> [args…]` inside the container, as the
         daemon's local operator; the reply parsed like `LogosctlClient`'s."""
-        # `/proc/1/exe` is the daemon's own binary, whatever the image.
-        cmd = ["docker", "exec", self.container_id, "/proc/1/exe",
+        cmd = ["docker", "exec", self.container_id, self._entrypoint(),
                "--config-dir", CONTAINER_CONFIG_DIR, "--json", "peer", verb, *args]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                            timeout=self.startup_timeout)
@@ -623,8 +624,13 @@ class LogosctlDockerDaemon:
             self._runtime_control = RuntimeControl(self, binary=self.binary)
             self._runtime_control.pair()
             self._runtime_control.grant(self.grants)
-        except Exception:
+        except Exception as e:
             self.stop()
+            if "UNREACHABLE" in str(e):
+                raise LogosctlError(
+                    f"{e}\nThe host reaches the daemon over the network it shares "
+                    "with the container; Docker Desktop needs host networking "
+                    "turned on for that (Settings > Resources > Network).") from e
             raise
         return self
 
@@ -728,6 +734,7 @@ class LogosctlDockerDaemon:
                 capture_output=True, text=True,
             )
             self._container_id = None
+            self._container_binary = None
 
         if self._runtime_control is not None:
             self._runtime_control.close()
@@ -766,6 +773,22 @@ class LogosctlDockerDaemon:
                 return True
             time.sleep(0.1)
         return False
+
+    def _entrypoint(self) -> str:
+        # Not /proc/1/exe: under emulation (an amd64 image on Apple Silicon)
+        # that is the emulator.
+        if self._container_binary is None:
+            r = subprocess.run(
+                ["docker", "container", "inspect", "--format",
+                 "{{json .Config.Entrypoint}}", self.container_id],
+                capture_output=True, text=True,
+            )
+            entrypoint = json.loads(r.stdout) if r.returncode == 0 else None
+            if not entrypoint:
+                raise LogosctlError(
+                    f"the image {self.image!r} has no entrypoint to run logosctl with")
+            self._container_binary = entrypoint[0]
+        return self._container_binary
 
     def _capture_logs(self) -> str:
         if self._container_id is None:

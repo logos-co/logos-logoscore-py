@@ -673,7 +673,7 @@ class _FakeRuntimeControl:
     """Stands in for RuntimeControl in start(): records what it was asked."""
 
     instances: list["_FakeRuntimeControl"] = []
-    fail_pairing = False
+    fail_pairing = ""
 
     def __init__(self, daemon, *, binary):
         self.daemon, self.binary = daemon, binary
@@ -683,7 +683,7 @@ class _FakeRuntimeControl:
     def pair(self):
         self.calls.append(("pair",))
         if _FakeRuntimeControl.fail_pairing:
-            raise LogosctlError("pairing refused")
+            raise LogosctlError(_FakeRuntimeControl.fail_pairing)
 
     def grant(self, grants=None):
         self.calls.append(("grant", grants))
@@ -700,7 +700,7 @@ def docker_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     mods = tmp_path / "mods"
     mods.mkdir()
     _FakeRuntimeControl.instances = []
-    _FakeRuntimeControl.fail_pairing = False
+    _FakeRuntimeControl.fail_pairing = ""
     monkeypatch.setattr("logosctl.docker_daemon.RuntimeControl", _FakeRuntimeControl)
     monkeypatch.setattr(LogosctlDockerDaemon, "_wait_for_conn_file", lambda self: True)
     daemon = LogosctlDockerDaemon(
@@ -744,19 +744,43 @@ def test_docker_start_tears_the_container_down_when_pairing_fails(
     monkeypatch: pytest.MonkeyPatch, docker_daemon,
 ):
     rec = _Recorder(monkeypatch, stdout="cid\n")
-    _FakeRuntimeControl.fail_pairing = True
+    _FakeRuntimeControl.fail_pairing = "pairing refused"
     with pytest.raises(LogosctlError, match="pairing refused"):
         docker_daemon.start()
     assert ["docker", "rm", "-f", "cid"] in rec.cmds
     assert _FakeRuntimeControl.instances[0].calls[-1] == ("close",)
 
 
-def test_docker_peer_runs_inside_the_container(monkeypatch: pytest.MonkeyPatch, docker_daemon):
-    rec = _Recorder(monkeypatch, stdout=json.dumps({"pending": []}))
+def test_docker_an_unreachable_daemon_points_at_host_networking(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon,
+):
+    # What Docker Desktop without host networking looks like from the host.
+    _Recorder(monkeypatch, stdout="cid\n")
+    _FakeRuntimeControl.fail_pairing = "PAIRING_FAILED: UNREACHABLE: Connection refused"
+    with pytest.raises(LogosctlError, match="host networking"):
+        docker_daemon.start()
+
+
+def test_docker_peer_runs_the_images_logosctl_inside_the_container(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon,
+):
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        out = (json.dumps(["/opt/logosctl/bin/logosctl"]) if "inspect" in cmd
+               else json.dumps({"pending": []}))
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
     docker_daemon._container_id = "cid"
     assert docker_daemon.peer("pending") == {"pending": []}
-    assert rec.cmds[0] == ["docker", "exec", "cid", "/proc/1/exe", "--config-dir",
-                           "/config", "--json", "peer", "pending"]
+    # The entrypoint, not /proc/1/exe: under emulation that is the emulator.
+    assert calls[0][:3] == ["docker", "container", "inspect"]
+    assert calls[1] == ["docker", "exec", "cid", "/opt/logosctl/bin/logosctl",
+                        "--config-dir", "/config", "--json", "peer", "pending"]
+    docker_daemon.peer("pending")
+    assert len(calls) == 3  # looked up once
 
 
 def test_docker_peer_failure_carries_the_envelope_code(
@@ -765,6 +789,7 @@ def test_docker_peer_failure_carries_the_envelope_code(
     _Recorder(monkeypatch, returncode=3, stdout=json.dumps(
         {"status": "error", "code": "PEERING_REFUSED", "message": "no"}))
     docker_daemon._container_id = "cid"
+    docker_daemon._container_binary = "/opt/logosctl/bin/logosctl"
     with pytest.raises(ModuleError) as excinfo:
         docker_daemon.peer("accept", "x")
     assert excinfo.value.code == "PEERING_REFUSED"
@@ -775,6 +800,7 @@ def test_docker_policy_goes_through_the_config_bind_mount(
 ):
     rec = _Recorder(monkeypatch, stdout=json.dumps({"ok": True}))
     docker_daemon._container_id = "cid"
+    docker_daemon._container_binary = "/opt/logosctl/bin/logosctl"
     docker_daemon.set_remote_policy({"k/logosctl": ["*"]})
     host_file = docker_daemon.config_dir / "remote-policy.json"
     assert json.loads(host_file.read_text()) == {"k/logosctl": ["*"]}
