@@ -10,7 +10,6 @@ binary or docker.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -256,117 +255,9 @@ def test_connect_explicit_config_dir_is_not_owned(
     assert (tmp_path / "client" / "config.json").exists()
 
 
-# ── LogoscoreDockerDaemon.client(): per-module ports, no env override ─────────
-#
-# The capability_module rides its OWN forwarded host port. A single
-# LOGOSCORE_CLIENT_TCP_PORT env override is applied to every module
-# uniformly by the CLI, so it would collapse capability_module onto
-# core_service's port. These tests pin that client() is config-file-driven
-# (distinct per-module ports, no transport env overrides).
-
-
-def test_docker_client_keeps_distinct_capability_port_and_no_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    from logoscore import LogoscoreDockerDaemon
-
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    rec = _Recorder(monkeypatch)
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
-    try:
-        # Fake a started container with distinct forwarded ports.
-        d._container_id = "fake"
-        d._host_port = 7000
-        d._host_cap_port = 7001
-        client = d.client()
-
-        cfg = json.loads(
-            (d._host_client_dir / "client" / "config.json").read_text())
-        assert cfg["daemon"]["core_service"]["port"] == 7000
-        # The whole point: capability_module keeps 7001, NOT clobbered to 7000.
-        assert cfg["daemon"]["capability_module"]["port"] == 7001
-
-        client.status()
-        env = rec.calls[0]["env"]
-        for var in (
-            "LOGOSCORE_CLIENT_TRANSPORT",
-            "LOGOSCORE_CLIENT_TCP_HOST",
-            "LOGOSCORE_CLIENT_TCP_PORT",
-            "LOGOSCORE_CLIENT_CODEC",
-            "LOGOSCORE_CLIENT_NO_VERIFY_PEER",
-        ):
-            assert var not in env, f"docker client() leaked {var}"
-        assert env["LOGOSCORE_CONFIG_DIR"] == str(d._host_client_dir)
-    finally:
-        d._container_id = None
-        d.stop()
-
-
-def test_docker_client_tcp_host_baked_into_both_modules(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    from logoscore import LogoscoreDockerDaemon
-
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    _Recorder(monkeypatch)
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
-    try:
-        d._container_id = "fake"
-        d._host_port = 7000
-        d._host_cap_port = 7001
-        d.client(tcp_host="remote.example.com")
-        daemon = json.loads(
-            (d._host_client_dir / "client" / "config.json").read_text())["daemon"]
-        assert daemon["core_service"]["host"] == "remote.example.com"
-        assert daemon["capability_module"]["host"] == "remote.example.com"
-    finally:
-        d._container_id = None
-        d.stop()
-
-
-def test_docker_client_tcp_ssl_verify_peer_mapping(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    from logoscore import LogoscoreDockerDaemon
-
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    cert = tmp_path / "c.pem"
-    cert.write_text("x")
-    key = tmp_path / "k.pem"
-    key.write_text("y")
-    _Recorder(monkeypatch)
-    d = LogoscoreDockerDaemon(
-        image="img", modules_dir=mods, transport="tcp_ssl",
-        ssl_cert=cert, ssl_key=key, verify_peer=True)
-    try:
-        d._container_id = "fake"
-        d._host_port = 7000
-        d._host_cap_port = 7001
-
-        # Default no_verify_peer=None → skip verification on disk.
-        d.client()
-        cfg = json.loads(
-            (d._host_client_dir / "client" / "config.json").read_text())
-        assert cfg["daemon"]["core_service"]["verify_peer"] is False
-
-        # no_verify_peer=False → honour the constructor's verify_peer (True).
-        d.client(no_verify_peer=False)
-        daemon = json.loads(
-            (d._host_client_dir / "client" / "config.json").read_text())["daemon"]
-        assert daemon["core_service"]["verify_peer"] is True
-        assert daemon["capability_module"]["verify_peer"] is True
-    finally:
-        d._container_id = None
-        d.stop()
-
-
 # ── LogoscoreDaemon.client(): config-driven, no port clobber ─────────────────
 #
-# Same lock-down as the docker daemon, applied to the local daemon: dial
-# overrides are merged into the per-module client/config.json in place
+# Dial overrides are merged into the per-module client/config.json in place
 # (preserving each module's own port + unmodeled fields) and the client
 # carries NO LOGOSCORE_CLIENT_* env overrides.
 
@@ -541,78 +432,3 @@ def test_write_config_token_file_traversal_falls_back(tmp_path: Path, bad: str):
     # Unsafe token_file is rejected → falls back to auto.json.
     assert cfg["token_file"] == "auto.json"
     assert json.loads((client_dir / "auto.json").read_text()) == {"token": "tok"}
-
-
-# ── docker daemon: fail-fast guards ──────────────────────────────────────────
-
-
-def test_client_endpoints_raises_before_start(tmp_path: Path):
-    from logoscore import LogoscoreDockerDaemon, LogoscoreError
-
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
-    # Ports are assigned in start(); building endpoints before that must
-    # fail loudly rather than emit a portless config.
-    with pytest.raises(LogoscoreError):
-        d._client_endpoints("localhost", "json", None)
-
-
-def test_build_host_client_config_raises_when_token_issue_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    from logoscore import LogoscoreDockerDaemon, LogoscoreError
-
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods, startup_timeout=0.1)
-    try:
-        d._container_id = "fake"
-        d._host_port = 7000
-        d._host_cap_port = 7001
-        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
-                            subprocess.CompletedProcess(cmd, 1, "", "issue failed"))
-        with pytest.raises(LogoscoreError, match="could not issue docker network token"):
-            d._build_host_client_config()
-    finally:
-        d._container_id = None
-        # _host_client_dir is a real tmpdir; clean it up.
-        shutil.rmtree(d._host_client_dir, ignore_errors=True)
-        shutil.rmtree(d._config_dir, ignore_errors=True)
-        shutil.rmtree(d._persistence_dir, ignore_errors=True)
-
-
-def test_docker_issues_network_token_and_revokes_on_stop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    from logoscore import LogoscoreDockerDaemon
-
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    d = LogoscoreDockerDaemon(image="img", modules_dir=mods)
-    d._container_id = "fake"
-    d._host_port = 7000
-    d._host_cap_port = 7001
-    calls: list[list[str]] = []
-
-    def run(cmd, **kwargs):
-        calls.append(cmd)
-        output = json.dumps({"token": "network"}) if "issue-token" in cmd else "{}"
-        return subprocess.CompletedProcess(cmd, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    try:
-        d._build_host_client_config()
-        assert json.loads((d._host_client_dir / "client" / "auto.json").read_text()) == {
-            "token": "network"}
-        assert calls[0][:5] == ["docker", "exec", "fake", "/proc/1/exe",
-                                "--config-dir"]
-        assert "issue-token" in calls[0]
-        issued_name = calls[0][calls[0].index("--name") + 1]
-        d.stop()
-        assert any("revoke-token" in c and issued_name in c for c in calls)
-    finally:
-        d._container_id = None
-        shutil.rmtree(d._host_client_dir, ignore_errors=True)
-        shutil.rmtree(d._config_dir, ignore_errors=True)
-        shutil.rmtree(d._persistence_dir, ignore_errors=True)

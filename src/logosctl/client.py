@@ -174,8 +174,8 @@ class LogosctlClient:
         reach a daemon whose modules live on distinct listeners.
 
         This is the single source of truth for the on-disk client config —
-        `LogosctlDaemon`, `LogosctlDockerDaemon`, and standalone callers
-        (see `connect`) all funnel through here.
+        `LogosctlDaemon` and standalone callers (see `connect`) funnel
+        through here.
 
         The document is emitted as JSON text into a `.yaml` file. YAML is
         a superset of JSON, so the CLI's yaml-cpp parser reads it back

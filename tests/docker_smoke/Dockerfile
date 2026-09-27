@@ -1,24 +1,26 @@
 # syntax=docker/dockerfile:1.6
 #
-# Reusable logoscore daemon image. Contains only the CLI (and the modules
-# it ships with — capability_module, package_manager_module); user modules
-# are expected to be bind-mounted in at runtime:
+# Reusable logosctl daemon image. Contains only the CLI and the modules it
+# ships with (capability_module, modules_state, the peering modules, and
+# the package modules); user modules are expected to be bind-mounted in at
+# runtime. The daemon's config is a document installed into the session
+# before it starts, and the host operates it over Remote Runtime Control:
 #
-#   docker run --rm -p 6000:6000 \
-#       -v "$PWD/config":/config \
+#   docker run --rm -v "$PWD/config":/config -e LOGOSCTL_CONFIG_DIR=/config \
+#       logosctl:smoke-portable daemon config set /config/daemon.yaml
+#   docker run --network host \
+#       -v "$PWD/config":/config -e LOGOSCTL_CONFIG_DIR=/config \
 #       -v "$PWD/persistence":/persistence \
 #       -v /path/to/your/modules:/user-modules:ro \
-#       logoscore:smoke-portable \
-#       daemon --config-dir /config \
-#              --persistence-path /persistence \
-#              --transport tcp --tcp-host 0.0.0.0 --tcp-port 6000 \
-#              -m /opt/logoscore/modules \
-#              -m /user-modules
+#       logosctl:smoke-portable daemon start
 #
-# That's the exact shape the pytest smoke suite uses and what
-# logoscore-py consumers (who want to test their own Qt-plugin modules
-# against a real daemon) should replicate. Pre-seed `/persistence` on
-# the host to restore a session; read it back after to inspect state.
+# with a daemon.yaml naming /user-modules and /persistence and a `peering`
+# section with `runtime_control: true`. That is the shape
+# `LogosctlDockerDaemon` (src/logosctl/docker_daemon.py) runs, pairing a
+# host-side logosctl with it; consumers who want to test their own
+# Qt-plugin modules against a real daemon should use it. Pre-seed
+# `/persistence` on the host to restore a session; read it back after to
+# inspect state.
 #
 # Builds entirely inside a Linux container — no cross-compilation from
 # the host. Docker Desktop on macOS runs this via the host-native Linux
@@ -26,15 +28,18 @@
 # Same pattern as status-go's tests-functional image.
 #
 # Usage (from this repo's root):
-#   docker build -f tests/docker_smoke/Dockerfile -t logoscore:smoke .
+#   docker build -f tests/docker_smoke/Dockerfile -t logosctl:smoke-portable .
 #
-#   # Build the "portable" flavor (cli-bundle-dir):
-#   docker build --build-arg FLAVOR=portable \
-#       -f tests/docker_smoke/Dockerfile -t logoscore:smoke-portable .
+#   # Build the "dev" flavor (the nix-store-linked ctl package):
+#   docker build --build-arg FLAVOR=dev \
+#       -f tests/docker_smoke/Dockerfile -t logosctl:smoke-dev .
 #
 # FLAVOR selects the flake's bundle output:
-#   - dev       (default) → .#dockerBundle          — uses .#cli
-#   - portable            → .#dockerBundlePortable  — uses .#cli-bundle-dir
+#   - portable (default) → .#dockerBundlePortable  — logosctl's ctl-bundle-dir
+#   - dev                → .#dockerBundle          — logosctl's ctl package
+#
+# NIX_CONFIG adds nix.conf lines to the build stage, e.g. `cores = 8` on a
+# shared machine (build_smoke_image.sh passes $SMOKE_NIX_CONFIG).
 #
 # The image uses whatever logos-logoscore-cli revision this repo's
 # flake.lock / flake.nix points at. To iterate on unpublished CLI
@@ -43,6 +48,8 @@
 FROM nixos/nix:2.24.9 AS build
 
 ARG FLAVOR=portable
+# Nix reads it from the environment, which build args are in during RUN.
+ARG NIX_CONFIG=""
 
 # Enable flakes. Disable the sandbox + seccomp filter: Docker Desktop's
 # Rosetta layer (on Apple Silicon's linux/amd64 fallback) blocks the
@@ -79,7 +86,7 @@ RUN case "$FLAVOR" in \
 # alpine) because it ships a fully normal glibc runtime:
 #   * `/lib/ld-linux-<arch>.so.1` exists at the canonical path, so the
 #     portable bundle's ELF PT_INTERP resolves natively (the
-#     `cli-bundle-dir` binary isn't patched to use a custom interpreter).
+#     `ctl-bundle-dir` binary isn't patched to use a custom interpreter).
 #   * `libstdc++.so.6`, `libgcc_s.so.1`, `libssl.so.3`, `libcrypto.so.3`
 #     etc. are all in standard locations, matching what the binary's
 #     `$ORIGIN/../lib` rpath plus the dynamic linker's default search
@@ -100,10 +107,9 @@ RUN case "$FLAVOR" in \
 FROM ubuntu:24.04
 ARG FLAVOR=portable
 
-# `ca-certificates` lets the TLS transport verify server certs against
-# the system CA bundle when `--no-verify-peer` isn't in play. Every
-# other runtime dep (glibc, libstdc++, libssl, libcrypto) ships with
-# ubuntu:24.04 out of the box.
+# `ca-certificates` lets the package downloader verify the catalog's
+# https server. Every other runtime dep (glibc, libstdc++, libssl,
+# libcrypto) ships with ubuntu:24.04 out of the box.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -115,17 +121,11 @@ RUN apt-get update && \
 # copying it unconditionally keeps the Dockerfile linear and the layer
 # is a no-op for callers who already have the image built.
 COPY --from=build /nix/store                 /nix/store
-COPY --from=build /out/bundle                /opt/logoscore
+COPY --from=build /out/bundle                /opt/logosctl
 
-# Both flavors put the binary at the same path, so the entrypoint can
-# point straight at it.
-EXPOSE 6000
-ENTRYPOINT ["/opt/logoscore/bin/logoscore"]
-# Default CMD = a bare daemon scanning only the CLI's built-in modules.
-# In practice callers almost always override CMD to add their own `-m
-# /user-modules` (or equivalent) — see the usage block at the top.
-CMD ["daemon", \
-     "--transport", "tcp", \
-     "--tcp-host",  "0.0.0.0", \
-     "--tcp-port",  "6000", \
-     "-m",          "/opt/logoscore/modules"]
+# Both flavors put the binary at the same path, with the built-in modules
+# beside it (the daemon finds <bin>/../modules on its own).
+ENTRYPOINT ["/opt/logosctl/bin/logosctl"]
+# Default CMD = a daemon on whatever config its session holds; see the
+# usage block at the top for installing one first.
+CMD ["daemon", "start"]

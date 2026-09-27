@@ -1,34 +1,35 @@
-"""Shared hook + fixtures for all docker-smoke test files.
+"""Shared hook + fixtures for the docker smoke tests.
 
 The `docker_flavor` fixture is injected via `pytest_generate_tests` so
 every test that asks for it gets parametrised once per flavor the user
 requested (`--docker-flavor=dev|portable|both`, defaults to `portable`
 — see tests/conftest.py for the option definition).
 
-The `linux_test_modules_dir` fixture builds the test modules inside
-docker once per pytest session and is shared by every test that needs
-to mount user modules into a daemon container. Without this each
-test file would either rebuild from scratch or rely on a
-host-architecture nix-store path the docker daemon can't always mount.
+The `linux_test_modules_dir` fixture provides the test modules mounted into
+every daemon container: `LOGOSCTL_DOCKER_MODULES_DIR` when set (the Linux
+dev shell sets it to this flake's `test_fullapi_cpp.install-portable`),
+otherwise built inside docker once per session, so the `.so` files are
+ABI-matched to the daemon's Linux runtime whatever the host OS.
 
-Lives in `conftest.py` rather than inside any one test file so that
-running any subset (e.g. `pytest tests/docker_smoke/test_docker_ssl_smoke.py`)
-still gets both the hook and the shared fixture.
+The host-side client is `logosctl_bin`: LOGOSCTL_BIN, or `logosctl` on
+PATH.
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
+import shutil
 from pathlib import Path
 
 import pytest
 
-from logoscore import build_modules_in_docker, docker_available
+from logosctl import build_modules_in_docker, docker_available
 
 
 def _flavors_to_run(config) -> list[str]:
     """Turn `--docker-flavor` into the list of flavors to parametrise on.
-    `dev` | `portable` run the matrix once; `both` replays it twice."""
+    `dev` | `portable` run the suite once; `both` replays it twice."""
     choice = config.getoption("--docker-flavor")
     if choice == "both":
         return ["portable", "dev"]
@@ -49,44 +50,42 @@ def pytest_generate_tests(metafunc):
 
 
 @pytest.fixture(scope="session")
+def logosctl_bin() -> str:
+    binary = os.environ.get("LOGOSCTL_BIN") or shutil.which("logosctl")
+    if not binary:
+        pytest.skip("LOGOSCTL_BIN not set and `logosctl` not on PATH")
+    return binary
+
+
+def _locked_test_modules_flake() -> str:
+    """logos-test-modules at the revision this repo's flake.lock pins."""
+    lock = json.loads((Path(__file__).resolve().parents[2] / "flake.lock").read_text())
+    locked = lock["nodes"]["logos-test-modules"]["locked"]
+    return f"github:{locked['owner']}/{locked['repo']}/{locked['rev']}"
+
+
+@pytest.fixture(scope="session")
 def linux_test_modules_dir(tmp_path_factory) -> Path:
-    """Build the test modules inside docker, once per pytest session,
-    shared by every smoke test that needs to mount user modules.
+    """`test_fullapi_cpp` as a Linux `.install-portable` modules dir, which
+    loads in both image flavors. Session scope: a docker build takes a
+    noticeable fraction of a minute even with a warm nix store.
 
-    Builds `test_fullapi_cpp` — the universal-C++ provider whose methods
-    and typed events span the full parameter/return/event surface, so the
-    same module backs the method matrix (over both codecs), the event
-    matrix, the two-daemon isolation checks, and the tcp_ssl smoke.
-
-    Why session scope: building takes a noticeable fraction of a
-    minute even with a warm nix store; module-scoping per file would
-    rebuild for each `test_docker_*` file. This fixture is independent
-    of `docker_flavor` because the `.install-portable` output works in
-    both the `portable` and `dev` images (portable's binary doesn't
-    need /nix/store; dev's image happens to have it but doesn't need
-    portable bundles' embedded libs).
-
-    Override the source flake via `LOGOSCORE_TEST_MODULES_FLAKE` if
-    you've forked test-modules locally.
+    Override the source flake via `LOGOSCTL_TEST_MODULES_FLAKE` if you've
+    forked test-modules.
     """
+    prebuilt = os.environ.get("LOGOSCTL_DOCKER_MODULES_DIR")
+    if prebuilt:
+        return Path(prebuilt)
     if not docker_available():
         pytest.skip("docker not available")
 
     machine = platform.machine().lower()
     system = "aarch64-linux" if machine in ("arm64", "aarch64") else "x86_64-linux"
 
-    flake_ref = os.environ.get(
-        "LOGOSCORE_TEST_MODULES_FLAKE",
-        "github:logos-co/logos-test-modules",
-    )
+    flake_ref = os.environ.get("LOGOSCTL_TEST_MODULES_FLAKE") or _locked_test_modules_flake()
     out = tmp_path_factory.mktemp("docker-test-modules")
     build_modules_in_docker(
-        builds=[
-            (flake_ref, f"modules.{system}.test_fullapi_cpp.install-portable"),
-            # Add more (flake, attr) pairs here when the suite grows —
-            # they all share the one container/nix-store invocation, so
-            # the marginal cost of an extra module is just its compile.
-        ],
+        builds=[(flake_ref, f"modules.{system}.test_fullapi_cpp.install-portable")],
         output_dir=out,
     )
     return out

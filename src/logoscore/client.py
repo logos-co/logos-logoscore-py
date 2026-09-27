@@ -158,8 +158,8 @@ class LogoscoreClient:
         reach a daemon whose modules live on distinct listeners.
 
         This is the single source of truth for the on-disk client config —
-        `LogoscoreDaemon`, `LogoscoreDockerDaemon`, and standalone callers
-        (see `connect`) all funnel through here.
+        `LogoscoreDaemon` and standalone callers (see `connect`) funnel
+        through here.
 
         `token`, when given, is the RAW token string; it's wrapped as
         `{"token": token}` and written to the file named by `token_file`

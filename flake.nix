@@ -37,8 +37,8 @@
       # `nix build` produces a Python wheel. The `logoscore` CLI is propagated
       # so anyone using this package also has the binary on PATH.
       #
-      # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
-      # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
+      # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare the
+      # logosctl `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
       # — the smoke image's stage-1 nix-build copies it into the
       # ubuntu-based runtime stage. The actual docker image is built
       # via `tests/docker_smoke/build_smoke_image.sh`, not directly
@@ -64,55 +64,46 @@
           };
 
           # ── Docker bundles ─────────────────────────────────────────────
-          # The bundle is **just the logoscore CLI** plus whatever modules
-          # it ships with (currently capability_module, package_manager_module).
-          # No test modules — those get bind-mounted at runtime via
-          # `-v $modules_dir:/user-modules` and `-m /user-modules`. That
-          # makes the image reusable for anyone who wants to test their
-          # own module: pull the image, `docker run -v ./my-modules:/user-modules
-          # logoscore:smoke-dev daemon -m /user-modules …`.
+          # The bundle is **just the logosctl CLI** plus the modules it
+          # ships with (capability_module, modules_state, the peering
+          # modules, and the package modules). No test modules — those get
+          # bind-mounted at runtime (`-v $modules_dir:/user-modules`, named
+          # in the daemon config's `modules_dirs`). That makes the image
+          # reusable for anyone who wants to test their own module against
+          # a daemon they operate over Remote Runtime Control.
           #
           # Two flavors:
           #
-          #   * `dockerBundle` (dev) — uses `.#cli` (the default logoscore
-          #     package, which links against Qt/Boost/OpenSSL from the nix
-          #     store via rpath). Smaller bundle (~60 MB payload) but the
-          #     runtime image MUST ship the nix store so those rpaths
-          #     resolve, and the CLI's built-in modules are found via
-          #     LOGOS_BUNDLED_MODULES_DIR (set by `wrapQtAppsNoGuiHook`
-          #     when the CLI was built). This is the flavor the
-          #     `logoscore-py` dev shell matches.
+          #   * `dockerBundle` (dev) — the `ctl` package: logosctl, its
+          #     runtime and module hosts, linked against Qt/Boost/OpenSSL
+          #     in the nix store via rpath, so the runtime image MUST ship
+          #     the nix store. Its modules/ sits beside bin/, where the
+          #     daemon finds it.
           #
-          #   * `dockerBundlePortable` — uses `.#cli-bundle-dir` (a
-          #     self-contained `bin/ + lib/ + modules/` tree with every
-          #     Qt dep + the CLI's built-in modules copied in). Larger
-          #     (~400 MB) but runs standalone — no nix store needed. The
-          #     CLI's built-in modules live at `/opt/logoscore/modules`
-          #     and are discovered by explicitly passing `-m
-          #     /opt/logoscore/modules` (no wrapper env var here).
+          #   * `dockerBundlePortable` — `ctl-bundle-dir`, a self-contained
+          #     `bin/ + lib/ + modules/` tree with every Qt dep copied in.
+          #     Larger but runs standalone — no nix store needed.
           #
           # The Dockerfile picks one via `--build-arg FLAVOR=dev|portable`.
           # The pytest suite parametrises over both flavors so regressions
           # in either path surface in the smoke matrix.
 
-          logoscorePortable = logos-logoscore-cli.packages.${system}.cli-bundle-dir;
+          logosctlBin = logos-logoscore-cli.packages.${system}.ctl;
+          logosctlPortable = logos-logoscore-cli.packages.${system}.ctl-bundle-dir;
 
-          dockerBundle = pkgs.runCommand "logoscore-bundle-dev" { } ''
-            # Dev flavor: just the binary. rpath points into /nix/store
-            # (copied wholesale in Dockerfile stage 2), and the
-            # wrapped binary carries `LOGOS_BUNDLED_MODULES_DIR` baked
-            # in — pointing at the CLI's own modules dir in the store —
-            # so capability_module etc. resolve without extra `-m` flags.
-            mkdir -p $out/bin
-            cp ${logoscoreBin}/bin/logoscore $out/bin/
+          dockerBundle = pkgs.runCommand "logosctl-bundle-dev" { } ''
+            # Dev flavor: the ctl tree, dereferenced. Its rpaths point into
+            # /nix/store (copied wholesale in Dockerfile stage 2).
+            mkdir -p $out
+            cp -rL ${logosctlBin}/. $out/
+            chmod -R u+w $out
           '';
 
-          dockerBundlePortable = pkgs.runCommand "logoscore-bundle-portable" { } ''
-            # Portable flavor: cli-bundle-dir is already a self-contained
-            # bin/ + lib/ + modules/ tree — the CLI's own built-in
-            # modules live under its modules/ subdir. Copy it as-is.
+          dockerBundlePortable = pkgs.runCommand "logosctl-bundle-portable" { } ''
+            # Portable flavor: ctl-bundle-dir is already a self-contained
+            # bin/ + lib/ + modules/ tree. Copy it as-is.
             mkdir -p $out
-            cp -r ${logoscorePortable}/* $out/
+            cp -r ${logosctlPortable}/* $out/
             chmod -R u+w $out
           '';
         in {
@@ -150,12 +141,13 @@
           # parameter/return/event surface. `.install` lays out
           # modules/<name>/… ready for the daemon's `-m` flag.
           testModulesInstall         = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
+          # Self-contained, so it loads in either docker smoke image.
           testModulesInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
           # Its plain build, the one a daemon can export (test_peering.py).
           testModulesPlainInstall =
             logos-test-modules.modules.${system}.test_fullapi_cpp_qt_remote_plain.install;
         in {
-        default = pkgs.mkShell {
+        default = pkgs.mkShell ({
           packages = [
             (pkgs.python3.withPackages (ps: [ ps.pytest ]))
             logoscoreBin
@@ -166,15 +158,8 @@
           # `pytest` on a plain Python env doesn't try to spawn daemons).
           # Exporting them here means the dev shell exercises the full
           # suite out of the box.
-          #
-          # Two module-dir vars because the docker smoke flavors differ:
-          # the `dev` image has /nix/store so `.install` modules (which
-          # rpath into the store) work; the `portable` image is standalone
-          # so we need `.install-portable` (self-contained). The docker
-          # smoke fixture picks the right one per flavor.
           LOGOSCORE_BIN                       = "${logoscoreBin}/bin/logoscore";
           LOGOSCORE_TEST_MODULES_DIR          = "${testModulesInstall}/modules";
-          LOGOSCORE_TEST_MODULES_DIR_PORTABLE = "${testModulesInstallPortable}/modules";
 
           # The logosctl suite reads its own pair of variables (its conftest
           # rebinds `test_modules_dir` to LOGOSCTL_TEST_MODULES_DIR) so a
@@ -190,14 +175,19 @@
             echo "  logoscore:                               $(logoscore --version 2>/dev/null || echo 'not on PATH')"
             echo "  logosctl:                                $(logosctl --version 2>/dev/null || echo 'not on PATH')"
             echo "  LOGOSCORE_BIN:                           $LOGOSCORE_BIN"
-            echo "  LOGOSCORE_TEST_MODULES_DIR (dev):        $LOGOSCORE_TEST_MODULES_DIR"
-            echo "  LOGOSCORE_TEST_MODULES_DIR_PORTABLE:     $LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
+            echo "  LOGOSCORE_TEST_MODULES_DIR:              $LOGOSCORE_TEST_MODULES_DIR"
             echo "  LOGOSCTL_BIN:                            $LOGOSCTL_BIN"
             echo "  LOGOSCTL_TEST_MODULES_DIR:               $LOGOSCTL_TEST_MODULES_DIR"
             echo "  LOGOSCTL_PLAIN_MODULES_DIR:              $LOGOSCTL_PLAIN_MODULES_DIR"
+            echo "  LOGOSCTL_DOCKER_MODULES_DIR:             ''${LOGOSCTL_DOCKER_MODULES_DIR:-(built in docker)}"
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
           '';
-        };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # The docker smoke mounts these into its daemons; elsewhere a host
+          # build would not load in the Linux container, so it builds them
+          # in docker.
+          LOGOSCTL_DOCKER_MODULES_DIR         = "${testModulesInstallPortable}/modules";
+        });
       });
 
       # ── Checks ────────────────────────────────────────────────────────────

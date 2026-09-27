@@ -6,8 +6,8 @@
 # Why: the test_modules from the workspace nix flake are built for the host
 # (e.g. aarch64-darwin → .dylib on macOS). The Linux container can't load
 # `.dylib`s, so the daemon scans /user-modules, finds nothing it can use,
-# and fails any load-module call. Same problem applies to anyone authoring
-# their own module who wants to drive logoscore from a different host OS
+# and fails any module load. Same problem applies to anyone authoring
+# their own module who wants to drive logosctl from a different host OS
 # than the daemon runs on.
 #
 # This script runs `nix build` inside the same nixos/nix base the smoke
@@ -22,16 +22,16 @@
 # Examples:
 #   # Single module:
 #   ./build_modules_in_docker.sh ./out/modules \
-#       'github:logos-co/logos-test-modules#modules.x86_64-linux.test_basic_module.install-portable'
+#       'github:logos-co/logos-test-modules#modules.x86_64-linux.test_fullapi_cpp.install-portable'
 #
 #   # Several modules in one shot — second build reuses first build's
 #   # downloaded SDK/Qt/boost/openssl closure:
 #   ./build_modules_in_docker.sh ./out/modules \
-#       'github:logos-co/logos-test-modules#modules.x86_64-linux.test_basic_module.install-portable' \
+#       'github:logos-co/logos-test-modules#modules.x86_64-linux.test_fullapi_cpp.install-portable' \
 #       'github:user/my-module#packages.x86_64-linux.install-portable'
 #
 # Each <attr> must point at a derivation whose output contains a `modules/`
-# subdirectory in the layout the daemon's `-m` flag expects
+# subdirectory in the layout the daemon's `modules_dirs` expect
 # (`modules/<name>/<name>_plugin.so` + `manifest.json`). The standard
 # logos-module-builder `.install-portable` output produces exactly this.
 
@@ -63,7 +63,7 @@ done
 # Pin to the same nixos/nix the smoke image's builder stage uses, so the
 # build closure (glibc, Qt, openssl, boost) lines up with what the daemon
 # was compiled against. If you bump this here, bump it in Dockerfile too.
-BUILDER_IMAGE="${LOGOSCORE_BUILDER_IMAGE:-nixos/nix:2.24.9}"
+BUILDER_IMAGE="${LOGOSCTL_BUILDER_IMAGE:-nixos/nix:2.24.9}"
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR_ABS="$(cd "$OUTPUT_DIR" && pwd)"
@@ -108,7 +108,7 @@ docker run --rm \
             # explicit perms (644), bypassing tar/cp `--preserve` logic
             # that would otherwise inherit the read-only nix-store perms
             # on the source. Docker Desktop bind mounts on macOS reject
-            # `chmod` from inside the container, so we can't un-readonly
+            # `chmod` from inside the container, so we cannot un-readonly
             # after the fact — the perms have to be right at write time.
             cd "/tmp/result-$i/modules"
             find . -type d | while read -r d; do mkdir -p "/out/$d"; done

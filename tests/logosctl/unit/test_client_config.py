@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -32,7 +31,9 @@ from logosctl import (
     LogosctlDaemon,
     LogosctlDockerDaemon,
     LogosctlError,
+    runtime_control_config,
 )
+from logosctl.errors import ModuleError
 
 
 def _dumped(obj: dict) -> str:
@@ -983,161 +984,121 @@ def test_remote_client_without_a_token_fails_loudly(tmp_path: Path):
         daemon.remote_client()
 
 
-# ── LogosctlDockerDaemon.client(): per-module forwarded ports ────────────────
-#
-# The capability_module rides its OWN forwarded host port. There is no
-# uniform port override that could express that (and logoscore's single
-# LOGOSCORE_CLIENT_TCP_PORT would have collapsed the two onto one), so
-# these pin that client() is config-file-driven end to end.
+# ── LogosctlDockerDaemon: operated over Remote Runtime Control ───────────────
 
 
-def test_docker_client_keeps_distinct_capability_port(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
+class _FakeRuntimeControl:
+    """Stands in for RuntimeControl in start(): records what it was asked."""
+
+    instances: list["_FakeRuntimeControl"] = []
+    fail_pairing = False
+
+    def __init__(self, daemon, *, binary):
+        self.daemon, self.binary = daemon, binary
+        self.calls: list[tuple] = []
+        _FakeRuntimeControl.instances.append(self)
+
+    def pair(self):
+        self.calls.append(("pair",))
+        if _FakeRuntimeControl.fail_pairing:
+            raise LogosctlError("pairing refused")
+
+    def grant(self, grants=None):
+        self.calls.append(("grant", grants))
+
+    def client(self, *, timeout=30.0):
+        return LogosctlClient(self.binary, remote="the-daemon", timeout=timeout)
+
+    def close(self):
+        self.calls.append(("close",))
+
+
+@pytest.fixture
+def docker_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     mods = tmp_path / "mods"
     mods.mkdir()
-    rec = _Recorder(monkeypatch)
-    daemon = LogosctlDockerDaemon(image="img", modules_dir=mods)
-    try:
-        # Fake a started container with distinct forwarded ports.
-        daemon._container_id = "fake"
-        daemon._host_port = 7000
-        daemon._host_cap_port = 7001
-        client = daemon.client()
-
-        cfg = _client_cfg(daemon._host_client_dir)
-        assert cfg["daemon"]["core_service"]["port"] == 7000
-        # The whole point: capability_module keeps 7001, NOT clobbered.
-        assert cfg["daemon"]["capability_module"]["port"] == 7001
-
-        client.status()
-        assert rec.calls[0]["env"]["LOGOSCTL_CONFIG_DIR"] == str(
-            daemon._host_client_dir)
-    finally:
-        daemon._container_id = None
-        daemon.stop()
-
-
-def test_docker_client_tcp_host_baked_into_both_modules(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    _Recorder(monkeypatch)
-    daemon = LogosctlDockerDaemon(image="img", modules_dir=mods)
-    try:
-        daemon._container_id = "fake"
-        daemon._host_port = 7000
-        daemon._host_cap_port = 7001
-        daemon.client(tcp_host="remote.example.com")
-        block = _client_cfg(daemon._host_client_dir)["daemon"]
-        assert block["core_service"]["host"] == "remote.example.com"
-        assert block["capability_module"]["host"] == "remote.example.com"
-    finally:
-        daemon._container_id = None
-        daemon.stop()
-
-
-def test_docker_client_tcp_ssl_verify_peer_mapping(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    cert = tmp_path / "c.pem"
-    cert.write_text("x")
-    key = tmp_path / "k.pem"
-    key.write_text("y")
-    _Recorder(monkeypatch)
+    _FakeRuntimeControl.instances = []
+    _FakeRuntimeControl.fail_pairing = False
+    monkeypatch.setattr("logosctl.docker_daemon.RuntimeControl", _FakeRuntimeControl)
+    monkeypatch.setattr(LogosctlDockerDaemon, "_wait_for_conn_file", lambda self: True)
     daemon = LogosctlDockerDaemon(
-        image="img", modules_dir=mods, transport="tcp_ssl",
-        ssl_cert=cert, ssl_key=key, ssl_ca=cert, verify_peer=True)
-    try:
-        daemon._container_id = "fake"
-        daemon._host_port = 7000
-        daemon._host_cap_port = 7001
-
-        # Default no_verify_peer=None → skip verification on disk.
-        daemon.client()
-        cfg = _client_cfg(daemon._host_client_dir)
-        assert cfg["daemon"]["core_service"]["verify_peer"] is False
-
-        # no_verify_peer=False → honour the constructor's verify_peer (True).
-        daemon.client(no_verify_peer=False)
-        block = _client_cfg(daemon._host_client_dir)["daemon"]
-        assert block["core_service"]["verify_peer"] is True
-        assert block["capability_module"]["verify_peer"] is True
-        # The CA is a HOST path — the client reads it, and the client runs
-        # on this side of the container boundary, so it is never mounted.
-        assert block["core_service"]["ca"] == str(cert)
-    finally:
-        daemon._container_id = None
-        daemon.stop()
+        image="img", modules_dir=mods, binary="host-logosctl",
+        config_dir=tmp_path / "cfg", persistence_dir=tmp_path / "pers",
+        control_port=7443, container_name="c1")
+    yield daemon
+    daemon._container_id = None
+    daemon.stop()
 
 
-def test_docker_client_endpoints_raise_before_start(tmp_path: Path):
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    daemon = LogosctlDockerDaemon(image="img", modules_dir=mods)
-    # Ports are assigned in start(); building endpoints before that must
-    # fail loudly rather than emit a portless config.
+def test_docker_document_turns_runtime_control_on(docker_daemon):
+    doc = docker_daemon._daemon_config_document()
+    # Paths are the container's; the image's own modules sit beside its binary.
+    assert doc["modules_dirs"] == ["/user-modules"]
+    assert doc["persistence_path"] == "/persistence"
+    assert doc["peering"] == runtime_control_config("node", host="127.0.0.1", port=7443)
+    assert set(doc) == {"modules_dirs", "persistence_path", "peering"}
+
+
+def test_docker_start_runs_on_the_host_network_then_pairs(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon,
+):
+    rec = _Recorder(monkeypatch, stdout="cid\n")
+    docker_daemon.start()
+
+    config_set, run = rec.cmds[0], rec.cmds[1]
+    assert config_set[-4:] == ["daemon", "config", "set", "/config/daemon.yaml"]
+    assert run[:6] == ["docker", "run", "-d", "--name", "c1", "--network"]
+    assert run[6] == "host"
+    # Nothing to forward: the host's loopback is the container's.
+    assert "-p" not in run
+    assert run[-3:] == ["img", "daemon", "start"]
+    rc = _FakeRuntimeControl.instances[0]
+    assert rc.daemon is docker_daemon and rc.binary == "host-logosctl"
+    assert rc.calls == [("pair",), ("grant", None)]
+    assert docker_daemon.client().remote == "the-daemon"
+
+
+def test_docker_start_tears_the_container_down_when_pairing_fails(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon,
+):
+    rec = _Recorder(monkeypatch, stdout="cid\n")
+    _FakeRuntimeControl.fail_pairing = True
+    with pytest.raises(LogosctlError, match="pairing refused"):
+        docker_daemon.start()
+    assert ["docker", "rm", "-f", "cid"] in rec.cmds
+    assert _FakeRuntimeControl.instances[0].calls[-1] == ("close",)
+
+
+def test_docker_peer_runs_inside_the_container(monkeypatch: pytest.MonkeyPatch, docker_daemon):
+    rec = _Recorder(monkeypatch, stdout=json.dumps({"pending": []}))
+    docker_daemon._container_id = "cid"
+    assert docker_daemon.peer("pending") == {"pending": []}
+    assert rec.cmds[0] == ["docker", "exec", "cid", "/proc/1/exe", "--config-dir",
+                           "/config", "--json", "peer", "pending"]
+
+
+def test_docker_peer_failure_carries_the_envelope_code(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon,
+):
+    _Recorder(monkeypatch, returncode=3, stdout=json.dumps(
+        {"status": "error", "code": "PEERING_REFUSED", "message": "no"}))
+    docker_daemon._container_id = "cid"
+    with pytest.raises(ModuleError) as excinfo:
+        docker_daemon.peer("accept", "x")
+    assert excinfo.value.code == "PEERING_REFUSED"
+
+
+def test_docker_policy_goes_through_the_config_bind_mount(
+    monkeypatch: pytest.MonkeyPatch, docker_daemon,
+):
+    rec = _Recorder(monkeypatch, stdout=json.dumps({"ok": True}))
+    docker_daemon._container_id = "cid"
+    docker_daemon.set_remote_policy({"k/logosctl": ["*"]})
+    host_file = docker_daemon.config_dir / "remote-policy.json"
+    assert json.loads(host_file.read_text()) == {"k/logosctl": ["*"]}
+    assert rec.cmds[0][-4:] == ["peer", "policy", "set", "/config/remote-policy.json"]
+
+
+def test_docker_client_before_start_raises(docker_daemon):
     with pytest.raises(LogosctlError):
-        daemon._client_endpoints("localhost", "json", None)
-
-
-def test_docker_build_host_client_config_raises_when_token_issue_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    daemon = LogosctlDockerDaemon(
-        image="img", modules_dir=mods, startup_timeout=0.1)
-    try:
-        daemon._container_id = "fake"
-        daemon._host_port = 7000
-        daemon._host_cap_port = 7001
-        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
-                            subprocess.CompletedProcess(cmd, 1, "", "issue failed"))
-        with pytest.raises(LogosctlError, match="could not issue docker network token"):
-            daemon._build_host_client_config()
-    finally:
-        daemon._container_id = None
-        # _host_client_dir is a real tmpdir; clean it up.
-        shutil.rmtree(daemon._host_client_dir, ignore_errors=True)
-        shutil.rmtree(daemon._config_dir, ignore_errors=True)
-        shutil.rmtree(daemon._persistence_dir, ignore_errors=True)
-
-
-def test_docker_issues_network_token_and_revokes_on_stop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    mods = tmp_path / "mods"
-    mods.mkdir()
-    daemon = LogosctlDockerDaemon(image="img", modules_dir=mods)
-    daemon._container_id = "fake"
-    daemon._host_port = 7000
-    daemon._host_cap_port = 7001
-    calls: list[list[str]] = []
-
-    def run(cmd, **kwargs):
-        calls.append(cmd)
-        output = json.dumps({"token": "network"}) if "issue" in cmd else "{}"
-        return subprocess.CompletedProcess(cmd, 0, output, "")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    try:
-        daemon._build_host_client_config()
-        assert json.loads((daemon._host_client_dir / "client" / "auto.json").read_text()) == {
-            "token": "network"}
-        assert calls[0][:5] == ["docker", "exec", "fake", "/proc/1/exe",
-                                "--config-dir"]
-        assert calls[0][7:10] == ["token", "issue", "--name"]
-        issued_name = calls[0][10]
-        # Revoked by stop(); the expiry bounds one a killed wrapper leaves.
-        assert calls[0][-2:] == ["--expires", "24h"]
-        daemon.stop()
-        assert any(c[-2:] == ["revoke", issued_name] for c in calls)
-    finally:
-        daemon._container_id = None
-        shutil.rmtree(daemon._host_client_dir, ignore_errors=True)
-        shutil.rmtree(daemon._config_dir, ignore_errors=True)
-        shutil.rmtree(daemon._persistence_dir, ignore_errors=True)
+        docker_daemon.client()
