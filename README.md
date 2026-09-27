@@ -179,7 +179,13 @@ Only a plain module (`"transport": "qt_remote_plain"`) can be exported.
 `LogosctlClient.peer(verb, …)` runs any `logosctl peer` verb: `status`,
 `ls`, `routes`, `import`, `policy set FILE`, and so on.
 `tests/logosctl/integration/test_peering.py` replays the full_api tables
-through an import.
+through an import, and checks that a `concurrency: multi` provider
+(`test_concurrency_cpp`) keeps its calls parallel through one. The
+conformance matrix's peered coordinate (`run_matrix.py --peered`, check
+`conformance-transport-peered`) measures each plain provider again through
+an import, as `<provider>@peered`, and compares every cell with the provider
+measured locally. A facade reports a provider's failure as `dispatch_failed`
+with the provider's class after `remote/`, and the driver compares that class.
 
 ## Connect to an already-running daemon
 

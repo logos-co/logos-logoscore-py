@@ -12,7 +12,8 @@
     # process of its own (logoscore-cli's feat/runtime-process). Peering sits on
     # top (logoscore-cli#149): `logosctl peer`, which PeeredDaemons drives.
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/peering";
-    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/drop-legacy-mode";
+    # feat/peering: feat/runtime-process's modules plus test_concurrency_cpp.
+    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/peering";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries for the transport matrix to
     # pair with the new runtime. No follows, on purpose: following would
@@ -280,6 +281,9 @@
             logos-test-modules.modules.${system}.test_fullapi_ext_cpp_qt_remote_plain.install;
           transportExtRustPlain =
             logos-test-modules.modules.${system}.test_fullapi_ext_rust_qt_remote_plain.install;
+          # A plain provider declared `concurrency: multi` (test_peering.py).
+          concurrencyPlain =
+            logos-test-modules.modules.${system}.test_concurrency_cpp.install;
 
           # The released modules, and the other consumers every coordinate runs:
           # the Rust LP proxy and the generated Qt glue (qt_remote only), so a
@@ -341,8 +345,10 @@
               export PYTHONPATH=$PWD/src
               export LOGOSCTL_BIN=${logosctlBin}/bin/logosctl
               export LOGOSCTL_TEST_MODULES_DIR=${testModulesInstall}/modules
-              # test_peering.py exports test_fullapi_cpp, which takes its plain build.
+              # test_peering.py exports test_fullapi_cpp, which takes its plain build,
+              # and test_concurrency_cpp.
               export LOGOSCTL_PLAIN_MODULES_DIR=${transportCppPlain}/modules
+              export LOGOSCTL_CONCURRENCY_MODULES_DIR=${concurrencyPlain}/modules
               # tests/logosctl/conftest.py SKIPS when either of those is unset,
               # so a rename here turns the whole suite green-by-omission.
               #
@@ -581,6 +587,37 @@
           # The ext table with both providers over the plain transport.
           conformance-transport-ext-plain = mkExtMatrix "logoscore-py-module-transport-ext-plain"
             transportExtRustPlain transportExtCppPlain;
+          # Each plain provider again through an import (<provider>@peered):
+          # exported by one logosctl daemon, called on another through its
+          # facade, and compared cell by cell with the provider measured here.
+          conformance-transport-peered = pkgs.runCommand "logoscore-py-module-transport-peered" {
+            nativeBuildInputs = [ python logoscoreBin logosctlBin pkgs.openssl ]
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+          } ''
+            cp -r ${./.}/. .
+            chmod -R +w .
+            export QT_QPA_PLATFORM=offscreen
+            export QT_FORCE_STDERR_LOGGING=1
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+            ''}
+            export PYTHONPATH=$PWD/src
+            export HOME=$PWD/home
+            mkdir -p $HOME $out
+            ${python}/bin/python conformance/run_matrix.py \
+              --logoscore ${logoscoreBin}/bin/logoscore \
+              --logosctl ${logosctlBin}/bin/logosctl \
+              --peered \
+              --cases ${logos-test-modules}/conformance/cases.json \
+              --known ${logos-test-modules}/conformance/known.json \
+              --contract ${logos-test-modules}/test-fullapi-proxy-module-rust/full_api.lidl \
+              --cpp-modules ${transportCppPlain}/modules \
+              --rust-modules ${transportRustPlain}/modules \
+              --jsonl $out/matrix.jsonl \
+              --report $out/matrix.html \
+              --no-color \
+              2>&1 | tee $out/matrix.txt
+          '';
 
           # The released coordinates are only worth their name if nothing
           # rebuilt those modules against this flake's protocol.
@@ -609,7 +646,7 @@
             pkgs.runCommand "logoscore-py-module-transport-matrix" {} ''
               mkdir -p $out/qro-qro $out/qro-plain $out/plain-qro $out/plain-plain \
                        $out/released-plain $out/plain-released $out/released-daemon $out/ext-plain \
-                       $out/inproc-plain
+                       $out/inproc-plain $out/peered
               cp -r ${conformance-transport-qro-qro}/. $out/qro-qro/
               cp -r ${conformance-transport-qro-plain}/. $out/qro-plain/
               cp -r ${conformance-transport-plain-qro}/. $out/plain-qro/
@@ -619,6 +656,7 @@
               cp -r ${conformance-transport-released-daemon}/. $out/released-daemon/
               cp -r ${conformance-transport-ext-plain}/. $out/ext-plain/
               cp -r ${conformance-transport-inproc}/. $out/inproc-plain/
+              cp -r ${conformance-transport-peered}/. $out/peered/
               echo ${released-modules-unchanged} > $out/released-modules-unchanged
             '';
 

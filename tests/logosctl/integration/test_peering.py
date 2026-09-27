@@ -142,3 +142,30 @@ def test_the_import_survives_an_exporter_restart(peered, importer):
     assert peered.exporter_client().peer("status")["control"]["port"] == port
     peered.wait_for_import(MODULE)
     assert importer.call(MODULE, "echoString", "back") == "back"
+
+
+CONCURRENT = "test_concurrency_cpp"
+
+
+@pytest.fixture(scope="module")
+def peered_multi(logosctl_bin, logosctl_concurrency_modules_dir, transport):
+    if transport != "local":
+        pytest.skip("peering does not depend on how the client reaches a daemon")
+    with PeeredDaemons(logosctl_concurrency_modules_dir, [CONCURRENT], binary=logosctl_bin,
+                       events=False) as pair:
+        yield pair
+
+
+def test_an_import_keeps_a_multi_provider_parallel(peered_multi):
+    """The facade mirrors the provider's `concurrency: multi`, so calls made at
+    once through the import overlap on the exporter (a single facade: 1)."""
+    importer = peered_multi.importer_client()
+    exporter = peered_multi.exporter_client()
+    exporter.call(CONCURRENT, "reset")
+    calls = [threading.Thread(target=importer.call, args=(CONCURRENT, "sleepMs", 1500),
+                              kwargs={"timeout": 30.0}) for _ in range(4)]
+    for t in calls:
+        t.start()
+    for t in calls:
+        t.join()
+    assert exporter.call(CONCURRENT, "peakInFlight") >= 2
