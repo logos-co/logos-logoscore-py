@@ -10,10 +10,11 @@
     # logos-test-modules' feat/inproc-coordinates), with legacy mode deleted on
     # top (the feat/drop-legacy-mode branches), and the daemon's runtime in a
     # process of its own (logoscore-cli's feat/runtime-process). Peering sits on
-    # top (logoscore-cli#149): `logosctl peer`, which PeeredDaemons drives.
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/peering";
-    # feat/peering: feat/runtime-process's modules plus test_concurrency_cpp.
-    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/peering";
+    # top (logoscore-cli#149): `logosctl peer`, which PeeredDaemons drives. The
+    # tcp and tcp_ssl removal (logoscore-cli#156, protocol 0.15) on top of that.
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/drop-legacy-remote";
+    # feat/runtime-process's modules plus test_concurrency_cpp.
+    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/drop-legacy-remote";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries for the transport matrix to
     # pair with the new runtime. No follows, on purpose: following would
