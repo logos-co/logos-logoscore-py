@@ -123,13 +123,22 @@
         }
       ) // {
         # What .github/workflows/windows.yml stages for the logosctl suite:
-        # logosctl.exe, and test_fullapi_cpp installed as a portable module.
-        x86_64-windows = {
-          ctl = logos-logoscore-cli.packages.x86_64-windows.ctl;
-          test-modules = (logos-test-modules.inputs.logos-module-builder.lib.mkLogosModule {
-            src = "${logos-test-modules}/test-fullapi-module-cpp";
-            configFile = "${logos-test-modules}/test-fullapi-module-cpp/metadata.json";
+        # logosctl.exe, and test_fullapi_cpp and test_probe_module_cpp installed
+        # as portable modules, copied since the stage leaves the store.
+        x86_64-windows = let
+          installPortable = dir: (logos-test-modules.inputs.logos-module-builder.lib.mkLogosModule {
+            src = "${logos-test-modules}/${dir}";
+            configFile = "${logos-test-modules}/${dir}/metadata.json";
           }).packages.x86_64-windows.install-portable;
+          modules = [ (installPortable "test-fullapi-module-cpp") (installPortable "test-probe-module-cpp") ];
+        in {
+          ctl = logos-logoscore-cli.packages.x86_64-windows.ctl;
+          test-modules = nixpkgs.legacyPackages.x86_64-linux.runCommand "logosctl-py-windows-modules" { } ''
+            mkdir -p $out/modules
+            for installed in ${nixpkgs.lib.escapeShellArgs modules}; do
+              cp -r "$installed"/modules/. $out/modules/
+            done
+          '';
         };
       };
 
