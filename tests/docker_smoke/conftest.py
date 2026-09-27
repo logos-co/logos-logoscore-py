@@ -6,10 +6,12 @@ requested (`--docker-flavor=dev|portable|both`, defaults to `portable`
 — see tests/conftest.py for the option definition).
 
 The `linux_test_modules_dir` fixture provides the test modules mounted into
-every daemon container: `LOGOSCTL_DOCKER_MODULES_DIR` when set (the Linux
-dev shell sets it to this flake's `test_fullapi_cpp.install-portable`),
-otherwise built inside docker once per session, so the `.so` files are
-ABI-matched to the daemon's Linux runtime whatever the host OS.
+every daemon container, in the variant the flavor's runtime loads:
+`.install-portable` for `portable`, `.install` (`-dev`) for `dev`. The Linux
+dev shell sets them (LOGOSCTL_DOCKER_MODULES_DIR,
+LOGOSCTL_DOCKER_DEV_MODULES_DIR); otherwise they are built inside docker
+once per session, so the `.so` files are ABI-matched to the daemon's Linux
+runtime whatever the host OS.
 
 The host-side client is `logosctl_bin`: LOGOSCTL_BIN, or `logosctl` on
 PATH.
@@ -64,18 +66,34 @@ def _locked_test_modules_flake() -> str:
     return f"github:{locked['owner']}/{locked['repo']}/{locked['rev']}"
 
 
+# A runtime loads only its own module variant: `linux-<arch>` in the
+# portable image, `linux-<arch>-dev` in the dev one (whose /nix/store holds
+# a `.install` module's dependencies).
+_MODULES = {
+    "portable": ("LOGOSCTL_DOCKER_MODULES_DIR", "install-portable"),
+    "dev": ("LOGOSCTL_DOCKER_DEV_MODULES_DIR", "install"),
+}
+
+
 @pytest.fixture(scope="session")
-def linux_test_modules_dir(tmp_path_factory) -> Path:
-    """`test_fullapi_cpp` as a Linux `.install-portable` modules dir, which
-    loads in both image flavors. Session scope: a docker build takes a
-    noticeable fraction of a minute even with a warm nix store.
+def _built_modules() -> dict[str, Path]:
+    return {}
+
+
+@pytest.fixture(scope="module")
+def linux_test_modules_dir(docker_flavor, tmp_path_factory, _built_modules) -> Path:
+    """`test_fullapi_cpp` as a Linux modules dir for `docker_flavor`, built
+    at most once per session: a docker build takes a noticeable fraction of
+    a minute even with a warm nix store.
 
     Override the source flake via `LOGOSCTL_TEST_MODULES_FLAKE` if you've
     forked test-modules.
     """
-    prebuilt = os.environ.get("LOGOSCTL_DOCKER_MODULES_DIR")
-    if prebuilt:
-        return Path(prebuilt)
+    env, attr = _MODULES[docker_flavor]
+    if os.environ.get(env):
+        return Path(os.environ[env])
+    if docker_flavor in _built_modules:
+        return _built_modules[docker_flavor]
     if not docker_available():
         pytest.skip("docker not available")
 
@@ -83,9 +101,10 @@ def linux_test_modules_dir(tmp_path_factory) -> Path:
     system = "aarch64-linux" if machine in ("arm64", "aarch64") else "x86_64-linux"
 
     flake_ref = os.environ.get("LOGOSCTL_TEST_MODULES_FLAKE") or _locked_test_modules_flake()
-    out = tmp_path_factory.mktemp("docker-test-modules")
+    out = tmp_path_factory.mktemp(f"docker-test-modules-{docker_flavor}")
     build_modules_in_docker(
-        builds=[(flake_ref, f"modules.{system}.test_fullapi_cpp.install-portable")],
+        builds=[(flake_ref, f"modules.{system}.test_fullapi_cpp.{attr}")],
         output_dir=out,
     )
+    _built_modules[docker_flavor] = out
     return out

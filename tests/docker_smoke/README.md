@@ -86,8 +86,13 @@ Two build flavors, to match how the daemon gets distributed:
 modules/` tree that matches how released binaries are distributed, so
 it's the most realistic smoke. `dev` links against Qt/Boost/OpenSSL via
 nix-store rpaths and requires copying `/nix/store` into the image at build
-time. The mounted modules are `.install-portable` builds, which load in
-either.
+time.
+
+Each runtime loads only its own module variant: the portable image a
+`.install-portable` build (`linux-<arch>`), the dev image a `.install`
+build (`linux-<arch>-dev`), whose store dependencies the image's
+`/nix/store` holds. The Linux dev shell sets both
+(`LOGOSCTL_DOCKER_MODULES_DIR`, `LOGOSCTL_DOCKER_DEV_MODULES_DIR`).
 
 ## Setup
 
@@ -100,7 +105,7 @@ FLAVOR=both     ./tests/docker_smoke/build_smoke_image.sh    # builds both
 SMOKE_NIX_CONFIG=$'cores = 8\nmax-jobs = 2' ./tests/docker_smoke/build_smoke_image.sh
 
 # Run the suite (default: portable). `nix develop` provides logosctl and,
-# on Linux, LOGOSCTL_DOCKER_MODULES_DIR.
+# on Linux, the modules to mount.
 nix develop --command pytest tests/docker_smoke
 nix develop --command pytest tests/docker_smoke --docker-flavor=both
 ```
@@ -156,7 +161,8 @@ runtime. Modules built on macOS (dylibs) won't load; modules built on
 Linux with a different glibc usually won't either.
 
 On Linux, `nix build .#install-portable` in your module's flake is enough
-(the smoke itself mounts the dev shell's `LOGOSCTL_DOCKER_MODULES_DIR`).
+for the portable image (the smoke itself mounts the dev shell's
+`LOGOSCTL_DOCKER_MODULES_DIR`).
 Elsewhere, use the helper that builds inside the same nixos/nix base the
 daemon image was compiled in:
 
@@ -194,6 +200,7 @@ Or via the shell wrapper at `tests/docker_smoke/build_modules_in_docker.sh`:
 Each `attr` must point at a derivation whose output contains a
 `modules/<name>/<plugin>.so + manifest.json` tree. The standard
 `logos-module-builder` `.install-portable` output produces exactly this.
-Without `LOGOSCTL_DOCKER_MODULES_DIR`, the smoke builds `test_fullapi_cpp`
-this way, from the logos-test-modules revision `flake.lock` pins
+Without the dev shell's variables, the smoke builds `test_fullapi_cpp`
+this way (`.install-portable`, or `.install` for the dev image), from the
+logos-test-modules revision `flake.lock` pins
 (`LOGOSCTL_TEST_MODULES_FLAKE` overrides it).

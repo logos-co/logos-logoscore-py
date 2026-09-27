@@ -141,7 +141,7 @@
           # parameter/return/event surface. `.install` lays out
           # modules/<name>/… ready for the daemon's `-m` flag.
           testModulesInstall         = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
-          # Self-contained, so it loads in either docker smoke image.
+          # The portable variant, which the portable docker smoke image loads.
           testModulesInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
           # Its plain build, the one a daemon can export (test_peering.py).
           testModulesPlainInstall =
@@ -180,13 +180,15 @@
             echo "  LOGOSCTL_TEST_MODULES_DIR:               $LOGOSCTL_TEST_MODULES_DIR"
             echo "  LOGOSCTL_PLAIN_MODULES_DIR:              $LOGOSCTL_PLAIN_MODULES_DIR"
             echo "  LOGOSCTL_DOCKER_MODULES_DIR:             ''${LOGOSCTL_DOCKER_MODULES_DIR:-(built in docker)}"
+            echo "  LOGOSCTL_DOCKER_DEV_MODULES_DIR:         ''${LOGOSCTL_DOCKER_DEV_MODULES_DIR:-(built in docker)}"
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
           '';
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-          # The docker smoke mounts these into its daemons; elsewhere a host
-          # build would not load in the Linux container, so it builds them
-          # in docker.
+          # The docker smoke mounts these into its daemons, one variant per
+          # image flavor; elsewhere a host build would not load in the Linux
+          # container, so it builds them in docker.
           LOGOSCTL_DOCKER_MODULES_DIR         = "${testModulesInstallPortable}/modules";
+          LOGOSCTL_DOCKER_DEV_MODULES_DIR     = "${testModulesInstall}/modules";
         });
       });
 

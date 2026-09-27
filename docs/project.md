@@ -394,7 +394,7 @@ invocation; stdout is deliberately **not** forwarded (it may carry raw tokens).
 | **`Q_INVOKABLE`** | a C++/Qt module method exposed for RPC; `LogoscoreClient.call(module, method, *args)` invokes one |
 | **tagged-bytes** | logos-protocol's NUL-safe form for byte arrays crossing JSON, `{"_bytes": "<base64url>"}`; decoded once at the `call()` boundary |
 | **`LogosResult`** | a module return struct serialized as `{"success": bool, "value": any, "error": any}`; pinned across the basic-module matrix |
-| **portable vs dev docker flavor** | `portable` = logosctl's self-contained `ctl-bundle-dir` (matches released binaries, default); `dev` = the nix-store-rpath-linked `ctl` package (~3 GB, needs `/nix/store` in image). `.install-portable` user modules load in either |
+| **portable vs dev docker flavor** | `portable` = logosctl's self-contained `ctl-bundle-dir` (matches released binaries, default); `dev` = the nix-store-rpath-linked `ctl` package (~3 GB, needs `/nix/store` in image). User modules must match: `.install-portable` vs `.install` |
 
 ---
 
@@ -424,7 +424,8 @@ nix develop                        # python + pytest + logoscore + logosctl on P
 
 The dev shell exports `LOGOSCORE_BIN`, `LOGOSCORE_TEST_MODULES_DIR`, `LOGOSCTL_BIN`,
 `LOGOSCTL_TEST_MODULES_DIR`, `LOGOSCTL_PLAIN_MODULES_DIR` and, on Linux,
-`LOGOSCTL_DOCKER_MODULES_DIR` (the `.install-portable` module the docker smoke mounts),
+`LOGOSCTL_DOCKER_MODULES_DIR` / `LOGOSCTL_DOCKER_DEV_MODULES_DIR` (the modules the
+docker smoke mounts in the portable / dev image),
 and prepends `src/` to `PYTHONPATH`, so `pytest` works without extra setup.
 
 ### Nix checks
