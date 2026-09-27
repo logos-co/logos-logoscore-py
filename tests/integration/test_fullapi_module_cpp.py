@@ -58,34 +58,12 @@ MODULE = "test_fullapi_cpp"
 
 
 @pytest.fixture(scope="module")
-def client(logoscore_bin, test_modules_dir, transport, request):
-    """Build a daemon + client wired to whatever transport the suite is
-    parametrised on. Kept inline (rather than moved to a conftest helper)
-    so each test file can be read end-to-end without jumping between
-    files — mirrors the fixture in `test_end_to_end.py`."""
-    import socket
-
-    def _pick_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
-    kwargs = {}
-    client_kwargs: dict = {"transport": transport}
-    if transport != "local":
-        kwargs["transports"] = [transport]
-        if transport == "tcp":
-            kwargs["tcp_port"] = _pick_free_port()
-        elif transport == "tcp_ssl":
-            cert, key = request.getfixturevalue("self_signed_cert")
-            kwargs["tcp_ssl_port"] = _pick_free_port()
-            kwargs["ssl_cert"] = cert
-            kwargs["ssl_key"] = key
-            client_kwargs["no_verify_peer"] = True
-    with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
-    ) as daemon:
-        c = daemon.client(**client_kwargs)
+def client(logoscore_bin, test_modules_dir):
+    """A daemon + client with the module loaded. Kept inline (rather than
+    moved to a conftest helper) so each test file can be read end-to-end
+    without jumping between files."""
+    with LogoscoreDaemon(modules_dir=test_modules_dir, binary=logoscore_bin) as daemon:
+        c = daemon.client()
         c.load_module(MODULE)
         yield c
 
@@ -109,10 +87,9 @@ def test_echo_non_ascii_string(client):
     assert client.call(MODULE, "echoString", NON_ASCII) == NON_ASCII
 
 
-# 64-bit boundaries belong here specifically. This module is replayed by the
-# local, tcp and tcp_ssl checks, and the highest value it used to carry was
-# 2^53-1 (int) / 2^32-1 (uint) — so the plain wire's 64-bit handling was never
-# exercised at all. It was broken: RpcValue had no unsigned alternative, and a
+# 64-bit boundaries belong here specifically. The highest value this module
+# used to carry was 2^53-1 (int) / 2^32-1 (uint) — so the plain wire's 64-bit
+# handling was never exercised at all. It was broken: RpcValue had no unsigned alternative, and a
 # uint above int64max arrived as -1.
 # 2^53+1 is the smallest integer a double cannot hold, which separates
 # "degraded through a float" from "wrapped as an integer".

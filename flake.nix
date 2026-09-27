@@ -194,18 +194,10 @@
       # `nix flake check` runs the unit tests (no daemon required) and the
       # integration test suite against a real CLI + test modules.
       #
-      # Both suites exist twice, once per client: `unit` / `integration-*`
-      # drive `logoscore`, `unit-logosctl` / `integration-logosctl-*` drive
-      # `logosctl`. Separate derivations throughout, never one derivation
-      # looping over both — see the `unit-logosctl` comment.
-      #
-      # The integration suite is replicated across three transports so a
-      # regression in tcp framing or tcp_ssl handshaking surfaces at the
-      # same layer the test names already cover. Three separate flake
-      # outputs (rather than one derivation that loops) so:
-      #   - CI can fan them out across runners in parallel,
-      #   - a tcp_ssl failure doesn't block the local/tcp signal,
-      #   - the build log of any single transport stays focused.
+      # Both suites exist twice, once per client: `unit` / `integration-local`
+      # drive `logoscore`, `unit-logosctl` / `integration-logosctl-local`
+      # drive `logosctl`. Separate derivations throughout, never one
+      # derivation looping over both — see the `unit-logosctl` comment.
       checks = forAllSystems ({ pkgs, system }:
         let
           python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
@@ -251,8 +243,7 @@
           testModulesExtQtProxyInstall =
             logos-test-modules.modules.${system}.test_fullapi_ext_qtproxy.install;
 
-          # Explicit module-process transport builds. These are separate from
-          # the Python client's local/tcp/tcp_ssl axis: they choose how each
+          # Explicit module-process transport builds: they choose how each
           # module host talks to logoscore. Provider and proxy builds are paired
           # independently below so mixed QRO/plain topologies cannot hide.
           transportCppQro =
@@ -288,13 +279,11 @@
           testModulesProxyRustInstall =
             logos-test-modules.modules.${system}.test_fullapi_proxy_rust.install;
 
-          # Helper: run the integration suite once with the given
-          # `--transport` value. Same env wiring as the unit check
-          # plus openssl (needed by the `self_signed_cert` fixture
-          # for `tcp_ssl`; harmless for `local` / `tcp`).
-          mkIntegration = transport: pkgs.runCommand
-            "logoscore-py-integration-tests-${transport}" {
-              nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+          # Helper: run the integration suite. Same env wiring as the unit
+          # check, plus the CLI and the test modules.
+          mkIntegration = pkgs.runCommand
+            "logoscore-py-integration-tests" {
+              nativeBuildInputs = [ python logoscoreBin ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               cp -r ${./.}/. .
@@ -310,7 +299,7 @@
               # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
               export HOME=$PWD/home
               mkdir -p $HOME
-              ${python}/bin/pytest tests/integration -v --transport=${transport}
+              ${python}/bin/pytest tests/integration -v
               touch $out
             '';
 
@@ -320,9 +309,9 @@
           # two CLIs configure a daemon through different mechanisms, and
           # retiring logoscore should be a delete, not an untangle. The two
           # helpers drifting apart is expected, not a smell.
-          mkIntegrationLogosctl = transport: pkgs.runCommand
-            "logosctl-py-integration-tests-${transport}" {
-              nativeBuildInputs = [ python logosctlBin pkgs.openssl ]
+          mkIntegrationLogosctl = pkgs.runCommand
+            "logosctl-py-integration-tests" {
+              nativeBuildInputs = [ python logosctlBin ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               cp -r ${./.}/. .
@@ -348,7 +337,7 @@
               # default-session write must still land somewhere sandbox-local.
               export HOME=$PWD/home
               mkdir -p $HOME
-              ${python}/bin/pytest tests/logosctl/integration -v --transport=${transport}
+              ${python}/bin/pytest tests/logosctl/integration -v
               touch $out
             '';
 
@@ -359,7 +348,7 @@
           # proxy -> provider call.
           mkModuleTransportMatrixArgs = daemon: extraArgs: label: cppInstall: rustInstall: proxyInstall:
             pkgs.runCommand "logoscore-py-module-transport-${label}" {
-              nativeBuildInputs = [ python daemon pkgs.openssl ]
+              nativeBuildInputs = [ python daemon ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               cp -r ${./.}/. .
@@ -395,7 +384,7 @@
           # The ext table for a given pair of providers; its consumers are py
           # and the ext Qt proxy (see conformance-matrix-ext).
           mkExtMatrix = name: rustInstall: cppInstall: pkgs.runCommand name {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+            nativeBuildInputs = [ python logoscoreBin ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -447,8 +436,8 @@
           # A parallel suite for the parallel client, in its own derivations
           # so nix builds it concurrently with the logoscore ones and a red
           # logosctl cannot mask a logoscore regression. Dropping logosctl
-          # later is deleting these four attributes, `mkIntegrationLogosctl`,
-          # and `logosctlBin`.
+          # later is deleting `unit-logosctl`, `integration-logosctl-local`,
+          # `mkIntegrationLogosctl`, and `logosctlBin`.
           #
           # Deliberately NOT duplicated: the conformance matrix. It measures
           # the LIDL type contract, which lives in the runtime both binaries
@@ -493,7 +482,7 @@
           # external requests, publishable to Pages the way the doctest
           # harness's report already is.
           conformance-matrix = pkgs.runCommand "logoscore-py-conformance-matrix" {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+            nativeBuildInputs = [ python logoscoreBin ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -581,7 +570,7 @@
           # exported by one logosctl daemon, called on another through its
           # facade, and compared cell by cell with the provider measured here.
           conformance-transport-peered = pkgs.runCommand "logoscore-py-module-transport-peered" {
-            nativeBuildInputs = [ python logoscoreBin logosctlBin pkgs.openssl ]
+            nativeBuildInputs = [ python logoscoreBin logosctlBin ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -689,22 +678,15 @@
                 -o $out/index.html
             '';
 
-          # One check per transport. CI's matrix fans them out; a local
-          # `nix flake check` runs all three sequentially.
-          integration-local   = mkIntegration "local";
-          integration-tcp     = mkIntegration "tcp";
-          integration-tcp_ssl = mkIntegration "tcp_ssl";
-
-          # Same three transports, driven through logosctl. Split the same way
-          # and for the same reasons.
-          integration-logosctl-local   = mkIntegrationLogosctl "local";
-          integration-logosctl-tcp     = mkIntegrationLogosctl "tcp";
-          integration-logosctl-tcp_ssl = mkIntegrationLogosctl "tcp_ssl";
+          # The client reaches its daemons over the local socket; a daemon
+          # elsewhere is Remote Runtime Control (test_runtime_control.py).
+          integration-local          = mkIntegration;
+          integration-logosctl-local = mkIntegrationLogosctl;
 
           # Back-compat alias — equivalent to `integration-local`. Kept
           # so anyone with `nix build .#checks.<system>.integration` in
           # muscle memory still gets a green path.
-          integration = mkIntegration "local";
+          integration = mkIntegration;
         }
       );
     };

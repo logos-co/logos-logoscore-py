@@ -1,15 +1,14 @@
 """Unit tests for how a logosctl session gets configured.
 
 DELIBERATE DUPLICATE of tests/unit/test_client_config.py in name only — do
-not refactor the two together. logoscore configured a daemon with flags
-(`-m`, `--persistence-path`, `--module-transport`, `--insecure-tcp`) and
-retargeted a client with `LOGOSCORE_CLIENT_*` env vars. logosctl has none
-of those: every one of them is a key in a YAML document installed with
-`logosctl daemon config set` / written to `client/config.yaml` before the
-daemon boots. So this file tests a different mechanism against the same
-guarantees, and the two suites can only be merged by parametrizing over
-exactly the difference that matters. Retiring logoscore should be a delete
-of src/logoscore/ + tests/unit/, not an unpick.
+not refactor the two together. logoscore configures a daemon with flags
+(`-m`, `--persistence-path`). logosctl has none of those: every one of them
+is a key in a YAML document installed with `logosctl daemon config set` /
+written to `client/config.yaml` before the daemon boots. So this file tests
+a different mechanism against the same guarantees, and the two suites can
+only be merged by parametrizing over exactly the difference that matters.
+Retiring logoscore should be a delete of src/logoscore/ + tests/unit/, not
+an unpick.
 
 Nothing here needs a real `logosctl` binary or docker: the CLI is faked
 out, and what is asserted is the document that would reach it and the argv
@@ -34,6 +33,8 @@ from logosctl import (
     runtime_control_config,
 )
 from logosctl.errors import ModuleError
+
+LOCAL = {"core_service": DaemonEndpoint(), "capability_module": DaemonEndpoint()}
 
 
 def _dumped(obj: dict) -> str:
@@ -92,30 +93,20 @@ def _no_forward_output(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ── The client dial spec: write_config ───────────────────────────────────────
 #
-# `client/config.yaml` is now the ONLY way to say which daemon a client
+# `client/config.yaml` is the only way to say which local daemon a client
 # talks to — `RpcClient::connect()` reads it verbatim, with no merge layer
 # and no environment override. These tests pin the bytes.
 
 
-def test_write_config_tcp_minimal(tmp_path: Path):
-    endpoints = {
-        "core_service": DaemonEndpoint("tcp", "localhost", 8000, "json"),
-        "capability_module": DaemonEndpoint("tcp", "localhost", 8001, "json"),
-    }
-    LogosctlClient.write_config(tmp_path, endpoints)
+def test_write_config_local_minimal(tmp_path: Path):
+    LogosctlClient.write_config(tmp_path, LOCAL)
 
     expected = {
         "version": 2,
         "token_file": "auto.json",
         "daemon": {
-            "core_service": {
-                "transport": "tcp", "host": "localhost",
-                "port": 8000, "codec": "json",
-            },
-            "capability_module": {
-                "transport": "tcp", "host": "localhost",
-                "port": 8001, "codec": "json",
-            },
+            "core_service": {"transport": "local"},
+            "capability_module": {"transport": "local"},
         },
     }
     cfg_path = tmp_path / "client" / "config.yaml"
@@ -132,76 +123,24 @@ def test_write_config_token_file_is_present_even_without_a_token(tmp_path: Path)
     # `fileOk` is `!daemon.empty() && !token_file.empty()`, so an omitted
     # token_file makes the whole spec read as "no client config" — even
     # when the caller intends to pass the token via $LOGOSCTL_TOKEN.
-    LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)})
+    LogosctlClient.write_config(tmp_path, LOCAL)
     assert _client_cfg(tmp_path)["token_file"] == "auto.json"
 
 
-def test_write_config_tcp_ssl_emits_ca_then_verify_peer_last(tmp_path: Path):
-    endpoints = {
-        "core_service": DaemonEndpoint(
-            "tcp_ssl", "remote", 6000, "cbor", verify_peer=True, ca="/ca.pem"),
-    }
-    LogosctlClient.write_config(tmp_path, endpoints)
-
-    block = _client_cfg(tmp_path)["daemon"]["core_service"]
-    assert block == {
-        "transport": "tcp_ssl", "host": "remote",
-        "port": 6000, "codec": "cbor", "ca": "/ca.pem", "verify_peer": True,
-    }
-    # verify_peer stays the final key (matches the order the daemon writes
-    # into its own session, and what logoscore's spec asserted).
-    assert list(block)[-1] == "verify_peer"
-
-
-def test_write_config_uses_client_side_key_names_only(tmp_path: Path):
-    # The asymmetry that bites: a listener in the DAEMON document says
-    # `protocol:` / `cert:` / `key:` / `ca_file:`; an entry here says
-    # `transport:` / `ca:`. Spelling one in the other's document fails the
-    # parse — on the daemon side it takes the whole config down with it.
-    LogosctlClient.write_config(
-        tmp_path,
-        {"core_service": DaemonEndpoint(
-            "tcp_ssl", "h", 1, "json", verify_peer=False, ca="/ca.pem")},
-    )
-    block = _client_cfg(tmp_path)["daemon"]["core_service"]
-    assert set(block) & {"protocol", "cert", "key", "ca_file"} == set()
-
-
-def test_write_config_drops_verify_peer_and_ca_for_plain_tcp(tmp_path: Path):
-    # Both only apply to tcp_ssl — stray values on a tcp endpoint must not
-    # leak into the config.
-    endpoints = {
-        "core_service": DaemonEndpoint(
-            "tcp", "h", 1, verify_peer=True, ca="/ca.pem"),
-    }
-    LogosctlClient.write_config(tmp_path, endpoints)
-    block = _client_cfg(tmp_path)["daemon"]["core_service"]
-    assert "verify_peer" not in block
-    assert "ca" not in block
-
-
 def test_write_config_writes_token_file(tmp_path: Path):
-    LogosctlClient.write_config(
-        tmp_path,
-        {"core_service": DaemonEndpoint("tcp", "h", 1)},
-        token="raw-secret",
-    )
+    LogosctlClient.write_config(tmp_path, LOCAL, token="raw-secret")
     auto = tmp_path / "client" / "auto.json"
     assert json.loads(auto.read_text()) == {"token": "raw-secret"}
     assert _client_cfg(tmp_path)["token_file"] == "auto.json"
 
 
 def test_write_config_instance_id_present_when_set_even_if_empty(tmp_path: Path):
-    LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
-        instance_id="")
+    LogosctlClient.write_config(tmp_path, LOCAL, instance_id="")
     assert _client_cfg(tmp_path)["instance_id"] == ""
 
 
 def test_write_config_instance_id_absent_when_none(tmp_path: Path):
-    LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)})
+    LogosctlClient.write_config(tmp_path, LOCAL)
     assert "instance_id" not in _client_cfg(tmp_path)
 
 
@@ -216,16 +155,12 @@ def test_write_config_merge_preserves_existing_keys(tmp_path: Path):
     }))
 
     LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 9)},
-        merge=True)
+        tmp_path, {"core_service": DaemonEndpoint()}, merge=True)
 
     cfg = _client_cfg(tmp_path)
     assert cfg["instance_id"] == "iid"       # untouched pre-existing key
     assert cfg["version"] == 2
-    assert cfg["daemon"] == {                 # daemon block fully replaced
-        "core_service": {"transport": "tcp", "host": "h",
-                         "port": 9, "codec": "json"},
-    }
+    assert cfg["daemon"] == {"core_service": {"transport": "local"}}
 
 
 def test_write_config_merge_onto_daemon_written_yaml_rebuilds(tmp_path: Path):
@@ -236,17 +171,13 @@ def test_write_config_merge_onto_daemon_written_yaml_rebuilds(tmp_path: Path):
     client_dir = tmp_path / "client"
     client_dir.mkdir(parents=True)
     (client_dir / "config.yaml").write_text(
-        "version: 2\ntoken_file: auto.json\ndaemon:\n"
+        "version: 2\ntoken_file: auto.json\ninstance_id: iid\ndaemon:\n"
         "  core_service:\n    transport: local\n"
     )
 
-    LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 9)},
-        merge=True)
+    LogosctlClient.write_config(tmp_path, LOCAL, merge=True)
 
-    cfg = _client_cfg(tmp_path)
-    assert set(cfg) == {"version", "token_file", "daemon"}
-    assert cfg["daemon"]["core_service"]["port"] == 9
+    assert set(_client_cfg(tmp_path)) == {"version", "token_file", "daemon"}
 
 
 def test_write_config_token_honors_existing_token_file(tmp_path: Path):
@@ -258,9 +189,7 @@ def test_write_config_token_honors_existing_token_file(tmp_path: Path):
         "version": 2, "token_file": "custom.json",
         "daemon": {"core_service": {"transport": "local"}},
     }))
-    LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
-        token="tok", merge=True)
+    LogosctlClient.write_config(tmp_path, LOCAL, token="tok", merge=True)
 
     cfg = _client_cfg(tmp_path)
     assert cfg["token_file"] == "custom.json"
@@ -276,9 +205,7 @@ def test_write_config_token_file_traversal_falls_back(tmp_path: Path, bad: str):
         "version": 2, "token_file": bad,
         "daemon": {"core_service": {"transport": "local"}},
     }))
-    LogosctlClient.write_config(
-        tmp_path, {"core_service": DaemonEndpoint("tcp", "h", 1)},
-        token="tok", merge=True)
+    LogosctlClient.write_config(tmp_path, LOCAL, token="tok", merge=True)
 
     cfg = _client_cfg(tmp_path)
     # The CLI rejects a token_file with a separator and fails closed, so a
@@ -289,10 +216,10 @@ def test_write_config_token_file_traversal_falls_back(tmp_path: Path, bad: str):
 
 # ── The daemon config document ───────────────────────────────────────────────
 #
-# Everything logoscore passed as daemon flags is a key in this document,
+# Everything logoscore passes as daemon flags is a key in this document,
 # and `daemon start` acts on whatever is already on disk. A key that comes
 # out wrong doesn't fail the run — it boots a daemon quietly missing the
-# caller's modules dirs or listeners — so the emitted bytes are pinned.
+# caller's modules dirs — so the emitted bytes are pinned.
 
 
 def _submitted_document(
@@ -311,98 +238,22 @@ def _top_level_keys(doc: str) -> list[str]:
             if line and not line[0].isspace() and not line.startswith("-")]
 
 
-def test_daemon_document_tcp_is_pinned(monkeypatch, tmp_path: Path):
+def test_daemon_document_is_pinned(monkeypatch, tmp_path: Path):
     doc, _ = _submitted_document(
         monkeypatch, tmp_path,
-        modules_dir="/abs/mods", persistence_path="/abs/pers",
-        transports=["tcp"], tcp_port=6000, tcp_cap_port=6001,
-    )
+        modules_dir="/abs/mods", persistence_path="/abs/pers")
     assert doc == (
         "modules_dirs:\n"
         "  - /abs/mods\n"
         "persistence_path: /abs/pers\n"
-        "modules:\n"
-        "  core_service:\n"
-        "    - protocol: tcp\n"
-        '      host: "127.0.0.1"\n'
-        "      port: 6000\n"
-        "      codec: json\n"
-        "  capability_module:\n"
-        "    - protocol: tcp\n"
-        '      host: "127.0.0.1"\n'
-        "      port: 6001\n"
-        "      codec: json\n"
     )
 
 
-def test_daemon_document_tcp_ssl_is_pinned(monkeypatch, tmp_path: Path):
-    doc, _ = _submitted_document(
-        monkeypatch, tmp_path,
-        modules_dir="/abs/mods",
-        transports=["tcp_ssl"], tcp_ssl_port=6443, tcp_ssl_cap_port=6444,
-        ssl_cert="/abs/tls/cert.pem", ssl_key="/abs/tls/key.pem",
-        ssl_ca="/abs/tls/ca.pem",
-    )
-    assert doc == (
-        "modules_dirs:\n"
-        "  - /abs/mods\n"
-        "modules:\n"
-        "  core_service:\n"
-        "    - protocol: tcp_ssl\n"
-        '      host: "127.0.0.1"\n'
-        "      port: 6443\n"
-        "      codec: json\n"
-        "      cert: /abs/tls/cert.pem\n"
-        "      key: /abs/tls/key.pem\n"
-        "      ca_file: /abs/tls/ca.pem\n"
-        "  capability_module:\n"
-        "    - protocol: tcp_ssl\n"
-        '      host: "127.0.0.1"\n'
-        "      port: 6444\n"
-        "      codec: json\n"
-        "      cert: /abs/tls/cert.pem\n"
-        "      key: /abs/tls/key.pem\n"
-        "      ca_file: /abs/tls/ca.pem\n"
-    )
-
-
-def test_daemon_document_never_uses_client_key_names(monkeypatch, tmp_path: Path):
-    doc, _ = _submitted_document(
-        monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["tcp_ssl"], ssl_cert="/c.pem", ssl_key="/k.pem",
-        ssl_ca="/ca.pem",
-    )
-    assert "transport:" not in doc   # the daemon spelling is `protocol:`
-    assert "ca:" not in doc          # the daemon spelling is `ca_file:`
-
-
-def test_daemon_document_omits_the_top_level_ssl_block(monkeypatch, tmp_path: Path):
-    # `ssl: {cert, key, ca}` is on the allowlist and parsed into
-    # DaemonConfig — and then read by nobody. A listener configured through
-    # it binds with no certificate and every handshake dies with "no shared
-    # cipher", so the cert/key belong on the listener and nowhere else.
-    doc, _ = _submitted_document(
-        monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["tcp_ssl"], ssl_cert="/c.pem", ssl_key="/k.pem",
-    )
-    assert "ssl" not in _top_level_keys(doc)
-
-
-def test_daemon_document_local_only_has_no_modules_block(monkeypatch, tmp_path: Path):
-    # A `local` listener is prepended to every module unconditionally, so
-    # a local-only daemon needs no `modules` key at all.
+def test_daemon_document_has_no_listeners(monkeypatch, tmp_path: Path):
+    # A `local` listener is prepended to every module unconditionally, the
+    # only one a client dials, so the document needs no `modules` key.
     doc, _ = _submitted_document(monkeypatch, tmp_path, modules_dir="/abs/mods")
     assert _top_level_keys(doc) == ["modules_dirs"]
-
-
-def test_daemon_document_local_transport_is_a_noop(monkeypatch, tmp_path: Path):
-    with_local, _ = _submitted_document(
-        monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["local", "tcp"], tcp_port=6000, tcp_cap_port=6001)
-    without, _ = _submitted_document(
-        monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["tcp"], tcp_port=6000, tcp_cap_port=6001)
-    assert with_local == without
 
 
 def test_daemon_document_absolutises_modules_dirs(
@@ -418,23 +269,6 @@ def test_daemon_document_absolutises_modules_dirs(
                for line in doc.splitlines() if line.startswith("  - ")]
     assert all(Path(e).is_absolute() for e in entries)
     assert entries[0].endswith("rel/mods") and entries[0] != "rel/mods"
-
-
-def test_daemon_document_sets_insecure_tcp_for_non_loopback(monkeypatch, tmp_path):
-    # The daemon refuses a plaintext tcp listener off loopback unless the
-    # exposure is declared intentional, and refuses it BEFORE logging is
-    # up — so the diagnostic lands on the parent's stderr, not in the log.
-    doc, _ = _submitted_document(
-        monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["tcp"], tcp_host="0.0.0.0")
-    assert "insecure_tcp: true" in doc
-
-
-def test_daemon_document_omits_insecure_tcp_on_loopback(monkeypatch, tmp_path):
-    doc, _ = _submitted_document(
-        monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["tcp"], tcp_host="127.0.0.1")
-    assert "insecure_tcp" not in doc
 
 
 def test_daemon_document_carries_extra_config_last(monkeypatch, tmp_path: Path):
@@ -453,16 +287,24 @@ def test_daemon_document_carries_extra_config_last(monkeypatch, tmp_path: Path):
     assert "persistence_path: /override" in doc
 
 
-def test_daemon_document_quotes_scalars_yaml_would_retype(monkeypatch, tmp_path):
+def test_daemon_document_carries_a_runtime_control_section(monkeypatch, tmp_path):
     # yaml-cpp types scalars aggressively: bare `1.10` decodes as 1.1 and
     # `no` as false. A host or a policy string that came back retyped would
     # fail at bind time with no hint of why.
     doc, _ = _submitted_document(
         monkeypatch, tmp_path, modules_dir="/abs/mods",
-        transports=["tcp"], tcp_host="127.0.0.1",
-        extra_config={"access_group": "no"},
+        extra_config={"peering": runtime_control_config("node", port=7443),
+                      "access_group": "no"},
     )
-    assert 'host: "127.0.0.1"' in doc
+    assert (
+        "peering:\n"
+        "  name: node\n"
+        "  control:\n"
+        "    enabled: true\n"
+        '    host: "127.0.0.1"\n'
+        "    port: 7443\n"
+        "  runtime_control: true\n"
+    ) in doc
     assert 'access_group: "no"' in doc
 
 
@@ -476,23 +318,11 @@ def test_daemon_document_escapes_embedded_json(monkeypatch, tmp_path: Path):
     assert (r'access_policy: "{\n  \"default\": \"deny\"\n}"') in doc
 
 
-def test_tcp_ssl_without_cert_and_key_fails_before_any_cli_call(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    rec = _Recorder(monkeypatch)
-    daemon = LogosctlDaemon(
-        "/abs/mods", config_dir=tmp_path, transports=["tcp_ssl"])
-    with pytest.raises(LogosctlError, match="ssl_cert/ssl_key"):
-        daemon._install_daemon_config()
-    assert rec.cmds == []
-
-
 @pytest.mark.parametrize("bad_extra,needle", [
     ({"modules_dirs": "/single/path"}, "modules_dirs"),
     ({"modules_dirs": ["/ok", 7]}, "list of str"),
     ({"persistence_path": 42}, "persistence_path"),
     ({"access_policy": {"default": "deny"}}, "json.dumps"),
-    ({"insecure_tcp": "true"}, "insecure_tcp"),
 ])
 def test_mistyped_extra_config_is_caught_before_submission(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
@@ -578,8 +408,7 @@ def test_start_installs_the_config_before_booting(
     monkeypatch.setattr(subprocess, "Popen", _popen)
     monkeypatch.setattr(LogosctlDaemon, "_wait_for_ready", lambda self: None)
 
-    daemon = LogosctlDaemon(
-        "/abs/mods", config_dir=tmp_path, transports=["tcp"])
+    daemon = LogosctlDaemon("/abs/mods", config_dir=tmp_path)
     daemon.start()
 
     # `daemon config set` strictly before `daemon start`, in one sequence.
@@ -613,14 +442,12 @@ def test_start_passes_no_deleted_flags(
 
     LogosctlDaemon(
         "/abs/mods", config_dir=tmp_path, persistence_path="/abs/pers",
-        transports=["tcp"], tcp_host="0.0.0.0",
     ).start()
 
     argv = " ".join(rec.cmds[0] + spawned[0])
     for flag in (
-        "-m", "--modules-dir", "--persistence-path", "--module-transport",
-        "--insecure-tcp", "--access-policy", "--access-group",
-        "--persist-config", "--client-",
+        "-m", "--modules-dir", "--persistence-path", "--access-policy",
+        "--access-group", "--persist-config", "--client-",
     ):
         assert f" {flag}" not in f" {argv}"
 
@@ -676,31 +503,22 @@ def test_connect_sets_config_dir_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
 ):
     rec = _Recorder(monkeypatch)
-    client = LogosctlClient.connect(
-        {
-            "core_service": DaemonEndpoint("tcp", "remote", 6000),
-            "capability_module": DaemonEndpoint("tcp", "remote", 6001),
-        },
-        token="tok",
-    )
+    client = LogosctlClient.connect(LOCAL, token="tok", instance_id="iid")
     client.status()
 
     env = rec.calls[0]["env"]
     assert env["LOGOSCTL_CONFIG_DIR"] == str(client.config_dir)
     # There is no env fallback to leak into: `RpcClient::connect()` reads
     # client/config.yaml verbatim. The dial spec had better be on disk.
-    assert (client.config_dir / "client" / "config.yaml").exists()
+    assert _client_cfg(client.config_dir)["instance_id"] == "iid"
     assert (client.config_dir / "client" / "auto.json").exists()
-    assert _client_cfg(client.config_dir)["daemon"]["capability_module"][
-        "port"] == 6001
 
 
 def test_connect_temp_dir_cleaned_up_by_finalizer(
     monkeypatch: pytest.MonkeyPatch,
 ):
     _Recorder(monkeypatch)
-    client = LogosctlClient.connect(
-        {"core_service": DaemonEndpoint("tcp", "h", 1)})
+    client = LogosctlClient.connect(LOCAL)
     cfg_dir = client.config_dir
     assert cfg_dir.exists()
     assert client._config_dir_finalizer.alive
@@ -713,40 +531,24 @@ def test_connect_explicit_config_dir_is_not_owned(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     _Recorder(monkeypatch)
-    client = LogosctlClient.connect(
-        {"core_service": DaemonEndpoint("tcp", "h", 1)},
-        config_dir=tmp_path,
-    )
+    client = LogosctlClient.connect(LOCAL, config_dir=tmp_path)
     assert client.config_dir == tmp_path
     # Caller-supplied dir → no finalizer registered, dir survives.
     assert not hasattr(client, "_config_dir_finalizer")
     assert (tmp_path / "client" / "config.yaml").exists()
 
 
-# ── LogosctlDaemon.client(): retargeting is a file rewrite ───────────────────
-#
-# logoscore merged dial overrides into client/config.json in place. Here
-# the daemon's own file is canonical block YAML we can't parse, so the
-# overrides rebuild it from state.json — which is also the only place the
-# per-module ports exist when the caller let the daemon allocate them.
+# ── LogosctlDaemon: its client, and clients in other config dirs ─────────────
 
 
-def _resolved_modules(proto: str, core_port: int, cap_port: int) -> dict:
-    """`resolved.modules` as the daemon writes it post-bind. `local` is
-    always element 0; `cert`/`key` are deliberately stripped."""
-    def entry(port: int) -> dict:
-        return {"transports": [
-            {"protocol": "local"},
-            {"protocol": proto, "host": "127.0.0.1",
-             "port": port, "codec": "json"},
-        ]}
-
-    return {"core_service": entry(core_port),
-            "capability_module": entry(cap_port)}
+def _resolved_local() -> dict:
+    """`resolved.modules` as the daemon writes it post-bind."""
+    entry = {"transports": [{"protocol": "local"}]}
+    return {"core_service": entry, "capability_module": entry}
 
 
 def _seed_session(
-    config_dir: Path, modules: dict, *, instance_id: str = "iid",
+    config_dir: Path, modules: dict | None = None, *, instance_id: str = "iid",
     token: str = "t",
 ) -> None:
     daemon_dir = config_dir / "daemon"
@@ -754,162 +556,43 @@ def _seed_session(
     (daemon_dir / "state.json").write_text(json.dumps({
         "version": 2, "instance_id": instance_id, "pid": 4242,
         "config_source": "config.yaml",
-        "resolved": {"modules": modules},
+        "resolved": {"modules": _resolved_local() if modules is None else modules},
     }))
     client_dir = config_dir / "client"
     client_dir.mkdir(parents=True, exist_ok=True)
     (client_dir / "auto.json").write_text(_dumped({"token": token}))
 
 
-def _started_daemon(tmp_path: Path, **kwargs: Any) -> LogosctlDaemon:
-    daemon = LogosctlDaemon("/abs/mods", config_dir=tmp_path, **kwargs)
+def _started_daemon(tmp_path: Path) -> LogosctlDaemon:
+    daemon = LogosctlDaemon("/abs/mods", config_dir=tmp_path)
     daemon._process = object()  # bypass the "daemon not running" guard
-    if any(p in ("tcp", "tcp_ssl") for p in daemon.transports):
-        daemon._network_token = "network-t"
     return daemon
-
-
-def test_network_ready_uses_issued_token_then_revokes_it(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001), token="boot")
-    daemon = LogosctlDaemon("/abs/mods", config_dir=tmp_path, transports=["tcp"])
-    daemon._process = _FakeDaemonProcess()
-    events: list[tuple[str, Any]] = []
-
-    def issue(name, **kwargs):
-        events.append(("issue", name))
-        assert kwargs["config_dir"] == tmp_path
-        # Revoked by stop(); the expiry bounds one a killed wrapper leaves.
-        assert kwargs.get("expires") == "24h"
-        return {"token": "network"}
-
-    monkeypatch.setattr("logosctl.daemon.issue_token", issue)
-    monkeypatch.setattr(
-        "logosctl.daemon._proc.run_json",
-        lambda binary, args, **kwargs: events.append(
-            ("status", kwargs["token"])),
-    )
-    monkeypatch.setattr(
-        "logosctl.daemon.revoke_token",
-        lambda name, **kwargs: events.append(("revoke", name)),
-    )
-
-    daemon._wait_for_ready()
-    assert events[0][0] == "issue"
-    assert events[1] == ("status", "network")
-    assert daemon._read_token() == "network"
-    daemon._process = None
-    daemon.stop()
-    assert events[2] == ("revoke", events[0][1])
 
 
 def test_daemon_client_carries_only_config_dir_and_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     rec = _Recorder(monkeypatch)
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
-    _started_daemon(tmp_path, transports=["tcp"]).client().status()
+    _seed_session(tmp_path)
+    _started_daemon(tmp_path).client().status()
 
     env = rec.calls[0]["env"]
     assert env["LOGOSCTL_CONFIG_DIR"] == str(tmp_path)
-    assert env["LOGOSCTL_TOKEN"] == "network-t"
+    assert env["LOGOSCTL_TOKEN"] == "t"
     assert {k for k, v in env.items() if os.environ.get(k) != v} == {
         "LOGOSCTL_CONFIG_DIR", "LOGOSCTL_TOKEN"}
 
 
-def test_daemon_client_without_overrides_leaves_the_daemons_file_alone(
+def test_daemon_client_leaves_the_daemons_file_alone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     # The daemon writes a working client/config.yaml into its own session
-    # at every boot; rewriting it unasked would replace a file the daemon
-    # is entitled to own.
+    # at every boot; rewriting it would replace a file the daemon is
+    # entitled to own.
     _Recorder(monkeypatch)
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
-    _started_daemon(tmp_path, transports=["tcp"]).client()
+    _seed_session(tmp_path)
+    _started_daemon(tmp_path).client()
     assert not (tmp_path / "client" / "config.yaml").exists()
-
-
-def test_daemon_client_overrides_preserve_distinct_ports(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    _Recorder(monkeypatch)
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
-    _started_daemon(tmp_path, transports=["tcp"]).client(
-        tcp_host="example.com", codec="cbor")
-
-    daemon_block = _client_cfg(tmp_path)["daemon"]
-    assert daemon_block["core_service"]["host"] == "example.com"
-    assert daemon_block["capability_module"]["host"] == "example.com"
-    assert daemon_block["core_service"]["codec"] == "cbor"
-    assert daemon_block["capability_module"]["codec"] == "cbor"
-    # Each module keeps its OWN port — they come from the daemon's resolved
-    # state, and two listeners can never share one.
-    assert daemon_block["core_service"]["port"] == 6000
-    assert daemon_block["capability_module"]["port"] == 6001
-
-
-def test_daemon_client_override_carries_the_instance_id(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    # A `local` dial resolves its socket name through the instance id
-    # (`local:logos_<module>_<id>`), and a rebuilt config that dropped it
-    # would dial a name nothing is listening on.
-    _Recorder(monkeypatch)
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001),
-                  instance_id="0123456789ab")
-    _started_daemon(tmp_path, transports=["tcp"]).client(tcp_host="h")
-    assert _client_cfg(tmp_path)["instance_id"] == "0123456789ab"
-
-
-def test_daemon_client_local_override_keeps_minimal_shape(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    _Recorder(monkeypatch)
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
-    _started_daemon(tmp_path, transports=["tcp"]).client(transport="local")
-
-    daemon_block = _client_cfg(tmp_path)["daemon"]
-    # No host or port on a local entry — they'd be meaningless noise. The
-    # codec IS emitted (logoscore's in-place edit left it off; a rebuilt
-    # endpoint always carries one, and the CLI defaults it to json anyway).
-    for module in ("core_service", "capability_module"):
-        assert daemon_block[module] == {"transport": "local", "codec": "json"}
-
-
-def test_daemon_client_tcp_ssl_emits_ca_and_flips_verify(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-):
-    _Recorder(monkeypatch)
-    _seed_session(tmp_path, _resolved_modules("tcp_ssl", 6443, 6444))
-    daemon = _started_daemon(
-        tmp_path, transports=["tcp_ssl"], ssl_cert="/c.pem", ssl_key="/k.pem",
-        ssl_ca="/abs/ca.pem", verify_peer=True)
-
-    daemon.client(tcp_host="127.0.0.1")
-    block = _client_cfg(tmp_path)["daemon"]
-    for module in ("core_service", "capability_module"):
-        assert block[module]["verify_peer"] is True
-        # `ca` here, `ca_file` on the daemon side — the same file, two
-        # spellings. Dropping it while verify_peer stays true fails the
-        # handshake closed.
-        assert block[module]["ca"] == "/abs/ca.pem"
-
-    daemon.client(no_verify_peer=True)
-    block = _client_cfg(tmp_path)["daemon"]
-    for module in ("core_service", "capability_module"):
-        assert block[module]["verify_peer"] is False
-        assert block[module]["ca"] == "/abs/ca.pem"
-
-
-def test_daemon_client_rejects_tcp_port_kwarg(tmp_path: Path):
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
-    daemon = _started_daemon(tmp_path, transports=["tcp"])
-    # There is no per-call port override: each module's port comes from the
-    # daemon's own state, and one uniform value could only clobber
-    # capability_module onto core_service's port.
-    with pytest.raises(TypeError):
-        daemon.client(tcp_port=6000)
 
 
 def test_daemon_client_before_start_raises(tmp_path: Path):
@@ -918,70 +601,69 @@ def test_daemon_client_before_start_raises(tmp_path: Path):
         daemon.client()
 
 
-def test_endpoints_read_ephemeral_ports_back_from_state(tmp_path: Path):
-    # With `port: 0` the daemon allocates, and state.json is the only
-    # record of what it picked.
-    _seed_session(tmp_path, _resolved_modules("tcp", 51823, 51824))
-    endpoints = _started_daemon(tmp_path, transports=["tcp"]).endpoints()
-    assert endpoints["core_service"].port == 51823
-    assert endpoints["capability_module"].port == 51824
+def test_endpoints_are_the_local_socket(tmp_path: Path):
+    _seed_session(tmp_path)
+    assert _started_daemon(tmp_path).endpoints() == LOCAL
 
 
-def test_endpoints_dial_loopback_for_a_wildcard_bind(tmp_path: Path):
-    # Bind hosts are recorded verbatim, and 0.0.0.0 is not a dialable
-    # address on every platform.
-    modules = _resolved_modules("tcp", 6000, 6001)
-    for entry in modules.values():
-        entry["transports"][1]["host"] = "0.0.0.0"
-    _seed_session(tmp_path, modules)
-    endpoints = _started_daemon(tmp_path, transports=["tcp"]).endpoints()
-    assert endpoints["core_service"].host == "127.0.0.1"
-
-
-def test_endpoints_missing_protocol_is_a_named_error(tmp_path: Path):
-    _seed_session(tmp_path, _resolved_modules("tcp", 6000, 6001))
-    daemon = _started_daemon(tmp_path, transports=["tcp"])
-    with pytest.raises(LogosctlError, match="tcp_ssl"):
-        daemon.endpoints("tcp_ssl")
+def test_endpoints_without_a_local_listener_is_a_named_error(tmp_path: Path):
+    _seed_session(tmp_path, {"core_service": {"transports": []}})
+    with pytest.raises(LogosctlError, match="core_service"):
+        _started_daemon(tmp_path).endpoints()
 
 
 def test_remote_client_writes_its_own_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
-    """The shape logoscore expressed with LOGOSCORE_CLIENT_* env vars: a
-    client outside the daemon's session. It needs its own config.yaml plus
+    """A client outside the daemon's session needs its own config.yaml plus
     a credential — and it must NOT live in the daemon's config dir, which
     the daemon rewrites at every boot."""
     rec = _Recorder(monkeypatch)
     session = tmp_path / "session"
     session.mkdir()
     elsewhere = tmp_path / "elsewhere"
-    _seed_session(session, _resolved_modules("tcp", 6000, 6001), token="raw")
+    _seed_session(session, token="raw")
 
-    daemon = LogosctlDaemon("/abs/mods", config_dir=session, transports=["tcp"])
-    daemon._process = object()
-    daemon._network_token = "network-raw"
-    client = daemon.remote_client(elsewhere)
+    client = _started_daemon(session).remote_client(elsewhere)
     client.status()
 
     cfg = _client_cfg(elsewhere)
-    assert cfg["daemon"]["core_service"]["port"] == 6000
-    assert cfg["daemon"]["capability_module"]["port"] == 6001
+    assert cfg["daemon"] == {"core_service": {"transport": "local"},
+                             "capability_module": {"transport": "local"}}
+    # The local socket is named after the daemon's instance id.
     assert cfg["instance_id"] == "iid"
-    # A separately issued network token is copied; the boot token is local-only.
     assert json.loads(
-        (elsewhere / "client" / "auto.json").read_text()) == {"token": "network-raw"}
+        (elsewhere / "client" / "auto.json").read_text()) == {"token": "raw"}
     assert rec.calls[0]["env"]["LOGOSCTL_CONFIG_DIR"] == str(elsewhere)
     # And the daemon's own session is untouched.
     assert not (session / "client" / "config.yaml").exists()
 
 
 def test_remote_client_without_a_token_fails_loudly(tmp_path: Path):
-    _seed_session(tmp_path, _resolved_modules("local", 0, 0))
+    _seed_session(tmp_path)
     (tmp_path / "client" / "auto.json").unlink()
-    daemon = _started_daemon(tmp_path, transports=["local"])
     with pytest.raises(LogosctlError, match="auto.json"):
-        daemon.remote_client()
+        _started_daemon(tmp_path).remote_client()
+
+
+def test_set_remote_policy_installs_a_file_the_daemon_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    rec = _Recorder(monkeypatch, stdout=json.dumps({"ok": True}))
+    _seed_session(tmp_path)
+    policy = {"11111111-1111-1111-1111-111111111111/logosctl": {"core_service": ["getStatus"]}}
+    _started_daemon(tmp_path).set_remote_policy(policy)
+
+    path = tmp_path / "remote-policy.json"
+    assert json.loads(path.read_text()) == policy
+    assert rec.cmds[0][-4:] == ["peer", "policy", "set", str(path)]
+
+
+def test_a_refused_remote_policy_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _Recorder(monkeypatch, stdout=json.dumps({"ok": False}))
+    _seed_session(tmp_path)
+    with pytest.raises(LogosctlError, match="remote policy"):
+        _started_daemon(tmp_path).set_remote_policy({})
 
 
 # ── LogosctlDockerDaemon: operated over Remote Runtime Control ───────────────

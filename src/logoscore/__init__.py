@@ -2,8 +2,8 @@
 
 Launch a `logoscore` daemon, load modules, call methods, and subscribe to
 events from Python. Internally spawns `logoscore` subprocesses and parses
-their JSON output. A daemon in docker is the `logosctl` package's
-(`LogosctlDockerDaemon`).
+their JSON output. A client reaches a daemon on this machine; operating one
+elsewhere is the `logosctl` package's Remote Runtime Control.
 
 Example:
     from logoscore import LogoscoreDaemon

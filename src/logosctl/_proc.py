@@ -96,10 +96,8 @@ def _prep_env(
     """Build the child environment.
 
     `LOGOSCTL_CONFIG_DIR` and `LOGOSCTL_TOKEN` are the only two variables
-    the binary reads — the whole `LOGOSCORE_CLIENT_*` family that used to
-    select a transport per call is gone, and with it `client._env_overrides`.
-    Which daemon a client dials is now a document
-    (`<config_dir>/client/config.yaml`), not an environment.
+    the binary reads. Which daemon a client dials is a document
+    (`<config_dir>/client/config.yaml`) or `--remote`, not an environment.
 
     Passing the session through the environment rather than `--config-dir`
     is deliberate: `--config-dir` is an app-level option, so it only works
@@ -174,8 +172,7 @@ def run_json(
 
     `env` is a plain escape hatch for the child environment (e.g. pinning
     a short `TMPDIR` so the local transport's `$TMPDIR/logos_<module>_<id>`
-    socket path stays under the 104-byte `sun_path` limit on macOS). It no
-    longer carries transport selection — that moved into the client config.
+    socket path stays under the 104-byte `sun_path` limit on macOS).
     """
     # Global flags go BEFORE the subcommand. `--json` trailing does still
     # work — main.cpp pulls -j/--json, --no-json/--human and -q/--quiet back

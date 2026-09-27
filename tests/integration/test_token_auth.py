@@ -1,24 +1,18 @@
-"""Transport-parametrized e2e for operator-issued token authorization.
-
-Exercises the daemon's per-token enforcement over the full transport matrix
-(local / tcp / tcp_ssl):
+"""e2e for operator-issued token authorization, over the local socket.
 
 * an operator-issued named token (`issue-token --name …`) authorizes RPCs;
 * a revoked token stops working immediately;
-* a `--local-only` token is accepted over the local socket but rejected over
-  tcp / tcp_ssl.
+* a `--local-only` token is accepted.
 
 These assert the *enforcement* behavior: the daemon validates the presented
-token against `daemon/tokens.json` (`TokenStore::lookupByToken`) and, for a
-`local_only` token, keys the decision on the transport the call arrived on. A
-daemon without that enforcement accepts only its own boot `auto` token, so an
+token against `daemon/tokens.json` (`TokenStore::lookupByToken`). A daemon
+without that enforcement accepts only its own boot `auto` token, so an
 issued named token is not honored — hence the module-level guard below skips the
 whole file when the `logoscore` under test predates the feature. Once the
 enforcement CLI is pinned, the guard passes and these run.
 """
 from __future__ import annotations
 
-import json
 import pytest
 
 from logoscore import LogoscoreDaemon, issue_token, revoke_token
@@ -39,7 +33,7 @@ def _module_visible(client) -> bool:
 
 # ── enforcement guard ───────────────────────────────────────────────────────
 #
-# Boot one throwaway LOCAL daemon and check whether an issued named token is
+# Boot one throwaway daemon and check whether an issued named token is
 # actually honored. If not (an older logoscore that only knows the boot `auto`
 # token), skip the whole module rather than fail — these tests only make sense
 # against a daemon that enforces operator tokens.
@@ -66,71 +60,42 @@ def _require_enforcement(_enforcement_supported):
 # ── daemon / client fixtures (mirror tests/integration/test_end_to_end.py) ───
 
 @pytest.fixture
-def daemon(logoscore_bin, test_modules_dir, transport, tcp_port, tcp_ssl_port, request):
-    kwargs = {}
-    if transport != "local":
-        kwargs["transports"] = [transport]
-        if transport == "tcp":
-            kwargs["tcp_port"] = tcp_port
-        elif transport == "tcp_ssl":
-            cert, key = request.getfixturevalue("self_signed_cert")
-            kwargs["tcp_ssl_port"] = tcp_ssl_port
-            kwargs["ssl_cert"] = cert
-            kwargs["ssl_key"] = key
-    with LogoscoreDaemon(
-        modules_dir=test_modules_dir, binary=logoscore_bin, **kwargs,
-    ) as d:
+def daemon(logoscore_bin, test_modules_dir):
+    with LogoscoreDaemon(modules_dir=test_modules_dir, binary=logoscore_bin) as d:
         yield d
 
 
-def _client_for(daemon, transport, token):
-    """A client wired to `transport`, presenting `token` instead of the
-    daemon's auto token."""
-    kw = {"no_verify_peer": True} if transport == "tcp_ssl" else {}
-    c = daemon.client(**kw)
+def _client_for(daemon, token):
+    """A client presenting `token` instead of the daemon's auto token."""
+    c = daemon.client()
     c.token = token
     return c
 
 
 # ── tests ───────────────────────────────────────────────────────────────────
 
-def test_named_token_authorizes_over_transport(daemon, transport, logoscore_bin):
-    """An operator-issued named token authorizes an RPC over every transport."""
+def test_named_token_authorizes(daemon, logoscore_bin):
+    """An operator-issued named token authorizes an RPC."""
     issued = issue_token("alice", binary=logoscore_bin, config_dir=daemon.config_dir)
-    c = _client_for(daemon, transport, issued["token"])
-    assert _module_visible(c), \
-        f"an issued named token must authorize over {transport}"
+    assert _module_visible(_client_for(daemon, issued["token"])), \
+        "an issued named token must authorize"
 
 
-def test_revoked_token_is_rejected(daemon, transport, logoscore_bin):
+def test_revoked_token_is_rejected(daemon, logoscore_bin):
     """revoke-token takes effect immediately — the token stops authorizing."""
     issued = issue_token("bob", binary=logoscore_bin, config_dir=daemon.config_dir)
-    c = _client_for(daemon, transport, issued["token"])
+    c = _client_for(daemon, issued["token"])
     assert _module_visible(c), "sanity: freshly-issued token should work first"
 
     revoke_token("bob", binary=logoscore_bin, config_dir=daemon.config_dir)
     assert not _module_visible(c), "a revoked token must no longer authorize"
 
 
-def test_local_only_token_enforced_by_transport(daemon, transport, logoscore_bin):
-    """A `--local-only` token works over the local socket but is rejected over
-    the network (tcp / tcp_ssl) — the daemon keys the decision on the transport
-    the call arrived on."""
+def test_local_only_token_is_accepted(daemon, logoscore_bin):
+    """A `--local-only` token works over the local socket."""
     issued = issue_token(
         "loconly", binary=logoscore_bin, config_dir=daemon.config_dir,
         local_only=True,
     )
-    c = _client_for(daemon, transport, issued["token"])
-    if transport == "local":
-        assert _module_visible(c), \
-            "a local_only token must be accepted over the local socket"
-    else:
-        assert not _module_visible(c), \
-            f"a local_only token must be rejected over {transport}"
-
-
-def test_boot_token_stays_local_only(daemon, transport):
-    """The daemon's boot credential must obey the same local-only policy."""
-    token = json.loads(daemon.client_token_file.read_text())["token"]
-    c = _client_for(daemon, transport, token)
-    assert _module_visible(c) is (transport == "local")
+    assert _module_visible(_client_for(daemon, issued["token"])), \
+        "a local_only token must be accepted over the local socket"

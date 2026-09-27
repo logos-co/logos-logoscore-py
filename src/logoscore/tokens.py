@@ -31,9 +31,9 @@ def issue_token(
     only exists in the returned dict and in the per-client file at
     `file`; the daemon's `tokens.json` stores only a hash.
 
-    `local_only=True` marks the token valid only over the local (QLocalSocket)
-    transport — the daemon rejects it when presented over tcp / tcp_ssl.
-    `expires` accepts a duration the CLI understands (e.g. ``"30d"``).
+    `local_only=True` marks the token valid only over the local socket
+    (`--local-only`). `expires` accepts a duration the CLI understands
+    (e.g. ``"30d"``).
     """
     args = ["issue-token", "--name", name]
     if replace:

@@ -29,50 +29,19 @@ from .events import Subscription
 
 @dataclass(frozen=True)
 class DaemonEndpoint:
-    """One well-known module's dial spec for a logosctl daemon.
+    """One well-known module's entry in the `daemon` block of
+    `<config_dir>/client/config.yaml` (schema version 2).
 
-    Serialized into a single entry of the `daemon` block of
-    `<config_dir>/client/config.yaml` (schema version 2). A daemon serves
-    each well-known module (`core_service`, `capability_module`) on its
-    own listener, so a full connection needs one `DaemonEndpoint` per
-    module.
-
-    This is the CLIENT half of the wire description, and its key names
-    are deliberately NOT the daemon's: a listener in the daemon document
-    says `protocol:` / `cert:` / `key:` / `ca_file:`, while an entry here
-    says `transport:` / `ca:`. Spelling one in the other's document fails
-    the parse — the client side has no `cert`/`key` at all.
-
-    `verify_peer` and `ca` are only emitted for `tcp_ssl` transports;
-    leave them None to omit them (the typical case for plain `tcp`).
-    Dropping `ca` while `verify_peer` stays true fails the handshake
-    closed, so a dev setup wants `verify_peer=False` rather than a
-    missing CA.
+    A client dials a daemon on this machine over its local socket; a daemon
+    elsewhere is operated with Remote Runtime Control
+    (`LogosctlClient(remote=…)`), which needs no dial spec at all.
     """
 
-    transport: str               # "tcp" | "tcp_ssl" | "local"
-    host: str | None = None
-    port: int | None = None
-    codec: str = "json"
-    verify_peer: bool | None = None
-    ca: str | None = None        # path to the CA bundle, tcp_ssl only
+    transport: str = "local"
 
     def _to_config_block(self) -> dict:
-        # Built explicitly (not dataclasses.asdict) so key order and the
-        # tcp_ssl-only `ca`/`verify_peer` match what the daemon writes
-        # into its own session on boot — see write_config.
-        block: dict = {"transport": self.transport}
-        if self.host is not None:
-            block["host"] = self.host
-        if self.port is not None:
-            block["port"] = self.port
-        block["codec"] = self.codec
-        if self.transport == "tcp_ssl":
-            if self.ca is not None:
-                block["ca"] = self.ca
-            if self.verify_peer is not None:
-                block["verify_peer"] = self.verify_peer
-        return block
+        # The shape the daemon writes into its own session on boot.
+        return {"transport": self.transport}
 
 
 def _json_default(obj: Any) -> Any:
@@ -143,21 +112,6 @@ class LogosctlClient:
         # there, over the pairing this config dir holds, and needs no token.
         self.remote = remote
 
-    # logoscore also took `transport` / `tcp_host` / `tcp_port` /
-    # `no_verify_peer` / `codec` here, and turned them into
-    # LOGOSCORE_CLIENT_* env vars the CLI merged over the on-disk spec per
-    # call. logosctl honours exactly two variables — LOGOSCTL_CONFIG_DIR
-    # and LOGOSCTL_TOKEN — and `RpcClient::connect()` reads
-    # client/config.yaml verbatim with no merge layer at all. There is
-    # therefore nothing a per-call kwarg could set, so the kwargs are
-    # gone rather than silently ignored. Retargeting a client means
-    # writing a different dial spec: `connect()` below, or an in-place
-    # edit of the file (what `LogosctlDaemon` does). The per-module `port`
-    # that `tcp_port` used to override — a docker `-p 8080:6000` mapping,
-    # an SSH tunnel on another port — is now just `DaemonEndpoint(port=…)`,
-    # which is strictly better: it can differ per module, and the single
-    # uniform env port never could.
-
     # ── Construction helpers ──────────────────────────────────────────────────
 
     @staticmethod
@@ -170,12 +124,11 @@ class LogosctlClient:
         merge: bool = False,
     ) -> None:
         """Write a `<config_dir>/client/config.yaml` dial spec (schema
-        version 2) with one entry per well-known module, so the CLI can
-        reach a daemon whose modules live on distinct listeners.
+        version 2) with one entry per well-known module.
 
         This is the single source of truth for the on-disk client config —
-        `LogosctlDaemon` and standalone callers (see `connect`) funnel
-        through here.
+        `LogosctlDaemon.remote_client` and standalone callers (see
+        `connect`) funnel through here.
 
         The document is emitted as JSON text into a `.yaml` file. YAML is
         a superset of JSON, so the CLI's yaml-cpp parser reads it back
@@ -196,8 +149,8 @@ class LogosctlClient:
 
         `instance_id`, when not None (including ""), is recorded in
         config.yaml. It is mandatory for a `local` dial from a foreign
-        config dir — the registry name is `local:logos_<module>_<id>` —
-        and meaningless over tcp/tcp_ssl. `merge=True` preserves any
+        config dir — the registry name is `local:logos_<module>_<id>`.
+        `merge=True` preserves any
         pre-existing keys in config.yaml instead of rebuilding it from
         scratch — used by the local daemon, which patches the daemon's
         auto-emitted file.
@@ -262,14 +215,14 @@ class LogosctlClient:
         timeout: float | None = 30.0,
         instance_id: str | None = None,
     ) -> "LogosctlClient":
-        """Build a client that dials a (possibly remote) daemon described
-        by per-module `endpoints`.
+        """Build a client that dials a daemon on this machine from a config
+        dir the daemon does not own, described by per-module `endpoints`.
 
         Materializes a `client/config.yaml` (via `write_config`) and
         returns a client bound to that config dir. The on-disk spec is the
         whole story — logosctl has no client-side flags or env vars to
-        override it with, so this is the only way to reach a daemon that
-        isn't the one owning this config dir.
+        override it with. A daemon on another machine is operated with
+        Remote Runtime Control instead (`logosctl.remote`).
 
         Point this at a config dir the daemon does NOT own. A daemon
         rewrites `client/config.yaml` in its own session on every boot
@@ -277,11 +230,11 @@ class LogosctlClient:
         would silently replace a spec written into its dir.
 
         `token` is the raw token string the daemon issued for this client
-        (see `issue_token`). TCP and TLS clients need a named token: the
-        daemon's `client/auto.json` boot token is local-only. When `config_dir` is
-        None a private temp dir is created and removed when the returned
-        client is garbage collected; pass a `config_dir` to keep the
-        config around (it is never deleted).
+        (its `client/auto.json`, or a named one from `issue_token`), and
+        `instance_id` the daemon's (its local socket is named after it).
+        When `config_dir` is None a private temp dir is created and removed
+        when the returned client is garbage collected; pass a `config_dir`
+        to keep the config around (it is never deleted).
         """
         owns_dir = config_dir is None
         cfg_dir = (

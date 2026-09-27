@@ -22,38 +22,16 @@ from .events import Subscription
 
 @dataclass(frozen=True)
 class DaemonEndpoint:
-    """One well-known module's dial spec for a logoscore daemon.
-
-    Serialized into a single entry of the `daemon` block of
-    `<config_dir>/client/config.json` (schema version 2). A daemon serves
-    each well-known module (`core_service`, `capability_module`) on its
-    own listener, so a full connection needs one `DaemonEndpoint` per
-    module — which is exactly what the single-endpoint `LOGOSCORE_CLIENT_*`
-    env overrides cannot express.
-
-    `verify_peer` is only emitted for `tcp_ssl` transports; leave it None
-    to omit it (the typical case for plain `tcp`).
+    """One well-known module's entry in the `daemon` block of
+    `<config_dir>/client/config.json` (schema version 2): the local socket,
+    the one transport a client dials.
     """
 
-    transport: str               # "tcp" | "tcp_ssl" | "local"
-    host: str | None = None
-    port: int | None = None
-    codec: str = "json"
-    verify_peer: bool | None = None
+    transport: str = "local"
 
     def _to_config_block(self) -> dict:
-        # Built explicitly (not dataclasses.asdict) so key order and the
-        # tcp_ssl-only `verify_peer` match what the daemon helpers wrote
-        # by hand before this was centralized — see write_config.
-        block: dict = {"transport": self.transport}
-        if self.host is not None:
-            block["host"] = self.host
-        if self.port is not None:
-            block["port"] = self.port
-        block["codec"] = self.codec
-        if self.transport == "tcp_ssl" and self.verify_peer is not None:
-            block["verify_peer"] = self.verify_peer
-        return block
+        # The shape the daemon writes into its own session on boot.
+        return {"transport": self.transport}
 
 
 def _json_default(obj: Any) -> Any:
@@ -119,28 +97,11 @@ class LogoscoreClient:
         config_dir: Path | None = None,
         token: str | None = None,
         timeout: float | None = 30.0,
-        transport: str | None = None,
-        tcp_host: str | None = None,
-        tcp_port: int | None = None,
-        no_verify_peer: bool = False,
-        codec: str | None = None,
     ) -> None:
         self.binary = binary
         self.config_dir = Path(config_dir) if config_dir is not None else None
         self.token = token
         self.timeout = timeout
-        self.transport = transport
-        self.tcp_host = tcp_host
-        # `tcp_port` overrides the daemon-advertised port. Needed when
-        # the reachable port differs from the one the daemon bound —
-        # e.g. a docker `-p 8080:6000` maps host 8080 to container
-        # 6000, or an SSH tunnel forwards through a different port.
-        self.tcp_port = tcp_port
-        self.no_verify_peer = no_verify_peer
-        # Optional pin of the wire codec. When set, the client insists the
-        # picked transport uses this codec — mismatch aborts connect. When
-        # unset, the client accepts whatever the daemon advertised.
-        self.codec = codec
 
     # ── Construction helpers ──────────────────────────────────────────────────
 
@@ -154,12 +115,8 @@ class LogoscoreClient:
         merge: bool = False,
     ) -> None:
         """Write a `<config_dir>/client/config.json` dial spec (schema
-        version 2) with one entry per well-known module, so the CLI can
-        reach a daemon whose modules live on distinct listeners.
-
-        This is the single source of truth for the on-disk client config —
-        `LogoscoreDaemon` and standalone callers (see `connect`) funnel
-        through here.
+        version 2) with one entry per well-known module — the single source
+        of truth for the on-disk client config (see `connect`).
 
         `token`, when given, is the RAW token string; it's wrapped as
         `{"token": token}` and written to the file named by `token_file`
@@ -169,8 +126,7 @@ class LogoscoreClient:
 
         `instance_id`, when not None (including ""), is recorded in
         config.json. `merge=True` preserves any pre-existing keys in
-        config.json instead of rebuilding it from scratch — used by the
-        local daemon, which patches the daemon's auto-emitted file.
+        config.json instead of rebuilding it from scratch.
         """
         client_dir = Path(config_dir) / "client"
         client_dir.mkdir(parents=True, exist_ok=True)
@@ -215,21 +171,16 @@ class LogoscoreClient:
         timeout: float | None = 30.0,
         instance_id: str | None = None,
     ) -> "LogoscoreClient":
-        """Build a client that dials a (possibly remote) daemon described
-        by per-module `endpoints`.
+        """Build a client that dials a daemon on this machine from a config
+        dir the daemon does not own, described by per-module `endpoints`.
 
         Materializes a `client/config.json` (via `write_config`) and
-        returns a client bound to that config dir with NO env overrides —
-        the on-disk spec is authoritative. This is the only way to reach a
-        daemon whose `core_service` and `capability_module` listen on
-        different ports, which the constructor's single-endpoint
-        `transport=`/`tcp_*=` kwargs can't represent.
-
-        `token` is the raw token string the daemon issued for this client
-        (see `issue_token`). When `config_dir` is None a private temp dir
-        is created and removed when the returned client is garbage
-        collected; pass a `config_dir` to keep the config around (it is
-        never deleted).
+        returns a client bound to that config dir. `token` is the raw token
+        string the daemon issued for this client (see `issue_token`), and
+        `instance_id` the daemon's (its local socket is named after it).
+        When `config_dir` is None a private temp dir is created and removed
+        when the returned client is garbage collected; pass a `config_dir`
+        to keep the config around (it is never deleted).
         """
         owns_dir = config_dir is None
         cfg_dir = (
@@ -248,36 +199,18 @@ class LogoscoreClient:
                 client, shutil.rmtree, str(cfg_dir), True)
         return client
 
-    def _env_overrides(self) -> dict[str, str] | None:
-        """Env vars the CLI reads to pick a client-side transport. Kept out
-        of the public API — the user sees kwargs, the CLI sees env vars."""
-        out: dict[str, str] = {}
-        if self.transport:
-            out["LOGOSCORE_CLIENT_TRANSPORT"] = self.transport
-        if self.tcp_host:
-            out["LOGOSCORE_CLIENT_TCP_HOST"] = self.tcp_host
-        if self.tcp_port is not None:
-            out["LOGOSCORE_CLIENT_TCP_PORT"] = str(self.tcp_port)
-        if self.no_verify_peer:
-            out["LOGOSCORE_CLIENT_NO_VERIFY_PEER"] = "1"
-        if self.codec:
-            out["LOGOSCORE_CLIENT_CODEC"] = self.codec
-        return out or None
-
     # ── Daemon-wide commands ────────────────────────────────────────────────
 
     def status(self) -> dict:
         return _proc.run_json(
             self.binary, ["status"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     def stats(self) -> Any:
         return _proc.run_json(
             self.binary, ["stats"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     def stop(self) -> None:
@@ -285,7 +218,6 @@ class LogoscoreClient:
         _proc.run_json(
             self.binary, ["stop"],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     # ── Module management ───────────────────────────────────────────────────
@@ -297,7 +229,6 @@ class LogoscoreClient:
         result = _proc.run_json(
             self.binary, args,
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
         return result if isinstance(result, list) else []
 
@@ -305,28 +236,24 @@ class LogoscoreClient:
         return _proc.run_json(
             self.binary, ["module-info", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     def load_module(self, name: str) -> dict:
         return _proc.run_json(
             self.binary, ["load-module", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     def unload_module(self, name: str) -> dict:
         return _proc.run_json(
             self.binary, ["unload-module", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     def reload_module(self, name: str) -> dict:
         return _proc.run_json(
             self.binary, ["reload-module", name],
             config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-            env=self._env_overrides(),
         )
 
     # ── Method calls ────────────────────────────────────────────────────────
@@ -360,7 +287,6 @@ class LogoscoreClient:
             self.binary, cli_args,
             config_dir=self.config_dir, token=self.token,
             timeout=timeout if timeout is not None else self.timeout,
-            env=self._env_overrides(),
         )
         # On success, the CLI prints {"status":"success", "result": ...} — but
         # non-success paths are already raised by run_json (exit code 3 or 4).
@@ -404,7 +330,6 @@ class LogoscoreClient:
             token=self.token,
             callback=callback,
             error_callback=error_callback,
-            extra_env=self._env_overrides(),
         )
 
     # ── Internal ────────────────────────────────────────────────────────────

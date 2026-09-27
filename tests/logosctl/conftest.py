@@ -14,21 +14,9 @@ The Nix flake's `integration` check sets both. Running
 `pytest tests/logosctl/unit` needs neither. That skip-by-default is the
 point: `pytest` on a plain Python checkout must not start spawning daemons.
 
-Everything that describes the wire rather than the CLI is inherited from
-tests/conftest.py — the `--transport` / `--docker-flavor` options and the
-`transport`, `tcp_port`, `tcp_ssl_port` and `self_signed_cert` fixtures.
-They mean the same thing for both binaries, so they are shared rather than
-copied. What is per-suite is only what names a binary or its modules, and
-that is all this file holds.
-
-One caveat when reaching for the inherited `self_signed_cert`: it is issued
-for CN=localhost with no subjectAltName, so it only gets you a working
-handshake with verification off — which is the default here
-(`LogosctlDaemon(verify_peer=False)`, `daemon.client(no_verify_peer=True)`).
-A test that wants the real verification path has to mint its own cert
-carrying `subjectAltName=IP:127.0.0.1,DNS:localhost` and hand the daemon an
-`ssl_ca`; with logosctl there is no per-call escape from what the on-disk
-dial spec says, since the `LOGOSCORE_CLIENT_*` env family is gone.
+The `--docker-flavor` option is inherited from tests/conftest.py. What is
+per-suite is only what names a binary or its modules, and that is all this
+file holds.
 """
 from __future__ import annotations
 

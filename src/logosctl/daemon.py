@@ -12,20 +12,19 @@ the same test process without colliding on `~/.logosctl/daemon/`, and
 nothing the wrapper does leaks into the developer's global state.
 
 The one structural difference from the `logoscore` wrapper is that none of
-the daemon's setup is expressible on the command line any more: `-m`,
-`--persistence-path`, `--module-transport` and `--insecure-tcp` were all
-deleted in favour of a YAML document installed with `logosctl daemon
-config set FILE`. `daemon start` acts on whatever is already on disk, so
-`start()` has two phases — install the config, then boot — and a document
-the CLI rejects has to be a hard error: the daemon would otherwise come up
-silently missing every modules dir and listener the caller asked for.
+the daemon's setup is expressible on the command line: modules dirs, the
+persistence path and everything else are a YAML document installed with
+`logosctl daemon config set FILE`. `daemon start` acts on whatever is
+already on disk, so `start()` has two phases — install the config, then
+boot — and a document the CLI rejects has to be a hard error: the daemon
+would otherwise come up silently missing every modules dir the caller
+asked for.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import secrets
 import shutil
 import subprocess
 import tempfile
@@ -36,7 +35,6 @@ from typing import Any, IO, Mapping
 from . import _proc
 from .client import DaemonEndpoint, LogosctlClient
 from .errors import LogosctlError
-from .tokens import issue_token, revoke_token
 
 
 # ── YAML emitting ────────────────────────────────────────────────────────
@@ -132,7 +130,6 @@ _CONFIG_KEY_TYPES: dict[str, tuple[type, ...]] = {
     "persistence_path": (str,),
     "access_policy": (str,),
     "access_group": (str,),
-    "insecure_tcp": (bool,),
 }
 
 
@@ -162,41 +159,6 @@ def _abs(path: str | Path) -> Path:
     return Path(path).expanduser().absolute()
 
 
-def _is_loopback(host: str) -> bool:
-    # Same set the daemon's plaintext-tcp guard treats as loopback.
-    return host in ("127.0.0.1", "::1", "localhost")
-
-
-def _binds_public_plaintext_tcp(doc: dict) -> bool:
-    """True when `doc` binds plaintext tcp on a host the daemon won't
-    accept without `insecure_tcp`.
-
-    Runs over a whole config document rather than the wrapper's own
-    listeners, because the daemon's guard runs over its whole merged
-    config too — a listener that arrived via `extra_config` gets exactly
-    the same scrutiny there. An absent `host` counts as public, matching
-    the daemon: its `isLoopback("")` is false, so a hostless tcp listener
-    trips the guard.
-
-    Defensive about shape: `modules` may be anything a caller put in
-    `extra_config`, and a malformed document should be rejected by the
-    CLI with its own message, not by a TypeError in here."""
-    modules = doc.get("modules")
-    if not isinstance(modules, dict):
-        return False
-    for entries in modules.values():
-        if not isinstance(entries, list):
-            continue
-        for listener in entries:
-            if not isinstance(listener, dict):
-                continue
-            if listener.get("protocol") != "tcp":
-                continue
-            if not _is_loopback(str(listener.get("host", ""))):
-                return True
-    return False
-
-
 class LogosctlDaemon:
     """Context manager that spawns and tears down a logosctl daemon."""
 
@@ -221,56 +183,6 @@ class LogosctlDaemon:
         # package_manager and package_downloader and creates the session's
         # modules/plugins/keyring/cache dirs before state.json appears.
         startup_timeout: float = 30.0,
-        # Per-module transport list applied to BOTH `core_service` and
-        # `capability_module` — i.e. every protocol named here becomes one
-        # listener entry under `modules: { <module>: [ … ] }` in the daemon
-        # config document. (logoscore spelled the same thing as repeated
-        # `--module-transport <module>=<protocol>[,k=v...]` flags; that
-        # flag no longer exists.)
-        #
-        # The daemon ALWAYS adds an implicit LocalSocket listener for
-        # each module regardless of what's in this list — so
-        # `transports=["tcp"]` actually binds `[local, tcp]` per
-        # module, and a same-host client can still dial via
-        # LocalSocket. The list controls what *additional*
-        # outside-facing listeners get bound. Naming `local` here is
-        # a no-op (idempotent with the implicit one). Omitting this
-        # argument entirely emits no `modules` block and the daemon's
-        # default (a single `local` listener per well-known module)
-        # applies.
-        transports: list[str] | None = None,
-        tcp_host: str = "127.0.0.1",
-        # `tcp_port` is core_service's port. `tcp_cap_port` is
-        # capability_module's. They MUST be distinct: each module
-        # opens its own listener, and two QTcpServers can't share an
-        # address:port pair. Default 0 on both → daemon auto-allocates
-        # ephemerals via PortAllocator (always distinct). Tests that
-        # need the host to know the port up front pre-pick two free
-        # ports and pass both.
-        tcp_port: int = 0,
-        tcp_cap_port: int = 0,
-        tcp_codec: str = "json",        # "json" | "cbor"
-        tcp_ssl_host: str = "127.0.0.1",
-        tcp_ssl_port: int = 0,
-        # Same dual-port story for tcp_ssl — capability_module's
-        # tcp_ssl listener needs its own port when both are bound.
-        tcp_ssl_cap_port: int = 0,
-        tcp_ssl_codec: str = "json",    # "json" | "cbor"
-        ssl_cert: str | Path | None = None,
-        ssl_key: str | Path | None = None,
-        ssl_ca: str | Path | None = None,
-        # On-disk dial-spec value for `verify_peer` in the client
-        # config.yaml the wrapper writes for tcp_ssl after startup. False
-        # (default) suits the typical test setup where ssl_cert is
-        # self-signed and wouldn't validate against any CA. Override to
-        # True with a CA-issued cert if you want the full verification
-        # path. Unlike logoscore there is no per-call escape from this:
-        # the `LOGOSCORE_CLIENT_*` env family is gone, so the on-disk
-        # value is the only thing the CLI reads (see `client()`).
-        verify_peer: bool = False,
-        # Lifetime of the named token issued for tcp/tls clients. stop()
-        # revokes it; the expiry bounds one a killed process leaves behind.
-        network_token_ttl: str = "24h",
     ) -> None:
         if isinstance(modules_dir, (str, Path)):
             self.modules_dirs: list[Path] = [Path(modules_dir)]
@@ -285,20 +197,6 @@ class LogosctlDaemon:
         self.extra_config = dict(extra_config or {})
         self.extra_env = dict(env or {})
         self.startup_timeout = startup_timeout
-        self.transports = list(transports or [])
-        self.tcp_host = tcp_host
-        self.tcp_port = tcp_port
-        self.tcp_cap_port = tcp_cap_port
-        self.tcp_codec = tcp_codec
-        self.tcp_ssl_host = tcp_ssl_host
-        self.tcp_ssl_port = tcp_ssl_port
-        self.tcp_ssl_cap_port = tcp_ssl_cap_port
-        self.tcp_ssl_codec = tcp_ssl_codec
-        self.ssl_cert = Path(ssl_cert) if ssl_cert else None
-        self.ssl_key = Path(ssl_key) if ssl_key else None
-        self.ssl_ca = Path(ssl_ca) if ssl_ca else None
-        self.verify_peer = verify_peer
-        self.network_token_ttl = network_token_ttl
 
         if config_dir is None:
             self._config_dir = Path(tempfile.mkdtemp(prefix="logosctl-"))
@@ -311,8 +209,6 @@ class LogosctlDaemon:
         self._process: subprocess.Popen[str] | None = None
         self._stdout_file: IO[str] | None = None
         self._stderr_file: IO[str] | None = None
-        self._network_token: str | None = None
-        self._network_token_name: str | None = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -323,11 +219,11 @@ class LogosctlDaemon:
     @property
     def state_file(self) -> Path:
         # Path to the daemon's live runtime-state file. Created at boot
-        # (after transports actually bind AND the bundled package modules
-        # load) and removed at clean shutdown. Carries instance_id, pid,
-        # started_at, and the resolved transport endpoints (post-bind,
-        # with real ports). Operator preferences live next to it in
-        # config.yaml; persistent state (tokens.json) in its own file.
+        # (after its listeners bind AND the bundled package modules load)
+        # and removed at clean shutdown. Carries instance_id, pid,
+        # started_at, and the resolved listeners. Operator preferences live
+        # next to it in config.yaml; persistent state (tokens.json) in its
+        # own file.
         return self._config_dir / "daemon" / "state.json"
 
     @property
@@ -451,55 +347,16 @@ class LogosctlDaemon:
         self._stdout_file = None
         self._stderr_file = None
 
-        if self._network_token_name is not None:
-            try:
-                revoke_token(self._network_token_name, binary=self.binary,
-                             config_dir=self._config_dir)
-            except Exception:
-                pass
-            self._network_token_name = None
-            self._network_token = None
-
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
 
-    def client(
-        self,
-        *,
-        timeout: float | None = 30.0,
-        transport: str | None = None,
-        tcp_host: str | None = None,
-        no_verify_peer: bool = False,
-        codec: str | None = None,
-    ) -> LogosctlClient:
-        """Build a client wired to this daemon's `client/config.yaml`.
-
-        The daemon writes a per-module dial spec at startup (auto-emitted
-        for `local`; rewritten from `state.json` for `tcp`/`tcp_ssl` — see
-        `_write_own_client_config`), so the default `client()` needs no
-        transport args: `core_service` and `capability_module` each dial
-        their own bound port straight from disk.
-
-        The optional `transport` / `tcp_host` / `codec` / `no_verify_peer`
-        overrides rewrite that on-disk spec (uniformly across both
-        modules, since they share host/transport/codec/verify). logoscore
-        could also express these as `LOGOSCORE_CLIENT_*` env vars; that
-        whole family was deleted, so the file is now the ONLY way to
-        retarget a client — if the rewrite fails there is no fallback.
-        There is deliberately no per-call port override: each module's
-        port comes from the daemon's own state and is left untouched.
-        """
+    def client(self, *, timeout: float | None = 30.0) -> LogosctlClient:
+        """Build a client wired to this daemon's `client/config.yaml`, which
+        the daemon writes into its own session at boot."""
         if self._process is None:
             raise LogosctlError(
                 "daemon is not running — call start() or use the context manager"
             )
-        if (transport is not None or tcp_host is not None
-                or codec is not None or no_verify_peer):
-            self._write_own_client_config(
-                transport=transport, host=tcp_host, codec=codec,
-                verify_peer=False if no_verify_peer else None)
-        if (transport or self._network_transport()) in ("tcp", "tcp_ssl"):
-            self._ensure_network_token()
         return LogosctlClient(
             binary=self.binary,
             config_dir=self._config_dir,
@@ -511,43 +368,29 @@ class LogosctlDaemon:
         self,
         config_dir: str | Path | None = None,
         *,
-        transport: str | None = None,
-        host: str | None = None,
-        codec: str | None = None,
-        verify_peer: bool | None = None,
         timeout: float | None = 30.0,
         binary: str | None = None,
     ) -> LogosctlClient:
-        """Build a client that drives this daemon from a SEPARATE config dir.
+        """Build a client that drives this daemon from a SEPARATE config dir
+        on this machine, over the daemon's local socket.
 
-        This is the shape logoscore expressed with `LOGOSCORE_CLIENT_*`
-        env vars. They're gone: a dial spec is a file, so a client living
-        outside the daemon's session needs its own
-        `<config_dir>/client/config.yaml` plus a copy of a token the
-        daemon accepts. `LogosctlClient.connect` writes both; what this
-        adds is the endpoints — read back from `state.json`, since the
-        ports are only known post-bind when the caller asked for
-        ephemerals — and the token itself.
+        A client living outside the daemon's session needs its own
+        `<config_dir>/client/config.yaml` plus a copy of a token the daemon
+        accepts; `LogosctlClient.connect` writes both. The socket's name
+        embeds the daemon's instance id, carried through here, and
+        QLocalServer resolves it against `$TMPDIR`, so both sides need the
+        same one. A client on another machine uses Remote Runtime Control
+        instead (`logosctl.remote.RuntimeControl`).
 
         `config_dir=None` uses a private temp dir that is removed when the
-        returned client is garbage collected. A `local` transport
-        additionally needs the daemon's instance id (the socket's registry
-        name embeds it, and it's carried through here) and a shared
-        `$TMPDIR` — QLocalServer resolves the bare socket name against it.
+        returned client is garbage collected.
         """
         if self._process is None:
             raise LogosctlError(
                 "daemon is not running — call start() or use the context manager"
             )
         state = self._read_state()
-        endpoints = self._endpoints_from_state(
-            state, transport=transport, host=host,
-            codec=codec, verify_peer=verify_peer)
-        # The boot token is local-only. A network client needs a separately
-        # issued credential, including when the caller explicitly overrides
-        # the wrapper's default transport here.
-        if any(e.transport in ("tcp", "tcp_ssl") for e in endpoints.values()):
-            self._ensure_network_token()
+        endpoints = self._endpoints_from_state(state)
         token = self._read_token()
         if token is None:
             raise LogosctlError(
@@ -563,22 +406,9 @@ class LogosctlDaemon:
             instance_id=state.get("instance_id"),
         )
 
-    def endpoints(
-        self,
-        transport: str | None = None,
-        *,
-        host: str | None = None,
-        codec: str | None = None,
-        verify_peer: bool | None = None,
-    ) -> dict[str, DaemonEndpoint]:
-        """Per-module dial spec for this daemon, read back from `state.json`.
-
-        Defaults to the first network protocol the wrapper asked for (else
-        `local`). Handy on its own — a test that let the daemon allocate
-        ephemeral ports has no other way to learn what they were."""
-        return self._endpoints_from_state(
-            self._read_state(), transport=transport, host=host,
-            codec=codec, verify_peer=verify_peer)
+    def endpoints(self) -> dict[str, DaemonEndpoint]:
+        """Per-module dial spec for this daemon, checked against `state.json`."""
+        return self._endpoints_from_state(self._read_state())
 
     def peer(self, verb: str, *args: str, timeout: float | None = None) -> Any:
         """`logosctl peer <verb> [args…]` on this daemon, as its operator."""
@@ -631,103 +461,21 @@ class LogosctlDaemon:
 
     def _child_env(self) -> dict[str, str]:
         # LOGOSCTL_CONFIG_DIR and LOGOSCTL_TOKEN are the only env vars the
-        # binary reads — the LOGOSCORE_CLIENT_* family has no counterpart
-        # here, so there is nothing else to set.
+        # binary reads, and a daemon needs no token.
         env = os.environ.copy()
         env["LOGOSCTL_CONFIG_DIR"] = str(self._config_dir)
         env.update(self.extra_env)
         return env
 
     def _daemon_config_document(self) -> dict:
-        """Build the daemon YAML document — the modules dirs, persistence
-        path and per-module listeners that used to be command-line flags."""
+        """Build the daemon YAML document — the modules dirs and persistence
+        path that used to be command-line flags, then `extra_config`."""
         doc: dict[str, Any] = {
             "modules_dirs": [str(_abs(d)) for d in self.modules_dirs],
         }
         if self.persistence_path is not None:
             doc["persistence_path"] = str(_abs(self.persistence_path))
-
-        # Per-module listeners: one entry per (module, protocol), the
-        # direct translation of logoscore's repeated `--module-transport`
-        # flags.
-        #
-        # Each module gets its OWN port — `tcp_port` / `tcp_ssl_port` for
-        # core_service, `tcp_cap_port` / `tcp_ssl_cap_port` for
-        # capability_module. Reusing a single port across both fails the
-        # second listener's bind because QTcpServer can't share an
-        # address:port pair. Default 0 makes the daemon auto-allocate
-        # distinct ephemerals.
-        port_for = {
-            ("tcp",     "core_service"):      self.tcp_port,
-            ("tcp",     "capability_module"): self.tcp_cap_port,
-            ("tcp_ssl", "core_service"):      self.tcp_ssl_port,
-            ("tcp_ssl", "capability_module"): self.tcp_ssl_cap_port,
-        }
-        modules: dict[str, list[dict]] = {}
-        for proto in self.transports:
-            if proto == "local":
-                # The daemon prepends a local listener to every module
-                # unconditionally, so naming it is a no-op — and leaving
-                # it out keeps a local-only document down to zero
-                # `modules` keys.
-                continue
-            for module in ("core_service", "capability_module"):
-                # `protocol:` — the daemon-side spelling. The client side
-                # of the same idea says `transport:`, and mixing the two
-                # up fails the whole config parse (the value lands empty
-                # and misses the allowlist), so the asymmetry is worth
-                # being loud about.
-                listener: dict[str, Any] = {"protocol": proto}
-                if proto == "tcp":
-                    listener.update(
-                        host=self.tcp_host,
-                        port=port_for[(proto, module)],
-                        codec=self.tcp_codec,
-                    )
-                elif proto == "tcp_ssl":
-                    if not (self.ssl_cert and self.ssl_key):
-                        raise LogosctlError(
-                            "transports includes 'tcp_ssl' but "
-                            "ssl_cert/ssl_key not set"
-                        )
-                    listener.update(
-                        host=self.tcp_ssl_host,
-                        port=port_for[(proto, module)],
-                        codec=self.tcp_ssl_codec,
-                        # Per-listener `cert`/`key`. NOT the top-level
-                        # `ssl:` block — that one is parsed and then read
-                        # by nobody, so a listener configured through it
-                        # binds with no certificate and every handshake
-                        # dies with "no shared cipher".
-                        cert=str(_abs(self.ssl_cert)),
-                        key=str(_abs(self.ssl_key)),
-                    )
-                    if self.ssl_ca:
-                        # `ca_file` here; the client's spelling for the
-                        # same file is a bare `ca`.
-                        listener["ca_file"] = str(_abs(self.ssl_ca))
-                modules.setdefault(module, []).append(listener)
-        if modules:
-            doc["modules"] = modules
-
         doc.update(self.extra_config)
-
-        # The daemon refuses a plaintext tcp listener on a non-loopback
-        # host unless the exposure is explicitly declared intentional.
-        # logoscore spelled that `--insecure-tcp`; here it's a config key,
-        # set for exactly the binds that would otherwise be refused.
-        #
-        # Derived from the FINAL document, after the extra_config merge:
-        # `modules` is one of the keys a caller can legitimately supply
-        # that way, and the daemon runs its own guard over the merged map
-        # (main.cpp, "Plaintext-TCP guard, post-merge") — so deriving this
-        # from the wrapper-built listeners alone would leave an
-        # extra_config listener with insecure_tcp absent and a daemon that
-        # refuses to boot, blaming the listener rather than the ordering.
-        # An explicit `insecure_tcp` in extra_config still wins: it is a
-        # deliberate declaration in either direction.
-        if "insecure_tcp" not in doc and _binds_public_plaintext_tcp(doc):
-            doc["insecure_tcp"] = True
         return doc
 
     def _install_daemon_config(self) -> None:
@@ -738,8 +486,8 @@ class LogosctlDaemon:
         `message` (it names the offending key and lists the ones it knows),
         and run_json's exception carries only the exit code and the
         machine-readable `code`. A rejected key here means the daemon boots
-        without the caller's modules dirs or listeners, so the message is
-        the whole point."""
+        without the caller's modules dirs, so the message is the whole
+        point."""
         doc = self._daemon_config_document()
         _check_config_types(doc)
 
@@ -771,13 +519,9 @@ class LogosctlDaemon:
             )
 
     def _read_token(self) -> str | None:
-        if self._network_token is not None:
-            return self._network_token
-        # Local tokens live in <configDir>/client/auto.json. Network calls use
-        # the wrapper's issued credential above. The hashed-at-rest list is in
-        # <configDir>/daemon/tokens.json — that file is what the daemon
-        # validates against, but the raw token we use for client RPC comes
-        # from client/auto.json.
+        # The hashed-at-rest list is <configDir>/daemon/tokens.json — that
+        # file is what the daemon validates against, but the raw token we
+        # use for client RPC comes from client/auto.json.
         path = self.client_token_file
         if not path.exists():
             return None
@@ -785,16 +529,6 @@ class LogosctlDaemon:
             return json.loads(path.read_text(encoding="utf-8")).get("token")
         except (json.JSONDecodeError, OSError):
             return None
-
-    def _ensure_network_token(self) -> None:
-        if self._network_token is not None:
-            return
-        name = "ctl-py-" + secrets.token_hex(8)
-        issued = issue_token(name, binary=self.binary,
-                             config_dir=self._config_dir,
-                             expires=self.network_token_ttl)
-        self._network_token_name = name
-        self._network_token = issued["token"]
 
     def _read_state(self) -> dict:
         try:
@@ -861,16 +595,6 @@ class LogosctlDaemon:
                     + "\n".join(err_tail))
             raise LogosctlError("\n".join(sections))
 
-        # Phase 1.5: rewrite client/config.yaml from state.json. The
-        # daemon's auto-emitted config always advertises LocalSocket
-        # for the same-host client; for `tcp` / `tcp_ssl` runs the
-        # daemon binds different transports and the LocalSocket entry
-        # is wrong. We patch in the actual resolved per-module
-        # endpoints before the next phase tries to call `status`.
-        if self._network_transport() is not None:
-            self._ensure_network_token()
-            self._write_own_client_config()
-
         # Phase 2: verify we can talk to it via `status`.
         remaining = max(1.0, deadline - time.monotonic())
         try:
@@ -884,95 +608,17 @@ class LogosctlDaemon:
         except LogosctlError as e:
             raise LogosctlError(f"daemon status check failed: {e}") from e
 
-    def _network_transport(self) -> str | None:
-        """The first `tcp`/`tcp_ssl` protocol the wrapper asked the daemon
-        to bind, or None for a local-only daemon. Tests pass exactly one
-        of the two; a caller that passes `["local", "tcp"]` still gets the
-        network listener surfaced in the client config, so the tcp path
-        stays reachable."""
-        for p in self.transports:
-            if p in ("tcp", "tcp_ssl"):
-                return p
-        return None
-
-    def _write_own_client_config(
-        self,
-        *,
-        transport: str | None = None,
-        host: str | None = None,
-        codec: str | None = None,
-        verify_peer: bool | None = None,
-    ) -> None:
-        """Rebuild `<config_dir>/client/config.yaml` from `state.json`.
-
-        logoscore edited the daemon's auto-emitted config.json in place so
-        it kept any field the high-level API didn't model. That isn't
-        possible here: the daemon emits canonical block YAML and this
-        package has no YAML reader. Rebuilding is equivalent in practice —
-        state.json carries every resolved endpoint, `write_config`
-        re-defaults `token_file` to the same `auto.json` the daemon wrote,
-        and the instance id is carried across explicitly below because a
-        `local` dial resolves its socket name through it."""
-        state = self._read_state()
-        endpoints = self._endpoints_from_state(
-            state, transport=transport, host=host,
-            codec=codec, verify_peer=verify_peer)
-        LogosctlClient.write_config(
-            self._config_dir, endpoints, instance_id=state.get("instance_id"))
-
-    def _endpoints_from_state(
-        self,
-        state: dict,
-        *,
-        transport: str | None = None,
-        host: str | None = None,
-        codec: str | None = None,
-        verify_peer: bool | None = None,
-    ) -> dict[str, DaemonEndpoint]:
-        """One `DaemonEndpoint` per well-known module, read out of the
-        daemon's resolved state (post-bind, so ephemeral ports are real)."""
-        proto = transport or self._network_transport() or "local"
-
+    def _endpoints_from_state(self, state: dict) -> dict[str, DaemonEndpoint]:
+        """One local `DaemonEndpoint` per well-known module, once the
+        daemon's resolved state says it listens there."""
         modules = state.get("resolved", {}).get("modules", {})
         endpoints: dict[str, DaemonEndpoint] = {}
         for module_name in ("core_service", "capability_module"):
             listeners = modules.get(module_name, {}).get("transports", [])
-            match = next(
-                (t for t in listeners if t.get("protocol") == proto),
-                None,
-            )
-            if match is None:
+            if not any(t.get("protocol") == "local" for t in listeners):
                 raise LogosctlError(
-                    f"daemon state.json doesn't advertise '{proto}' "
-                    f"for module '{module_name}' — wrapper transports "
-                    f"setup is out of sync with the running daemon"
+                    f"daemon state.json doesn't advertise a local listener "
+                    f"for module '{module_name}'"
                 )
-            if proto == "local":
-                # A local entry carries no network fields at all; host,
-                # port and codec would be meaningless noise in the file.
-                endpoints[module_name] = DaemonEndpoint(transport="local")
-                continue
-
-            bound_host = match.get("host", "127.0.0.1")
-            # Daemons that bind 0.0.0.0 are reachable via 127.0.0.1
-            # for same-host clients. Any host-side dial that goes
-            # through the bind address would refuse on platforms
-            # that don't auto-route 0.0.0.0 → loopback.
-            # A CA is only meaningful for tcp_ssl, and it's spelled `ca`
-            # on this side of the wire (`ca_file` is the daemon's). Passed
-            # only when we have one so the endpoint's other fields stay
-            # exactly what logoscore wrote.
-            extra: dict[str, Any] = {}
-            if proto == "tcp_ssl" and self.ssl_ca:
-                extra["ca"] = str(_abs(self.ssl_ca))
-            endpoints[module_name] = DaemonEndpoint(
-                transport=proto,
-                host=host or ("127.0.0.1" if bound_host == "0.0.0.0" else bound_host),
-                port=match.get("port", 0),
-                codec=codec or match.get("codec", "json"),
-                verify_peer=(
-                    (self.verify_peer if verify_peer is None else verify_peer)
-                    if proto == "tcp_ssl" else None),
-                **extra,
-            )
+            endpoints[module_name] = DaemonEndpoint()
         return endpoints
