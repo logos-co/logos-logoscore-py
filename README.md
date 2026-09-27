@@ -178,8 +178,12 @@ with PeeredDaemons(modules_dir="./modules", exports=["my_module"]) as pair:
 Only a plain module (`"transport": "qt_remote_plain"`) can be exported.
 `LogosctlClient.peer(verb, …)` runs any `logosctl peer` verb: `status`,
 `ls`, `routes`, `import`, `policy set FILE`, and so on.
+`importer_placement={"single_process": True}` gives the importer a
+single-process runtime, which runs peering and each facade in its own
+process: no host process for either.
 `tests/logosctl/integration/test_peering.py` replays the full_api tables
-through an import, and checks that a `concurrency: multi` provider
+through an import, with the facade in a host process and in a single-process
+importer, and checks that a `concurrency: multi` provider
 (`test_concurrency_cpp`) keeps its calls parallel through one. The
 conformance matrix's peered coordinate (`run_matrix.py --peered`, check
 `conformance-transport-peered`) measures each plain provider again through

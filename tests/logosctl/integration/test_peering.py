@@ -4,6 +4,9 @@ importer calls it through an import as if it were local.
 The shared full_api tables replay through the import, so every type crosses
 the facade and the `tls_tcp` session both ways, as a call and as an event.
 Then the exporter's policy and a restart of the exporter are exercised.
+Everything runs twice: with the importer's facade in a host process of its
+own, and with a single-process importer, whose runtime runs peering and the
+facade itself.
 
 Peering is between the two daemons, not this client, so only `--transport
 local` runs it. It needs the plain build of the module
@@ -23,12 +26,20 @@ from ..._fullapi_module_cases import FULLAPI_EVENT_CASES, FULLAPI_METHOD_CASES
 
 MODULE = "test_fullapi_cpp"
 
+# The importer's placement policy, and where its facade then runs.
+PLACEMENTS = {
+    "apart": (None, "subprocess"),
+    "single_process": ({"single_process": True}, "inproc"),
+}
 
-@pytest.fixture(scope="module")
-def peered(logosctl_bin, logosctl_plain_modules_dir, transport):
+
+@pytest.fixture(scope="module", params=list(PLACEMENTS))
+def peered(request, logosctl_bin, logosctl_plain_modules_dir, transport):
     if transport != "local":
         pytest.skip("peering does not depend on how the client reaches a daemon")
-    with PeeredDaemons(logosctl_plain_modules_dir, [MODULE], binary=logosctl_bin) as pair:
+    with PeeredDaemons(logosctl_plain_modules_dir, [MODULE], binary=logosctl_bin,
+                       importer_placement=PLACEMENTS[request.param][0]) as pair:
+        pair.placement = request.param
         yield pair
 
 
@@ -63,6 +74,14 @@ def test_the_import_carries_the_exporters_interface(peered, importer):
     assert peered.import_state(MODULE)["state"] == "ready"
     assert surface(importer.module_info(MODULE)) == \
         surface(peered.exporter_client().module_info(MODULE))
+
+
+def test_the_importer_runs_the_facade_where_its_policy_says(peered, importer):
+    """A single-process importer runs peering_module and the facade itself;
+    otherwise each has a host process of its own."""
+    where = PLACEMENTS[peered.placement][1]
+    assert importer.module_info(MODULE)["placement"] == where
+    assert importer.module_info("peering_module")["placement"] == where
 
 
 def test_the_exporter_answers(peered, importer):
@@ -144,15 +163,36 @@ def test_the_import_survives_an_exporter_restart(peered, importer):
     assert importer.call(MODULE, "echoString", "back") == "back"
 
 
+def test_an_unloaded_export_is_gone_until_it_loads_again(peered, importer):
+    """Unloading the exported module tells the exporter's peering at once (it
+    used to hear only of a crash, and kept offering the dead port); the import
+    comes back on the next load's port."""
+    exporter = peered.exporter_client()
+    exporter.unload_module(MODULE)
+    try:
+        deadline = time.monotonic() + 5.0
+        while (shared := exporter.peer("exports")[MODULE])["loaded"]:
+            assert time.monotonic() < deadline, f"still exported after unload: {shared}"
+            time.sleep(0.1)
+        assert shared["port"] == 0, shared
+    finally:
+        exporter.load_module(MODULE)
+    deadline = time.monotonic() + 20.0
+    while not exporter.peer("exports")[MODULE]["port"]:
+        assert time.monotonic() < deadline, "the reloaded export never listened"
+        time.sleep(0.1)
+    assert _call_until(importer, lambda o: o == "reloaded", "reloaded") == "reloaded"
+
+
 CONCURRENT = "test_concurrency_cpp"
 
 
-@pytest.fixture(scope="module")
-def peered_multi(logosctl_bin, logosctl_concurrency_modules_dir, transport):
+@pytest.fixture(scope="module", params=list(PLACEMENTS))
+def peered_multi(request, logosctl_bin, logosctl_concurrency_modules_dir, transport):
     if transport != "local":
         pytest.skip("peering does not depend on how the client reaches a daemon")
     with PeeredDaemons(logosctl_concurrency_modules_dir, [CONCURRENT], binary=logosctl_bin,
-                       events=False) as pair:
+                       events=False, importer_placement=PLACEMENTS[request.param][0]) as pair:
         yield pair
 
 

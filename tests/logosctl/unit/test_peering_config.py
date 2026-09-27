@@ -29,6 +29,16 @@ def test_the_allow_list_survives_yaml():
     assert "port: 0" in text
 
 
+def test_a_single_process_importer_passes_its_placement_policy():
+    pair = PeeredDaemons("/m", ["alpha"], importer_placement={"single_process": True})
+    extra = pair.importer_extra_config()
+    assert extra["placement"] == '{"single_process":true}'
+    assert extra["peering"] == pair.importer_config()
+    # A JSON string to the daemon, never a YAML mapping.
+    assert 'placement: "{\\"single_process\\":true}"' in _yaml_document(extra)
+    assert "placement" not in PeeredDaemons("/m", ["alpha"]).importer_extra_config()
+
+
 def test_an_export_is_required():
     with pytest.raises(ValueError):
         PeeredDaemons("/modules", [])

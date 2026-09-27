@@ -26,6 +26,9 @@ class PeeredDaemons:
     import admits `allowed_callers` on the importer ("*": any caller, the
     `logosctl call` operator included). Both daemons keep their config dirs
     under one temp dir, so `restart_exporter()` brings back the same runtime.
+    `importer_placement` is the importer's placement policy: with
+    `{"single_process": True}` its runtime runs peering and every facade
+    itself, in one process.
     """
 
     def __init__(
@@ -37,6 +40,7 @@ class PeeredDaemons:
         importer_modules_dir: str | Path | list[str | Path] | None = None,
         events: bool = True,
         allowed_callers: Iterable[str] = ("*",),
+        importer_placement: dict[str, Any] | None = None,
         startup_timeout: float = 60.0,
         timeout: float = 60.0,
     ) -> None:
@@ -48,6 +52,7 @@ class PeeredDaemons:
         self.importer_modules_dir = importer_modules_dir
         self.events = events
         self.allowed_callers = list(allowed_callers)
+        self.importer_placement = importer_placement
         self.startup_timeout = startup_timeout
         self.timeout = timeout
 
@@ -73,7 +78,7 @@ class PeeredDaemons:
                 self.importer_modules_dir or empty,
                 binary=self.binary,
                 config_dir=self._root / "importer",
-                extra_config={"peering": self.importer_config()},
+                extra_config=self.importer_extra_config(),
                 startup_timeout=self.startup_timeout,
             )
             self._importer.start()
@@ -159,6 +164,14 @@ class PeeredDaemons:
     def importer_config(self) -> dict[str, Any]:
         """The importer only dials out, so it needs no control endpoint."""
         return {"name": "importer"}
+
+    def importer_extra_config(self) -> dict[str, Any]:
+        """The importer's daemon config beyond its modules: its `peering:`
+        section, and its placement policy (a JSON string) when one is set."""
+        extra: dict[str, Any] = {"peering": self.importer_config()}
+        if self.importer_placement is not None:
+            extra["placement"] = json.dumps(self.importer_placement, separators=(",", ":"))
+        return extra
 
     # ── Imports, policy ─────────────────────────────────────────────────────
 
