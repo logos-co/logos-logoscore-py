@@ -440,7 +440,7 @@ class LogosctlDockerDaemon:
         Use this for any host-side inspection of files the daemon
         writes under `/config/` — the host process can't read them
         directly. Examples: `state.json` (instance_id, resolved
-        listeners), `tokens.json` (hashed token list),
+        configuration), `tokens.json` (hashed token list),
         `tokens/<name>.json` (raw tokens, when needed for testing).
         `cat` follows symlinks, so `logs/daemon.log` — which is a link
         to this boot's timestamped log — reads as the live file."""

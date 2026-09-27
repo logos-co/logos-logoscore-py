@@ -221,7 +221,7 @@ class LogosctlDaemon:
         # Path to the daemon's live runtime-state file. Created at boot
         # (after its listeners bind AND the bundled package modules load)
         # and removed at clean shutdown. Carries instance_id, pid,
-        # started_at, and the resolved listeners. Operator preferences live
+        # started_at, and the resolved configuration. Operator preferences live
         # next to it in config.yaml; persistent state (tokens.json) in its
         # own file.
         return self._config_dir / "daemon" / "state.json"
@@ -407,7 +407,7 @@ class LogosctlDaemon:
         )
 
     def endpoints(self) -> dict[str, DaemonEndpoint]:
-        """Per-module dial spec for this daemon, checked against `state.json`."""
+        """Per-module dial spec for this daemon: its local socket."""
         return self._endpoints_from_state(self._read_state())
 
     def peer(self, verb: str, *args: str, timeout: float | None = None) -> Any:
@@ -609,16 +609,8 @@ class LogosctlDaemon:
             raise LogosctlError(f"daemon status check failed: {e}") from e
 
     def _endpoints_from_state(self, state: dict) -> dict[str, DaemonEndpoint]:
-        """One local `DaemonEndpoint` per well-known module, once the
-        daemon's resolved state says it listens there."""
-        modules = state.get("resolved", {}).get("modules", {})
-        endpoints: dict[str, DaemonEndpoint] = {}
-        for module_name in ("core_service", "capability_module"):
-            listeners = modules.get(module_name, {}).get("transports", [])
-            if not any(t.get("protocol") == "local" for t in listeners):
-                raise LogosctlError(
-                    f"daemon state.json doesn't advertise a local listener "
-                    f"for module '{module_name}'"
-                )
-            endpoints[module_name] = DaemonEndpoint()
-        return endpoints
+        """One local `DaemonEndpoint` per well-known module: the daemon listens
+        on its local socket only, named after the instance id in `state`."""
+        if not state.get("instance_id"):
+            raise LogosctlError("daemon state.json names no instance id")
+        return {name: DaemonEndpoint() for name in ("core_service", "capability_module")}

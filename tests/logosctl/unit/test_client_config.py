@@ -541,22 +541,16 @@ def test_connect_explicit_config_dir_is_not_owned(
 # ── LogosctlDaemon: its client, and clients in other config dirs ─────────────
 
 
-def _resolved_local() -> dict:
-    """`resolved.modules` as the daemon writes it post-bind."""
-    entry = {"transports": [{"protocol": "local"}]}
-    return {"core_service": entry, "capability_module": entry}
-
-
 def _seed_session(
-    config_dir: Path, modules: dict | None = None, *, instance_id: str = "iid",
-    token: str = "t",
+    config_dir: Path, *, instance_id: str = "iid", token: str = "t",
 ) -> None:
     daemon_dir = config_dir / "daemon"
     daemon_dir.mkdir(parents=True, exist_ok=True)
+    # As the daemon writes it since protocol 0.15: no listeners, only local ones exist.
     (daemon_dir / "state.json").write_text(json.dumps({
         "version": 2, "instance_id": instance_id, "pid": 4242,
         "config_source": "config.yaml",
-        "resolved": {"modules": _resolved_local() if modules is None else modules},
+        "resolved": {"modules_dirs": ["/abs/mods"]},
     }))
     client_dir = config_dir / "client"
     client_dir.mkdir(parents=True, exist_ok=True)
@@ -606,9 +600,9 @@ def test_endpoints_are_the_local_socket(tmp_path: Path):
     assert _started_daemon(tmp_path).endpoints() == LOCAL
 
 
-def test_endpoints_without_a_local_listener_is_a_named_error(tmp_path: Path):
-    _seed_session(tmp_path, {"core_service": {"transports": []}})
-    with pytest.raises(LogosctlError, match="core_service"):
+def test_endpoints_without_an_instance_id_is_a_named_error(tmp_path: Path):
+    _seed_session(tmp_path, instance_id="")
+    with pytest.raises(LogosctlError, match="instance id"):
         _started_daemon(tmp_path).endpoints()
 
 

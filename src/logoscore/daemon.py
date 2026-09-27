@@ -76,7 +76,7 @@ class LogoscoreDaemon:
         # Path to the daemon's live runtime-state file. Created at boot
         # (after its listeners bind) and removed at clean shutdown.
         # Carries instance_id, pid, started_at, and the resolved
-        # listeners. Persistent state (tokens.json) and operator
+        # configuration. Persistent state (tokens.json) and operator
         # preferences (config.json, written only on --persist-config)
         # live in their own files.
         return self._config_dir / "daemon" / "state.json"
