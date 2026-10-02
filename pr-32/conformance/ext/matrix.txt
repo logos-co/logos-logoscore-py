@@ -1,0 +1,50 @@
+
+LIDL conformance matrix — consumers: py, extqtproxy-sync, extqtproxy-async
+  46 cases x 2 providers x 3 consumers
+  differential-consumer-pass   276
+  differential-provider-pass   135
+  pass                         276
+
+  TYPE x POSITION   — does a value of this type, in this position, survive?
+                     arg    ret    evt record
+  ?tstr              4ok    2ok      .      .
+  Blob               4ok    1ok    1ok    3ok
+  Opt                1ok    1ok      .    4ok
+  Wrapper            1ok    1ok      .    1ok
+  bool                 .    1ok      .      .
+  bstr                 .      .      .    3ok
+  result               .    1ok      .      .
+  tstr                 .    4ok      .    2ok
+  uint                 .      .      .    2ok
+  {tstr:Blob}        1ok    1ok      .      .
+  {tstr:[bstr]}      1ok    1ok      .      .
+  {tstr:bstr}        1ok    1ok      .      .
+  {tstr:int}         2ok    2ok      .      .
+  {tstr:tstr}        1ok    1ok      .      .
+  [Blob]             2ok    2ok      .      .
+  [Opt]              2ok    2ok      .      .
+  [[int]]            3ok    2ok      .      .
+  [bstr]             3ok    2ok      .      .
+
+    n ok = n cases green on all 6 provider x consumer surfaces      +n K = n cases with a registered known-broken cell
+    --   = declared by the contract, NO CASE                        .    = no such position for this type
+    covered but not declared by the contract: Blob@record_field, Opt@record_field, Wrapper@record_field, bstr@record_field, result@method_return, tstr@record_field, uint@record_field
+
+  DIFFERENTIAL   — the answers compared to EACH OTHER, independently of `expect`
+    provider  test_fullapi_ext_rust vs test_fullapi_ext_cpp
+      on extqtproxy-async  45 agree   0 differ   +1 declared, not compared  (1 by identity)
+      on extqtproxy-sync   45 agree   0 differ   +1 declared, not compared  (1 by identity)
+      on py                45 agree   0 differ   +1 declared, not compared  (1 by identity)
+    consumer
+      extqtproxy-async vs extqtproxy-sync
+      extqtproxy-async vs py
+      extqtproxy-sync vs py
+
+    DECLARED DIVERGENCES (expect_by_provider) — the driver does not compare these; the divergence IS the expectation
+      1 more differ BY IDENTITY — each provider answers with its own name, which is
+        what the case is for: identity/whoami
+
+  NOT MEASURED   — what this run does not answer, on the record
+    nothing declared out of scope
+
+  all cells pass (or are registered xfail/skip)
