@@ -11,11 +11,11 @@
     logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/core-service-in-liblogos";
     logos-test-modules.url = "github:logos-co/logos-test-modules/feat/inproc-coordinates";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
-    # built from its own lock: unchanged binaries (protocol 0.9) for the
-    # transport matrix to pair with the new runtime. No follows, on purpose:
-    # following would rebuild them against this flake's protocol.
+    # built from its own lock: unchanged binaries for the transport matrix to
+    # pair with the new runtime. No follows, on purpose: following would
+    # rebuild them against this flake's protocol.
     logos-test-modules-release.url =
-      "github:logos-co/logos-test-modules/23870fcb085c93c7b8e6ea71d37d2fe1aa03e200";
+      "github:logos-co/logos-test-modules/5d991467d585c9c19ba1168a0bd9159b8b9b1c55";
   };
 
   outputs = { self, nixpkgs, logos-logoscore-cli, logos-test-modules,
