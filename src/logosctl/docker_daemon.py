@@ -26,7 +26,7 @@ bind-mounted in — they survive the container):
                     `daemon/state.json`, `daemon/tokens/<name>.json`,
                     `client/`, `logs/`, `modules/`, `plugins/`. The
                     host-side client config is built from the forwarded
-                    ports plus the daemon's own auto token.
+                    ports plus a named network token issued inside the container.
     /persistence  — the `persistence_path` config key; pre-seed to
                     restore a session, read back to inspect what modules
                     wrote
@@ -343,6 +343,9 @@ class LogosctlDockerDaemon:
         # client-side flags or env vars, so the file is the only place
         # either of them can land.
         verify_peer: bool = False,
+        # Lifetime of the named token issued for tcp/tls clients. stop()
+        # revokes it; the expiry bounds one a killed process leaves behind.
+        network_token_ttl: str = "24h",
         container_name: str | None = None,
         # Name of an EXISTING docker network to attach the container to.
         # Caller-managed: the daemon never creates or removes networks.
@@ -401,6 +404,7 @@ class LogosctlDockerDaemon:
         self.ssl_key = Path(ssl_key) if ssl_key else None
         self.ssl_ca = Path(ssl_ca) if ssl_ca else None
         self.verify_peer = verify_peer
+        self.network_token_ttl = network_token_ttl
         self.startup_timeout = startup_timeout
         # Additional dirs *inside the container* to scan for modules, on
         # top of the image's own bundled modules and `/user-modules`
@@ -437,8 +441,8 @@ class LogosctlDockerDaemon:
         # container writes /config/{daemon,client}/* as root, and the
         # host process can't overwrite root-owned files in there. The
         # client side gets its own dir which the host populates with
-        # client/config.yaml (host-correct ports) + a copy of the
-        # daemon's raw auto-token. Keeping the two apart is also what
+        # client/config.yaml (host-correct ports) + a named network token.
+        # Keeping the two apart is also what
         # the CLI wants: a daemon rewrites `client/config.yaml` in its
         # OWN session on every boot, so a dial spec written into
         # /config would be refreshed out from under us. Cleaned up on
@@ -460,6 +464,7 @@ class LogosctlDockerDaemon:
         )
         self.network = network
         self._container_id: str | None = None
+        self._network_token_name: str | None = None
 
     # ── Public properties ───────────────────────────────────────────────
 
@@ -698,12 +703,12 @@ class LogosctlDockerDaemon:
         # because the container ran as root, and the daemon rewrites
         # its own client/config.yaml at every boot anyway). Writes
         # `<host_client_dir>/client/config.yaml` (host-correct ports)
-        # and `<host_client_dir>/client/auto.json` (the raw token,
-        # copied out of the daemon's session). The `client(...)` factory
+        # and `<host_client_dir>/client/auto.json` (a named network token
+        # issued inside the container). The `client(...)` factory
         # below points the LogosctlClient at `host_client_dir` so it
         # reads from this host-owned tree instead of the container-owned
         # bind-mount. Tear the container down if seeding fails (e.g. the
-        # auto token never showed up) so a failed start() doesn't leak a
+        # network token cannot be issued) so a failed start() doesn't leak a
         # running container.
         try:
             self._build_host_client_config()
@@ -887,16 +892,15 @@ class LogosctlDockerDaemon:
         }
 
     def _build_host_client_config(self) -> None:
-        """Seed the host-only client config dir with the daemon's raw auto
+        """Seed the host-only client config dir with a named network
         token (`client/auto.json`) plus a default `client/config.yaml`
         pointing at the forwarded host ports. Called once after the daemon
         comes up; `client()` rewrites config.yaml with the caller's dial
         params, but the token written here is what every client reuses.
 
-        The raw auto token is pulled out of the container via `docker exec
-        cat` rather than read off the host bind-mount — see
-        `read_container_file` for the rationale (root-owned 0600 files
-        don't widen on disk; we just pipe bytes out)."""
+        The token is issued with `docker exec` because the daemon's boot
+        token is local-only and the root-owned token store is not writable
+        from the host bind-mount."""
         if self._container_id is None:
             return
 
@@ -906,58 +910,45 @@ class LogosctlDockerDaemon:
         endpoints = self._client_endpoints(
             "localhost", self.codec, self.verify_peer)
 
-        raw_token = self._wait_for_auto_token()
-        if not raw_token:
-            raise LogosctlError(
-                "daemon did not emit a readable auto token at "
-                f"{CONTAINER_CONFIG_DIR}/client/auto.json within "
-                f"{self.startup_timeout}s — cannot wire up an authenticated "
-                "client"
-            )
+        raw_token = self._issue_network_token()
 
         LogosctlClient.write_config(
             self._host_client_dir, endpoints, token=raw_token)
 
-    def _wait_for_auto_token(self) -> str | None:
-        """Poll the container for `client/auto.json` and return the raw
-        token string, or None if it never appears / can't be parsed
-        within `startup_timeout`.
-
-        This is the credential the daemon mints for itself at boot, and
-        copying it into a foreign config dir is the documented way to
-        authenticate a client that isn't co-resident with the daemon (the
-        CLI's own transports doctest does exactly this over TCP and TLS).
-        Worth knowing: it is issued `local_only`, and the only reason it
-        works over TCP is that the daemon also registers the raw value
-        with the in-process TokenManager, which is consulted ahead of the
-        token store that would reject it. So don't build a test on the
-        premise that a local-only token is refused over the network — and
-        if that quirk is ever tightened, this is the line that has to
-        become `token issue --name docker` (a named, non-local-only
-        token, issued before boot).
-
-        The file is `{version, name, token, issued_at}`; the daemon writes
-        the same raw value to `daemon/tokens/auto.json`. We read the
-        client-side copy because it's the one written last, after every
-        transport is bound."""
-        deadline = time.monotonic() + self.startup_timeout
-        while time.monotonic() < deadline:
-            text = self.read_container_file(
-                f"{CONTAINER_CONFIG_DIR}/client/auto.json")
-            if text is not None:
-                try:
-                    token = json.loads(text).get("token")
-                except (json.JSONDecodeError, AttributeError):
-                    token = None
-                if token:
-                    return token
-            time.sleep(0.1)
-        return None
+    def _issue_network_token(self) -> str:
+        """Issue a revocable credential inside the root-owned session."""
+        assert self._container_id is not None
+        name = "ctl-py-docker-" + uuid.uuid4().hex[:16]
+        result = subprocess.run(
+            ["docker", "exec", self._container_id, "/proc/1/exe",
+             "--config-dir", CONTAINER_CONFIG_DIR, "--json",
+             "token", "issue", "--name", name,
+             "--expires", self.network_token_ttl],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise LogosctlError(
+                f"could not issue docker network token (exit {result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()}")
+        try:
+            token = json.loads(result.stdout)["token"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise LogosctlError("docker token issue did not return a token") from exc
+        self._network_token_name = name
+        return token
 
     def stop(self) -> None:
         """Kill the container. Idempotent; safe to call even if start()
         never succeeded."""
         if self._container_id is not None:
+            if self._network_token_name is not None:
+                subprocess.run(
+                    ["docker", "exec", self._container_id, "/proc/1/exe",
+                     "--config-dir", CONTAINER_CONFIG_DIR, "--json",
+                     "token", "revoke", self._network_token_name],
+                    capture_output=True, text=True,
+                )
+                self._network_token_name = None
             # Mirror the daemon's container logs to the parent's stderr
             # before tearing down — symmetric with _proc.py's CLI
             # forwarding, so a single env flag dumps both sides of the
@@ -1044,7 +1035,7 @@ class LogosctlDockerDaemon:
         # Rewrite config.yaml in the host-only client dir (the daemon's
         # bind-mounted /config is root-owned, and the daemon rewrites its
         # own copy at every boot) with the caller's dial params + both
-        # modules' distinct forwarded ports. The auto token written by
+        # modules' distinct forwarded ports. The network token written by
         # _build_host_client_config() at startup is left in place.
         endpoints = self._client_endpoints(tcp_host, wire_codec, verify)
         return LogosctlClient.connect(

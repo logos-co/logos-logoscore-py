@@ -360,8 +360,8 @@ class LogoscoreDockerDaemon:
         # container writes /config/{daemon,client}/* as root, and the
         # host process can't overwrite root-owned files in there. The
         # client side gets its own dir which the host populates with
-        # client/config.json (host-correct ports) + a copy of the
-        # daemon's raw auto-token. Cleaned up on stop() alongside
+        # client/config.json (host-correct ports) + a named network token.
+        # Cleaned up on stop() alongside
         # _config_dir.
         self._host_client_dir = Path(
             tempfile.mkdtemp(prefix="logoscore-docker-client-"))
@@ -380,6 +380,7 @@ class LogoscoreDockerDaemon:
         )
         self.network = network
         self._container_id: str | None = None
+        self._network_token_name: str | None = None
 
     # ── Public properties ───────────────────────────────────────────────
 
@@ -645,12 +646,12 @@ class LogoscoreDockerDaemon:
         # daemon's bind-mounted /config — that one's owned by root
         # because the container ran as root). Writes
         # `<host_client_dir>/client/config.json` (host-correct ports)
-        # and `<host_client_dir>/client/auto.json` (the raw token,
-        # copied out of the daemon's /config/daemon/tokens). The
+        # and `<host_client_dir>/client/auto.json` (a named network token
+        # issued inside the container). The
         # `client(...)` factory below points the LogoscoreClient at
         # `host_client_dir` so it reads from this host-owned tree
         # instead of the container-owned bind-mount. Tear the container
-        # down if seeding fails (e.g. the auto token never showed up) so
+        # down if seeding fails (e.g. network token issuance fails) so
         # a failed start() doesn't leak a running container.
         try:
             self._build_host_client_config()
@@ -692,16 +693,15 @@ class LogoscoreDockerDaemon:
         }
 
     def _build_host_client_config(self) -> None:
-        """Seed the host-only client config dir with the daemon's raw auto
+        """Seed the host-only client config dir with a named network
         token (`client/auto.json`) plus a default `client/config.json`
         pointing at the forwarded host ports. Called once after the daemon
         comes up; `client()` rewrites config.json with the caller's dial
         params, but the token written here is what every client reuses.
 
-        The raw auto token is pulled out of the container via `docker exec
-        cat` rather than read off the host bind-mount — see
-        `read_container_file` for the rationale (root-owned 0600 files
-        don't widen on disk; we just pipe bytes out)."""
+        The token is issued with `docker exec` because the daemon's boot
+        token is local-only and the root-owned token store is not writable
+        from the host bind-mount."""
         if self._container_id is None:
             return
 
@@ -711,45 +711,44 @@ class LogoscoreDockerDaemon:
         endpoints = self._client_endpoints(
             "localhost", self.codec, self.verify_peer)
 
-        # The daemon emits daemon/tokens/auto.json at boot; it can lag
-        # state.json slightly, so poll for it. The file is `{"token":
-        # "..."}` — pull the raw token so write_config can re-emit it.
-        # Fail fast if it never shows up or can't be parsed: a config.json
-        # that references a missing token file surfaces later as an opaque
-        # auth error.
-        raw_token = self._wait_for_auto_token()
-        if not raw_token:
-            raise LogoscoreError(
-                "daemon did not emit a readable auto token at "
-                "/config/daemon/tokens/auto.json within "
-                f"{self.startup_timeout}s — cannot wire up an authenticated "
-                "client"
-            )
+        raw_token = self._issue_network_token()
 
         LogoscoreClient.write_config(
             self._host_client_dir, endpoints, token=raw_token)
 
-    def _wait_for_auto_token(self) -> str | None:
-        """Poll the container for daemon/tokens/auto.json and return the
-        raw token string, or None if it never appears / can't be parsed
-        within `startup_timeout`."""
-        deadline = time.monotonic() + self.startup_timeout
-        while time.monotonic() < deadline:
-            text = self.read_container_file("/config/daemon/tokens/auto.json")
-            if text is not None:
-                try:
-                    token = json.loads(text).get("token")
-                except (json.JSONDecodeError, AttributeError):
-                    token = None
-                if token:
-                    return token
-            time.sleep(0.1)
-        return None
+    def _issue_network_token(self) -> str:
+        """Issue a revocable credential inside the root-owned session."""
+        assert self._container_id is not None
+        name = "py-docker-" + uuid.uuid4().hex[:16]
+        result = subprocess.run(
+            ["docker", "exec", self._container_id, "/proc/1/exe",
+             "--config-dir", "/config", "issue-token", "--name", name,
+             "--json"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise LogoscoreError(
+                f"could not issue docker network token (exit {result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()}")
+        try:
+            token = json.loads(result.stdout)["token"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise LogoscoreError("docker issue-token did not return a token") from exc
+        self._network_token_name = name
+        return token
 
     def stop(self) -> None:
         """Kill the container. Idempotent; safe to call even if start()
         never succeeded."""
         if self._container_id is not None:
+            if self._network_token_name is not None:
+                subprocess.run(
+                    ["docker", "exec", self._container_id, "/proc/1/exe",
+                     "--config-dir", "/config", "revoke-token",
+                     self._network_token_name, "--json"],
+                    capture_output=True, text=True,
+                )
+                self._network_token_name = None
             # Mirror the daemon's container logs to the parent's stderr
             # before tearing down — symmetric with _proc.py's CLI
             # forwarding, so a single env flag dumps both sides of the
@@ -834,7 +833,7 @@ class LogoscoreDockerDaemon:
 
         # Rewrite config.json in the host-only client dir (the daemon's
         # bind-mounted /config is root-owned) with the caller's dial
-        # params + both modules' distinct forwarded ports. The auto token
+        # params + both modules' distinct forwarded ports. The network token
         # written by _build_host_client_config() at startup is left in
         # place. No env overrides — config.json is authoritative.
         endpoints = self._client_endpoints(tcp_host, wire_codec, verify)
