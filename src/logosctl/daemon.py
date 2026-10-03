@@ -131,6 +131,8 @@ _CONFIG_KEY_TYPES: dict[str, tuple[type, ...]] = {
     "modules_dirs": (list,),
     "persistence_path": (str,),
     "access_policy": (str,),
+    # One document per module: a mapping, as YAML writes it.
+    "module_config": (dict,),
     "access_group": (str,),
     "insecure_tcp": (bool,),
 }

@@ -1,7 +1,7 @@
 name: Windows
 
 # The logosctl client's suites on a real Windows runner, against the
-# cross-built logosctl.exe and test_fullapi_cpp (see packages.x86_64-windows).
+# cross-built logosctl.exe and test modules (see packages.x86_64-windows).
 
 on:
   push:

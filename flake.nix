@@ -9,9 +9,11 @@
     # in-process coordinate on the runtime-control wave (logoscore-cli#145 and
     # logos-test-modules' feat/inproc-coordinates), with legacy mode deleted on
     # top (the feat/drop-legacy-mode branches), and the daemon's runtime in a
-    # process of its own (logoscore-cli's feat/runtime-process).
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/runtime-process";
-    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/drop-legacy-mode";
+    # process of its own (logoscore-cli's feat/runtime-process), with method grants
+    # and module configuration on top (both repos' feat/method-scopes, which also
+    # carries test_probe_module_cpp).
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/method-scopes";
+    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/method-scopes";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries for the transport matrix to
     # pair with the new runtime. No follows, on purpose: following would
@@ -121,13 +123,22 @@
         }
       ) // {
         # What .github/workflows/windows.yml stages for the logosctl suite:
-        # logosctl.exe, and test_fullapi_cpp installed as a portable module.
-        x86_64-windows = {
-          ctl = logos-logoscore-cli.packages.x86_64-windows.ctl;
-          test-modules = (logos-test-modules.inputs.logos-module-builder.lib.mkLogosModule {
-            src = "${logos-test-modules}/test-fullapi-module-cpp";
-            configFile = "${logos-test-modules}/test-fullapi-module-cpp/metadata.json";
+        # logosctl.exe, and test_fullapi_cpp and test_probe_module_cpp installed
+        # as portable modules, copied since the stage leaves the store.
+        x86_64-windows = let
+          installPortable = dir: (logos-test-modules.inputs.logos-module-builder.lib.mkLogosModule {
+            src = "${logos-test-modules}/${dir}";
+            configFile = "${logos-test-modules}/${dir}/metadata.json";
           }).packages.x86_64-windows.install-portable;
+          modules = [ (installPortable "test-fullapi-module-cpp") (installPortable "test-probe-module-cpp") ];
+        in {
+          ctl = logos-logoscore-cli.packages.x86_64-windows.ctl;
+          test-modules = nixpkgs.legacyPackages.x86_64-linux.runCommand "logosctl-py-windows-modules" { } ''
+            mkdir -p $out/modules
+            for installed in ${nixpkgs.lib.escapeShellArgs modules}; do
+              cp -r "$installed"/modules/. $out/modules/
+            done
+          '';
         };
       };
 
@@ -314,6 +325,13 @@
               touch $out
             '';
 
+          # The logosctl suite also loads test_probe_module_cpp: module_config and
+          # method grants (tests/logosctl/integration/test_method_scopes.py).
+          logosctlModulesDir = pkgs.symlinkJoin {
+            name = "logosctl-py-integration-modules";
+            paths = [ testModulesInstall logos-test-modules.modules.${system}.test_probe_module_cpp.install ];
+          };
+
           # Helper: the same thing for the logosctl suite. A sibling rather
           # than a `binary:`/`suite:` parameter on `mkIntegration`, for the
           # reason the two test trees are duplicated in the first place — the
@@ -334,7 +352,7 @@
               ''}
               export PYTHONPATH=$PWD/src
               export LOGOSCTL_BIN=${logosctlBin}/bin/logosctl
-              export LOGOSCTL_TEST_MODULES_DIR=${testModulesInstall}/modules
+              export LOGOSCTL_TEST_MODULES_DIR=${logosctlModulesDir}/modules
               # tests/logosctl/conftest.py SKIPS when either of those is unset,
               # so a rename here turns the whole suite green-by-omission.
               #
