@@ -8,9 +8,8 @@ Everything runs twice: with the importer's facade in a host process of its
 own, and with a single-process importer, whose runtime runs peering and the
 facade itself.
 
-Peering is between the two daemons, not this client, so only `--transport
-local` runs it. It needs the plain build of the module
-(LOGOSCTL_PLAIN_MODULES_DIR): a Qt-hosted module cannot be exported.
+It needs the plain build of the module (LOGOSCTL_PLAIN_MODULES_DIR): a
+Qt-hosted module cannot be exported.
 """
 from __future__ import annotations
 
@@ -34,9 +33,7 @@ PLACEMENTS = {
 
 
 @pytest.fixture(scope="module", params=list(PLACEMENTS))
-def peered(request, logosctl_bin, logosctl_plain_modules_dir, transport):
-    if transport != "local":
-        pytest.skip("peering does not depend on how the client reaches a daemon")
+def peered(request, logosctl_bin, logosctl_plain_modules_dir):
     with PeeredDaemons(logosctl_plain_modules_dir, [MODULE], binary=logosctl_bin,
                        importer_placement=PLACEMENTS[request.param][0]) as pair:
         pair.placement = request.param
@@ -203,9 +200,7 @@ CONCURRENT = "test_concurrency_cpp"
 
 
 @pytest.fixture(scope="module", params=list(PLACEMENTS))
-def peered_multi(request, logosctl_bin, logosctl_concurrency_modules_dir, transport):
-    if transport != "local":
-        pytest.skip("peering does not depend on how the client reaches a daemon")
+def peered_multi(request, logosctl_bin, logosctl_concurrency_modules_dir):
     with PeeredDaemons(logosctl_concurrency_modules_dir, [CONCURRENT], binary=logosctl_bin,
                        events=False, importer_placement=PLACEMENTS[request.param][0]) as pair:
         yield pair

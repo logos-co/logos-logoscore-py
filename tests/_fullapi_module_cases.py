@@ -1,11 +1,10 @@
 """Shared expectations for the `test_fullapi_cpp` full type surface.
 
 Extracted so the same matrix can be replayed against different daemons
-(local socket, TCP, TCP+SSL, in a docker container, over JSON or CBOR).
-The full-api module declares one echo method per supported type **and one
-typed event per event-legal type** — so these tables are the single place
-that pins the whole parameter/return/event surface, and the docker smoke
-suite replays them over both wire codecs.
+(local, through a peering import, in a docker container over Remote Runtime
+Control). The full-api module declares one echo method per supported type
+**and one typed event per event-legal type** — so these tables are the
+single place that pins the whole parameter/return/event surface.
 
 Structure:
   FULLAPI_METHOD_CASES — `(method, args, expected)`; `expected=None` means
@@ -20,7 +19,7 @@ Kept parallel to the inline assertions in
 `bytes` args/returns cross the wire as the canonical `{"_bytes":"<b64url>"}`
 tag (see `LogoscoreClient._arg_to_str` / `_proc.decode_bytes_tags`), so
 every byte value round-trips. Float cases use exactly-representable values
-so a plain `==` holds across both codecs (no approximate compare needed).
+so a plain `==` holds (no approximate compare needed).
 
 See: repos/logos-test-modules/test-fullapi-module-cpp/src/test_fullapi_cpp_impl.h
 """
@@ -40,9 +39,8 @@ FULLAPI_METHOD_CASES: list[tuple[str, tuple, object]] = [
     ("echoUint",      (7,),                      7),
 
     # 64-bit boundaries. These matter far more than the small values above:
-    # this table is what the tcp / tcp_ssl / json / cbor matrices replay, and it
-    # had NO value outside int32 range, so the plain wire's uint64 handling was
-    # entirely untested. A uint64 above int64max used to arrive as -1 there
+    # this table had NO value outside int32 range, so the plain wire's uint64
+    # handling was entirely untested. A uint64 above int64max used to arrive as -1 there
     # (RpcValue had no unsigned alternative), and int64::min/max exercise the
     # signed edges the double-degradation bugs kept landing on.
     ("echoUint",      (2**64 - 1,),              2**64 - 1),
@@ -54,7 +52,7 @@ FULLAPI_METHOD_CASES: list[tuple[str, tuple, object]] = [
     ("echoInt",       (2**53 + 1,),              2**53 + 1),
 
     # float64 — values MUST stay exactly-representable (dyadic) so a plain
-    # `==` holds across json + cbor; the docker matrix compares without approx.
+    # `==` holds; the docker matrix compares without approx.
     ("echoDouble",    (2.5,),                    2.5),
     ("echoDouble",    (-0.5,),                   -0.5),
 
@@ -83,7 +81,7 @@ FULLAPI_METHOD_CASES: list[tuple[str, tuple, object]] = [
     ("echoBoolList",   ([True, False, True],),   [True, False, True]),
 
     # [any] (LogosList) — heterogeneous incl. a nested float (dyadic),
-    # nested map, and nested list (exercises float-inside-[any] over cbor)
+    # nested map, and nested list
     ("echoList",       ([1, "two", 3.5, {"k": 1}, [9]],), [1, "two", 3.5, {"k": 1}, [9]]),
 
     # {tstr:any} (LogosMap) — mixed value types incl. a nested float + nesting

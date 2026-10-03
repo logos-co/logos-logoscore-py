@@ -26,69 +26,17 @@ MODULE = "test_fullapi_cpp"
 
 
 @pytest.fixture
-def daemon(
-    logosctl_bin,
-    test_modules_dir,
-    transport,
-    tcp_port,
-    tcp_ssl_port,
-    request,
-):
-    # Same three-way split as the logoscore suite, but every one of these
-    # kwargs now lands in the daemon's YAML document rather than on its
-    # command line — the flags that used to express them are gone.
-    #
-    # transport == "local"   — the daemon prepends a local listener to
-    #                          every module unconditionally, so the
-    #                          document names no listener at all.
-    # transport == "tcp"     — one `protocol: tcp` listener per
-    #                          well-known module, core_service pinned to
-    #                          `tcp_port`.
-    # transport == "tcp_ssl" — same shape plus per-listener cert/key,
-    #                          pulled from the session-scoped
-    #                          `self_signed_cert` fixture. Requested only
-    #                          when actually needed so local / tcp runs
-    #                          don't pay the openssl cost.
-    #
-    # capability_module's port is deliberately left unset (0 → the daemon
-    # allocates an ephemeral): it needs a port of its own, since two
-    # listeners can't share an address:port pair, and the client reads
-    # whatever got bound back out of `state.json` anyway.
-    kwargs = {}
-    if transport != "local":
-        kwargs["transports"] = [transport]
-        if transport == "tcp":
-            kwargs["tcp_port"] = tcp_port
-        elif transport == "tcp_ssl":
-            cert, key = request.getfixturevalue("self_signed_cert")
-            kwargs["tcp_ssl_port"] = tcp_ssl_port
-            kwargs["ssl_cert"] = cert
-            kwargs["ssl_key"] = key
-    with LogosctlDaemon(
-        modules_dir=test_modules_dir, binary=logosctl_bin, **kwargs,
-    ) as d:
+def daemon(logosctl_bin, test_modules_dir):
+    # The modules dir lands in the daemon's YAML document rather than on
+    # its command line — the flags that used to express it are gone.
+    with LogosctlDaemon(modules_dir=test_modules_dir, binary=logosctl_bin) as d:
         yield d
 
 
 @pytest.fixture
 def client(daemon):
-    """Return a callable that builds a client for `daemon`.
-
-    Unlike the logoscore fixture this takes no transport argument, and
-    that absence is the whole point of the port: the transport is a
-    property of the daemon's on-disk dial spec, which `LogosctlDaemon`
-    rewrites from `state.json` once the listeners have really bound.
-    There is no per-call override left — the `LOGOSCORE_CLIENT_*` env
-    family that used to carry one was deleted.
-
-    Nor does `tcp_ssl` need a `no_verify_peer` default here: the cert is
-    the throwaway self-signed one from `self_signed_cert`, which carries
-    no subjectAltName and wouldn't validate against any CA, and
-    `LogosctlDaemon` already writes `verify_peer: false` for exactly that
-    reason. Exercising the verification path means building the daemon
-    with `verify_peer=True` and an `ssl_ca`, plus a cert minted with
-    `subjectAltName=IP:127.0.0.1` — not an argument here.
-    """
+    """Return a callable that builds a client for `daemon`, dialing the
+    spec the daemon wrote into its own session."""
     def _make(**kw):
         return daemon.client(**kw)
     return _make
@@ -147,14 +95,10 @@ def test_isolated_config_dir_is_used(daemon):
 def test_client_in_a_separate_config_dir_reaches_the_daemon(daemon, tmp_path):
     """Drive the daemon from a config dir it doesn't own.
 
-    logoscore expressed this with the `LOGOSCORE_CLIENT_*` env vars, which
-    merged a dial spec over the on-disk one per call. The whole family was
-    deleted, so a client living outside the daemon's session now needs a
+    A client living outside the daemon's session needs a
     `client/config.yaml` of its own plus a token the daemon accepts —
-    which is exactly what `remote_client` writes, and the only remaining
-    way to reach a daemon whose session you don't own. Worth its own test
-    for that reason: it is the one path with no env-var fallback behind
-    it.
+    which is exactly what `remote_client` writes (the daemon's local
+    socket, named after its instance id).
 
     The spec goes into a dir the daemon does NOT own — it rewrites
     `client/config.yaml` in its own session whenever the recorded instance

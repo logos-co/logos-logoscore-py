@@ -1,199 +1,157 @@
-# Docker smoke tests for `logoscore`
+# Docker smoke tests for `logosctl`
 
-These tests are opt-in: they spawn real docker containers running the
-logoscore daemon and drive them via the Python wrapper from the host.
-Without docker installed they skip cleanly; the rest of the suite stays
-green on CI runners that don't have docker available.
+These tests are opt-in: they spawn real docker containers running a
+logosctl daemon and operate them from the host over Remote Runtime Control.
+Without docker, or without the image, they skip cleanly; the rest of the
+suite stays green on runners that don't have docker available.
 
 ## The image is a reusable CLI runtime
 
-The `logoscore:smoke-*` image contains **only** the logoscore CLI plus
-the modules the CLI itself ships with (`capability_module`,
-`package_manager_module`). It does NOT bake in `test_fullapi_cpp` or
-any other user module. User modules — the ones you're writing and
-testing — are bind-mounted in at runtime.
+The `logosctl:smoke-*` image contains **only** logosctl plus the modules
+it ships with (`capability_module`, `modules_state`, `peering_module`,
+`peering_identity`, and the package modules). It does NOT bake in
+`test_fullapi_cpp` or any other user module. User modules — the ones
+you're writing and testing — are bind-mounted in at runtime.
 
-### Preferred: `LogoscoreDockerDaemon`
+### Preferred: `LogosctlDockerDaemon`
 
-If you're testing a module from Python, use the helper that ships with
-`logoscore-py`. It encapsulates the container lifecycle (volume mounts,
-port wiring, client construction) so your tests don't have to:
+If you're testing a module from Python, use the helper that ships with the
+`logosctl` package. It encapsulates the container lifecycle (the config
+document, volume mounts, pairing the host client) so your tests don't have
+to:
 
 ```python
-from logoscore import LogoscoreDockerDaemon
+from logosctl import LogosctlDockerDaemon
 
-with LogoscoreDockerDaemon(
-    image="logoscore:smoke-portable",
+with LogosctlDockerDaemon(
+    image="logosctl:smoke-portable",
     modules_dir="./my-module/result/modules",  # host path
+    binary="logosctl",                         # host-side client
 ) as daemon:
-    client = daemon.client(binary="logoscore")
+    client = daemon.client()
     client.load_module("my_module")
     print(client.call("my_module", "do_something", 42))
 ```
 
-The helper picks a free host port, bind-mounts everything the daemon
-needs (`/config`, `/persistence`, `/user-modules`), starts the
-container, waits for `state.json`, and returns a `LogoscoreClient`
-configured to dial the right port. Optional knobs: `host_port=...` to
-pin a port, `persistence_dir=...` to restore a pre-seeded session,
-`codec="cbor"` to pick a wire codec, `extra_module_dirs=[...]` /
-`extra_args=[...]` to extend the daemon invocation.
+`start()` installs the daemon's config with a throwaway `daemon config set`
+container, runs the daemon with `--network host`, waits for `state.json`,
+then pairs the host-side logosctl (a config dir of its own, no daemon):
 
-### Equivalent raw `docker run`
+1. `logosctl peer invite --runtime-control` inside the container
+   (`docker exec`), as the daemon's local operator;
+2. `logosctl remote pair -` on the host, the invite on its stdin;
+3. `logosctl peer accept <id>` inside the container, for the pending
+   pairing from the host client's runtime ID;
+4. `logosctl peer policy set /config/remote-policy.json` inside the
+   container, granting the client `DEFAULT_GRANTS` (or `grants=`).
 
-For reference / non-Python callers the same thing as a shell invocation:
+`client()` returns a `LogosctlClient` that runs every command with
+`--remote`; `daemon.runtime_control.grant({...})` changes what it may call.
+Optional knobs: `control_port=...` to pin the control endpoint's port,
+`persistence_dir=...` to restore a pre-seeded session, `name=...` for the
+daemon's peering name, `extra_module_dirs=[...]` / `extra_config={...}` /
+`extra_args=[...]` to extend the daemon's setup.
 
-```bash
-docker run --rm -p 6000:6000 \
-    -v "$PWD/config":/config \
-    -v "$PWD/persistence":/persistence \
-    -v "$PWD/my-modules-install/modules":/user-modules:ro \
-    logoscore:smoke-portable \
-    daemon --config-dir /config \
-           --persistence-path /persistence \
-           --transport tcp --tcp-host 0.0.0.0 --tcp-port 6000 \
-           -m /opt/logoscore/modules \
-           -m /user-modules
-```
+### Host networking
 
-The three mounts each have a specific purpose:
+The daemon's control endpoint listens on a fixed port on 127.0.0.1, and
+core_service's runtime-control listener (`tls_tcp`) on a port the daemon
+picks. The container shares the host's network, so the host client
+reaches both on its own loopback with no port mapping — which is also why
+there is no `-p`, and why two containers only need distinct control ports.
+That is complete on Linux. Docker Desktop has host networking as an opt-in
+setting (Settings → Resources → Network).
 
-| Host dir                  | Container path | Read/write | Why                                                                                           |
-|---------------------------|----------------|------------|-----------------------------------------------------------------------------------------------|
-| `./config`                | `/config`      | rw         | Daemon writes `state.json` here; your client reads it to discover host/port/instance_id.     |
-| `./persistence`           | `/persistence` | rw         | Module state (`--persistence-path`). Pre-seed to restore a session; read back to inspect it.  |
-| `./my-modules/modules`    | `/user-modules`| ro         | Compiled Qt plugins loaded via `-m`. Read-only because the daemon never mutates these.        |
+### Mounts
 
-### Port strategy
+| Host dir               | Container path  | Read/write | Why                                                                                   |
+|------------------------|-----------------|------------|---------------------------------------------------------------------------------------|
+| session dir            | `/config`       | rw         | The daemon's session (`daemon.yaml`, `remote-policy.json`, `daemon/`, `peering/`, …). |
+| persistence dir        | `/persistence`  | rw         | Module state (`persistence_path`). Pre-seed to restore a session; read back after.    |
+| your modules dir       | `/user-modules` | ro         | Compiled Qt plugins, named in `modules_dirs`. The daemon never mutates these.         |
 
-The container binds `6000` (`core_service`) and `6001`
-(`capability_module`) internally; the host maps a dynamically-picked
-ephemeral port to each (`-p $host_core:6000 -p $host_cap:6001`). The
-client dials those forwarded host ports from a per-module
-`client/config.json` (written via `LogoscoreClient.write_config`) — one
-entry per module, each with its own port — rather than the
-container-internal ports the daemon wrote into its `state.json`. A single
-`tcp_port` env override won't do here: the CLI applies it to every module
-uniformly, which would collapse capability_module onto core_service's
-port. Same pattern as
-[status-go tests-functional](https://github.com/status-im/status-go/tree/develop/tests-functional).
-
-Result: parallel container-backed tests don't fight over port 6000 on
-the host, and you don't need to know which ports are free before you
-start.
+The daemon writes `/config` as root; read its files through the container
+(`read_container_file`, `state_json`, `daemon_log`), not from the host.
 
 ## Flavors
 
 Two build flavors, to match how the daemon gets distributed:
 
-| Flavor     | Flake attr               | Binary                                | Modules the user mounts in     | Image size |
-|------------|--------------------------|---------------------------------------|--------------------------------|------------|
-| `portable` | `.#dockerBundlePortable` | `…cli-bundle-dir` (self-contained)    | `.install-portable`            | ~600 MB    |
-| `dev`      | `.#dockerBundle`         | `logos-logoscore-cli.packages.…cli`   | `.install` (nix-store rpaths)  | ~3 GB      |
+| Flavor     | Flake attr               | Binary                                       |
+|------------|--------------------------|----------------------------------------------|
+| `portable` | `.#dockerBundlePortable` | logosctl's `ctl-bundle-dir` (self-contained) |
+| `dev`      | `.#dockerBundle`         | logosctl's `ctl` package (nix-store rpaths)  |
 
-**`portable` is the default** — it's the self-contained
-`bin/ + lib/ + modules/` tree that matches how released logoscore
-binaries are distributed, so it's the most realistic smoke. `dev`
-links against Qt/Boost/OpenSSL via nix-store rpaths (what the
-`logoscore-py` dev shell itself uses) and is faster to iterate on when
-you already have the nix cache warm, but requires copying `/nix/store`
-into the image at build time.
+**`portable` is the default** — the self-contained `bin/ + lib/ +
+modules/` tree that matches how released binaries are distributed, so
+it's the most realistic smoke. `dev` links against Qt/Boost/OpenSSL via
+nix-store rpaths and requires copying `/nix/store` into the image at build
+time.
 
-The user-mounted modules must match the image flavor: `.install`
-modules (rpath-linked into `/nix/store`) only work in the `dev` image
-because its `/nix/store` is present; `.install-portable` modules
-(self-contained shared-lib bundles) work in the `portable` image.
-The smoke test driver picks the right one via
-`LOGOSCORE_TEST_MODULES_DIR` (dev) or
-`LOGOSCORE_TEST_MODULES_DIR_PORTABLE` (portable), both set by the
-`nix develop` shell.
+Each runtime loads only its own module variant: the portable image a
+`.install-portable` build (`linux-<arch>`), the dev image a `.install`
+build (`linux-<arch>-dev`), whose store dependencies the image's
+`/nix/store` holds. The Linux dev shell sets both
+(`LOGOSCTL_DOCKER_MODULES_DIR`, `LOGOSCTL_DOCKER_DEV_MODULES_DIR`).
 
 ## Setup
 
 ```bash
 # Build one flavor (default: portable)
-./build_smoke_image.sh
-FLAVOR=dev      ./build_smoke_image.sh
-FLAVOR=both     ./build_smoke_image.sh         # builds both
+./tests/docker_smoke/build_smoke_image.sh
+FLAVOR=dev      ./tests/docker_smoke/build_smoke_image.sh
+FLAVOR=both     ./tests/docker_smoke/build_smoke_image.sh    # builds both
+# On a shared machine, cap the in-docker nix build:
+SMOKE_NIX_CONFIG=$'cores = 8\nmax-jobs = 2' ./tests/docker_smoke/build_smoke_image.sh
 
-# Run the suite (default: portable)
-pytest tests/docker_smoke
-pytest tests/docker_smoke --docker-flavor=dev
-pytest tests/docker_smoke --docker-flavor=both    # replays matrix twice
+# Run the suite (default: portable). `nix develop` provides logosctl and,
+# on Linux, the modules to mount.
+nix develop --command pytest tests/docker_smoke
+nix develop --command pytest tests/docker_smoke --docker-flavor=both
 ```
 
-Tag convention: `logoscore:smoke-dev` / `logoscore:smoke-portable`.
-Override with `LOGOSCORE_DOCKER_IMAGE_FMT='myimg:{flavor}'` if you
-publish elsewhere.
+Tag convention: `logosctl:smoke-dev` / `logosctl:smoke-portable`.
+Override with `LOGOSCTL_DOCKER_IMAGE_FMT='myimg:{flavor}'` if you publish
+elsewhere. The host client is `LOGOSCTL_BIN` (or `logosctl` on PATH); it
+may be a macOS build, since it only speaks `tls_tcp` to the container.
 
-The image is built by `docker build` from a multi-stage Dockerfile
-whose first stage runs `nix build` *inside* a `nixos/nix` Linux
-container. Because everything happens inside Docker, the host never
-needs to cross-compile — Docker Desktop on macOS uses its native Linux
-VM (linux/arm64 on Apple Silicon), same pattern as
+The image is built by `docker build` from a multi-stage Dockerfile whose
+first stage runs `nix build` *inside* a `nixos/nix` Linux container.
+Because everything happens inside Docker, the host never needs to
+cross-compile — Docker Desktop on macOS uses its native Linux VM
+(linux/arm64 on Apple Silicon), same pattern as
 [status-go](https://github.com/status-im/status-go/tree/develop/tests-functional).
 
 Build context: only the `logos-logoscore-py` repo. The flake pulls
-`logos-logoscore-cli` and `logos-test-modules` from github at the
-revisions this repo's `flake.nix` / `flake.lock` references. To
-iterate on unpublished CLI changes, push them to a branch and bump
-`logos-logoscore-cli.url` in `flake.nix`:
+`logos-logoscore-cli` from github at the revision this repo's
+`flake.nix` / `flake.lock` references. To iterate on unpublished CLI
+changes, push them to a branch and bump `logos-logoscore-cli.url` in
+`flake.nix`:
 
 ```nix
 logos-logoscore-cli.url = "github:<you>/logos-logoscore-cli/<branch>";
 ```
 
-then rebuild the image:
-
-```bash
-./tests/docker_smoke/build_smoke_image.sh
-```
-
-First build takes a few minutes while nix populates its store in the
-builder layer; subsequent builds are incremental thanks to Docker's
-layer cache and nix's content-addressed store.
-
 ## What's covered
 
-1. **Every echo method on `test_fullapi_cpp`** replayed through the full
-   wire stack — runs the matrix twice, once with `--tcp-codec=json` and
-   once with `--tcp-codec=cbor`, so both codecs see every parameter /
-   return type: `tstr`, `bstr` (canonical `{"_bytes"}` tag), `int`,
-   `uint`, `float64`, `bool`, `any`, the typed arrays
-   (`[tstr]/[int]/[uint]/[float64]/[bool]`), `[any]` (LogosList),
-   `{tstr:any}` (LogosMap), `result`, and `void`.
+1. **Every echo method on `test_fullapi_cpp`**, through the pairing: `tstr`,
+   `bstr` (canonical `{"_bytes"}` tag), `int`, `uint`, `float64`, `bool`,
+   `any`, the typed arrays (`[tstr]/[int]/[uint]/[float64]/[bool]`), `[any]`
+   (LogosList), `{tstr:any}` (LogosMap), `result`, and `void`.
 
 2. **Every typed event** — one per event-legal type (`stringEvent`,
    `bytesEvent`, `intEvent`, … `mapEvent`), fired via the module's
-   `fire<X>Event(v)` triggers, under each codec. Also validates the
-   `logoscore watch` subprocess plumbing end-to-end over TCP.
+   `fire<X>Event(v)` triggers and watched with `logosctl --remote … watch`.
 
-3. **Two independent daemons** running in two separate containers on two
-   host ports, driven from one Python test. Confirms:
-   - distinct instance_ids in each container's `state.json`
-   - a module loaded on A isn't visible to B
-   - a call to A succeeds; the same call to B fails because the module
-     isn't loaded there
-   That covers the "one test talks to two daemons" need without needing
-   a real multi-host setup.
+3. **The daemon's remote policy decides**: an ungranted method is refused
+   with `NOT_AUTHORISED`, and a new grant holds from the next call.
 
-4. **Legacy smoke** (`test_docker_tcp_status`, `test_docker_tcp_load_and_call`)
-   — kept as a minimal fallback. Useful when the matrix fixtures skip
-   for environmental reasons; always worth running on top of anything
-   else.
+4. **Two independent daemons** in two containers, one paired client each:
+   distinct instance and runtime IDs, and a module loaded on A is not
+   loaded on B.
 
-5. **TLS smoke** (`test_docker_ssl_smoke.py`) — one daemon inside docker
-   listening on `tcp_ssl` with a self-signed cert generated at fixture
-   time (via `openssl req`) and bind-mounted into the container. The
-   host-side client dials over TLS with `--no-verify-peer` (because
-   self-signed) and runs two scenarios: a `status` round-trip (with a
-   `rpc_error not in response` assertion so it doesn't false-positive
-   on the fallback-to-state.json path when the RPC actually fails)
-   and a load-module + method-call round-trip (proves the full
-   payload path — method args → TLS → RPC → return → TLS → client).
-
-Per-test skips show exactly which of (json, cbor, two-daemon, ssl)
-you're missing when docker or `openssl` isn't present.
+The legacy tcp / tcp_ssl smoke (and its JSON/CBOR codec matrix) went with
+those transports.
 
 ### Building your module for the container
 
@@ -202,30 +160,31 @@ Linux `.so` with a glibc/Qt/OpenSSL ABI compatible with the image's
 runtime. Modules built on macOS (dylibs) won't load; modules built on
 Linux with a different glibc usually won't either.
 
-Use the helper that builds inside the same nixos/nix base the daemon
-image was compiled in, guaranteeing ABI compatibility regardless of
-host OS:
+On Linux, `nix build .#install-portable` in your module's flake is enough
+for the portable image (the smoke itself mounts the dev shell's
+`LOGOSCTL_DOCKER_MODULES_DIR`).
+Elsewhere, use the helper that builds inside the same nixos/nix base the
+daemon image was compiled in:
 
 ```python
-from logoscore import LogoscoreDockerDaemon, build_modules_in_docker
+from logosctl import LogosctlDockerDaemon, build_modules_in_docker
 
 modules_dir = build_modules_in_docker(
     builds=[
         # Each entry is (flake_ref, attr). ALL builds share one container
         # run / one nix store, so common deps (logos-cpp-sdk, Qt, boost,
-        # openssl) get fetched once. Adding a second module costs only
-        # its own compile time, not another full closure download.
+        # openssl) get fetched once.
         ("github:user/my-module",  "packages.x86_64-linux.install-portable"),
         ("github:user/my-module2", "packages.x86_64-linux.install-portable"),
     ],
     output_dir="./build/modules",
 )
 
-with LogoscoreDockerDaemon(
-    image="logoscore:smoke-portable",
+with LogosctlDockerDaemon(
+    image="logosctl:smoke-portable",
     modules_dir=modules_dir,
 ) as daemon:
-    client = daemon.client(binary="logoscore")
+    client = daemon.client()
     client.load_module("my_module")
     print(client.call("my_module", "do_something", 42))
 ```
@@ -241,29 +200,7 @@ Or via the shell wrapper at `tests/docker_smoke/build_modules_in_docker.sh`:
 Each `attr` must point at a derivation whose output contains a
 `modules/<name>/<plugin>.so + manifest.json` tree. The standard
 `logos-module-builder` `.install-portable` output produces exactly this.
-
-### Using `LogoscoreDockerDaemon` for TLS directly
-
-```python
-from logoscore import LogoscoreDockerDaemon
-
-with LogoscoreDockerDaemon(
-    image="logoscore:smoke-portable",
-    modules_dir="./my-modules/modules",
-    transport="tcp_ssl",
-    ssl_cert=Path("./cert.pem"),   # host paths — mounted as /certs/*.pem
-    ssl_key=Path("./key.pem"),
-) as daemon:
-    client = daemon.client(binary="logoscore")   # auto-passes --no-verify-peer
-    client.status()
-```
-
-The helper bind-mounts the two PEM files as individual files into
-`/certs/cert.pem` and `/certs/key.pem` (so they can live in different
-host dirs) and flags the daemon with `--transport=tcp_ssl
---tcp-ssl-port=<internal> --ssl-cert=... --ssl-key=...`. The daemon
-itself always binds an additional LocalSocket listener for each module
-on top of whatever the operator named, so module-to-module traffic
-inside the daemon process group still uses the local socket — no
-explicit `local` flag needed (and module-host subprocesses don't try
-to bind a TLS listener with no cert).
+Without the dev shell's variables, the smoke builds `test_fullapi_cpp`
+this way (`.install-portable`, or `.install` for the dev image), from the
+logos-test-modules revision `flake.lock` pins
+(`LOGOSCTL_TEST_MODULES_FLAKE` overrides it).

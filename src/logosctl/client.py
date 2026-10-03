@@ -3,7 +3,9 @@
 Each method spawns a fresh `logosctl <subcommand> --json` subprocess and
 parses its output. When obtained via `LogosctlDaemon.client()`, the client
 is bound to a specific `config_dir` so it talks to that session's dial
-spec, not the user's global `~/.logosctl/`.
+spec, not the user's global `~/.logosctl/`. With `remote=PEER` every
+command runs on a daemon this client is paired with instead (Remote
+Runtime Control, `logosctl --remote PEER`; see `logosctl.remote`).
 
 Every command uses the grouped subcommand surface (`module ls`,
 `module show`, `daemon stop`, …). The old hyphenated spellings are still
@@ -27,50 +29,19 @@ from .events import Subscription
 
 @dataclass(frozen=True)
 class DaemonEndpoint:
-    """One well-known module's dial spec for a logosctl daemon.
+    """One well-known module's entry in the `daemon` block of
+    `<config_dir>/client/config.yaml` (schema version 2).
 
-    Serialized into a single entry of the `daemon` block of
-    `<config_dir>/client/config.yaml` (schema version 2). A daemon serves
-    each well-known module (`core_service`, `capability_module`) on its
-    own listener, so a full connection needs one `DaemonEndpoint` per
-    module.
-
-    This is the CLIENT half of the wire description, and its key names
-    are deliberately NOT the daemon's: a listener in the daemon document
-    says `protocol:` / `cert:` / `key:` / `ca_file:`, while an entry here
-    says `transport:` / `ca:`. Spelling one in the other's document fails
-    the parse — the client side has no `cert`/`key` at all.
-
-    `verify_peer` and `ca` are only emitted for `tcp_ssl` transports;
-    leave them None to omit them (the typical case for plain `tcp`).
-    Dropping `ca` while `verify_peer` stays true fails the handshake
-    closed, so a dev setup wants `verify_peer=False` rather than a
-    missing CA.
+    A client dials a daemon on this machine over its local socket; a daemon
+    elsewhere is operated with Remote Runtime Control
+    (`LogosctlClient(remote=…)`), which needs no dial spec at all.
     """
 
-    transport: str               # "tcp" | "tcp_ssl" | "local"
-    host: str | None = None
-    port: int | None = None
-    codec: str = "json"
-    verify_peer: bool | None = None
-    ca: str | None = None        # path to the CA bundle, tcp_ssl only
+    transport: str = "local"
 
     def _to_config_block(self) -> dict:
-        # Built explicitly (not dataclasses.asdict) so key order and the
-        # tcp_ssl-only `ca`/`verify_peer` match what the daemon writes
-        # into its own session on boot — see write_config.
-        block: dict = {"transport": self.transport}
-        if self.host is not None:
-            block["host"] = self.host
-        if self.port is not None:
-            block["port"] = self.port
-        block["codec"] = self.codec
-        if self.transport == "tcp_ssl":
-            if self.ca is not None:
-                block["ca"] = self.ca
-            if self.verify_peer is not None:
-                block["verify_peer"] = self.verify_peer
-        return block
+        # The shape the daemon writes into its own session on boot.
+        return {"transport": self.transport}
 
 
 def _json_default(obj: Any) -> Any:
@@ -131,26 +102,15 @@ class LogosctlClient:
         config_dir: Path | None = None,
         token: str | None = None,
         timeout: float | None = 30.0,
+        remote: str | None = None,
     ) -> None:
         self.binary = binary
         self.config_dir = Path(config_dir) if config_dir is not None else None
         self.token = token
         self.timeout = timeout
-
-    # logoscore also took `transport` / `tcp_host` / `tcp_port` /
-    # `no_verify_peer` / `codec` here, and turned them into
-    # LOGOSCORE_CLIENT_* env vars the CLI merged over the on-disk spec per
-    # call. logosctl honours exactly two variables — LOGOSCTL_CONFIG_DIR
-    # and LOGOSCTL_TOKEN — and `RpcClient::connect()` reads
-    # client/config.yaml verbatim with no merge layer at all. There is
-    # therefore nothing a per-call kwarg could set, so the kwargs are
-    # gone rather than silently ignored. Retargeting a client means
-    # writing a different dial spec: `connect()` below, or an in-place
-    # edit of the file (what `LogosctlDaemon` does). The per-module `port`
-    # that `tcp_port` used to override — a docker `-p 8080:6000` mapping,
-    # an SSH tunnel on another port — is now just `DaemonEndpoint(port=…)`,
-    # which is strictly better: it can differ per module, and the single
-    # uniform env port never could.
+        # A paired daemon's alias or runtime ID: every command then runs
+        # there, over the pairing this config dir holds, and needs no token.
+        self.remote = remote
 
     # ── Construction helpers ──────────────────────────────────────────────────
 
@@ -164,12 +124,11 @@ class LogosctlClient:
         merge: bool = False,
     ) -> None:
         """Write a `<config_dir>/client/config.yaml` dial spec (schema
-        version 2) with one entry per well-known module, so the CLI can
-        reach a daemon whose modules live on distinct listeners.
+        version 2) with one entry per well-known module.
 
         This is the single source of truth for the on-disk client config —
-        `LogosctlDaemon`, `LogosctlDockerDaemon`, and standalone callers
-        (see `connect`) all funnel through here.
+        `LogosctlDaemon.remote_client` and standalone callers (see
+        `connect`) funnel through here.
 
         The document is emitted as JSON text into a `.yaml` file. YAML is
         a superset of JSON, so the CLI's yaml-cpp parser reads it back
@@ -190,8 +149,8 @@ class LogosctlClient:
 
         `instance_id`, when not None (including ""), is recorded in
         config.yaml. It is mandatory for a `local` dial from a foreign
-        config dir — the registry name is `local:logos_<module>_<id>` —
-        and meaningless over tcp/tcp_ssl. `merge=True` preserves any
+        config dir — the registry name is `local:logos_<module>_<id>`.
+        `merge=True` preserves any
         pre-existing keys in config.yaml instead of rebuilding it from
         scratch — used by the local daemon, which patches the daemon's
         auto-emitted file.
@@ -256,14 +215,14 @@ class LogosctlClient:
         timeout: float | None = 30.0,
         instance_id: str | None = None,
     ) -> "LogosctlClient":
-        """Build a client that dials a (possibly remote) daemon described
-        by per-module `endpoints`.
+        """Build a client that dials a daemon on this machine from a config
+        dir the daemon does not own, described by per-module `endpoints`.
 
         Materializes a `client/config.yaml` (via `write_config`) and
         returns a client bound to that config dir. The on-disk spec is the
         whole story — logosctl has no client-side flags or env vars to
-        override it with, so this is the only way to reach a daemon that
-        isn't the one owning this config dir.
+        override it with. A daemon on another machine is operated with
+        Remote Runtime Control instead (`logosctl.remote`).
 
         Point this at a config dir the daemon does NOT own. A daemon
         rewrites `client/config.yaml` in its own session on every boot
@@ -271,11 +230,11 @@ class LogosctlClient:
         would silently replace a spec written into its dir.
 
         `token` is the raw token string the daemon issued for this client
-        (see `issue_token`). TCP and TLS clients need a named token: the
-        daemon's `client/auto.json` boot token is local-only. When `config_dir` is
-        None a private temp dir is created and removed when the returned
-        client is garbage collected; pass a `config_dir` to keep the
-        config around (it is never deleted).
+        (its `client/auto.json`, or a named one from `issue_token`), and
+        `instance_id` the daemon's (its local socket is named after it).
+        When `config_dir` is None a private temp dir is created and removed
+        when the returned client is garbage collected; pass a `config_dir`
+        to keep the config around (it is never deleted).
         """
         owns_dir = config_dir is None
         cfg_dir = (
@@ -297,7 +256,7 @@ class LogosctlClient:
     # Every command below passes the session through LOGOSCTL_CONFIG_DIR
     # (`_proc` sets it) rather than `--config-dir`. The flag is app-level,
     # and client subcommands use allow_extras(): only -j/--json,
-    # --no-json/--human and -q/--quiet are lifted back out of a
+    # --no-json/--human, -q/--quiet and --remote are lifted back out of a
     # subcommand's leftovers, so a trailing `--config-dir DIR` would reach
     # the command as two positional arguments. The env var has no position
     # to get wrong.
@@ -305,16 +264,10 @@ class LogosctlClient:
     # ── Daemon-wide commands ────────────────────────────────────────────────
 
     def status(self) -> dict:
-        return _proc.run_json(
-            self.binary, ["status"],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        return self._run(["status"])
 
     def stats(self) -> Any:
-        return _proc.run_json(
-            self.binary, ["module", "stats"],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        return self._run(["module", "stats"])
 
     def stop(self) -> None:
         """Ask the daemon to shut down cleanly.
@@ -324,10 +277,7 @@ class LogosctlClient:
         the daemon process (`LogosctlDaemon`) keeps a SIGTERM/SIGKILL
         ladder behind it for the case where the spec is unusable.
         """
-        _proc.run_json(
-            self.binary, ["daemon", "stop"],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        self._run(["daemon", "stop"])
 
     # ── Module management ───────────────────────────────────────────────────
 
@@ -335,35 +285,20 @@ class LogosctlClient:
         args: list[str] = ["module", "ls"]
         if loaded:
             args.append("--loaded")
-        result = _proc.run_json(
-            self.binary, args,
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        result = self._run(args)
         return result if isinstance(result, list) else []
 
     def module_info(self, name: str) -> dict:
-        return _proc.run_json(
-            self.binary, ["module", "show", name],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        return self._run(["module", "show", name])
 
     def load_module(self, name: str) -> dict:
-        return _proc.run_json(
-            self.binary, ["module", "load", name],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        return self._run(["module", "load", name])
 
     def unload_module(self, name: str) -> dict:
-        return _proc.run_json(
-            self.binary, ["module", "unload", name],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        return self._run(["module", "unload", name])
 
     def reload_module(self, name: str) -> dict:
-        return _proc.run_json(
-            self.binary, ["module", "reload", name],
-            config_dir=self.config_dir, token=self.token, timeout=self.timeout,
-        )
+        return self._run(["module", "reload", name])
 
     # ── Method calls ────────────────────────────────────────────────────────
 
@@ -392,16 +327,12 @@ class LogosctlClient:
         turn the decode off, or it is measuring the client.
 
         One argument value can't survive the trip: a bare `--json`, `-j`,
-        `--no-json`, `--human`, `-q` or `--quiet` is lifted out of the
-        subcommand's leftovers as a global flag before the call command
-        sees it. Pass such a value as `"str:--json"`.
+        `--no-json`, `--human`, `-q`, `--quiet` or `--remote` is lifted out
+        of the subcommand's leftovers as a global flag before the call
+        command sees it. Pass such a value as `"str:--json"`.
         """
-        cli_args = ["call", module, method, *(_arg_to_str(a) for a in args)]
-        envelope = _proc.run_json(
-            self.binary, cli_args,
-            config_dir=self.config_dir, token=self.token,
-            timeout=timeout if timeout is not None else self.timeout,
-        )
+        envelope = self._run(
+            ["call", module, method, *(_arg_to_str(a) for a in args)], timeout)
         # On success, the CLI prints {"status":"success", "result": ...} — but
         # non-success paths are already raised by run_json (exit code 3 or 4).
         if isinstance(envelope, dict) and envelope.get("status") == "error":
@@ -427,11 +358,7 @@ class LogosctlClient:
         `peer status`, `ls`, `routes`, `import NAME --from PEER …`, `policy set
         FILE` and the rest; see `logosctl peer` for the verbs.
         """
-        return _proc.run_json(
-            self.binary, ["peer", verb, *args],
-            config_dir=self.config_dir, token=self.token,
-            timeout=timeout if timeout is not None else self.timeout,
-        )
+        return self._run(["peer", verb, *args], timeout)
 
     # ── Event subscription ──────────────────────────────────────────────────
 
@@ -448,7 +375,7 @@ class LogosctlClient:
         `callback` is invoked on a background thread for each event dict.
         If `event` is None, all events from the module are received.
         """
-        watch_args: list[str] = ["watch", module]
+        watch_args: list[str] = [*self._remote_args(), "watch", module]
         if event is not None:
             watch_args.extend(["--event", event])
         return Subscription.start(
@@ -462,6 +389,18 @@ class LogosctlClient:
 
     # ── Internal ────────────────────────────────────────────────────────────
 
+    def _remote_args(self) -> list[str]:
+        # App-level, so ahead of the subcommand: a trailing one is lifted out
+        # of the leftovers too, which would eat a call argument `--remote`.
+        return ["--remote", self.remote] if self.remote else []
+
+    def _run(self, args: Sequence[str], timeout: float | None = None) -> Any:
+        return _proc.run_json(
+            self.binary, [*self._remote_args(), *args],
+            config_dir=self.config_dir, token=self.token,
+            timeout=timeout if timeout is not None else self.timeout,
+        )
+
     def _raw_args(self) -> Sequence[str]:
         """For debugging: common arg prefix for spawned subprocesses."""
-        return [self.binary]
+        return [self.binary, *self._remote_args()]

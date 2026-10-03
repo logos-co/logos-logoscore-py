@@ -10,10 +10,11 @@
     # logos-test-modules' feat/inproc-coordinates), with legacy mode deleted on
     # top (the feat/drop-legacy-mode branches), and the daemon's runtime in a
     # process of its own (logoscore-cli's feat/runtime-process). Peering sits on
-    # top (logoscore-cli#149): `logosctl peer`, which PeeredDaemons drives.
-    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/peering";
-    # feat/peering: feat/runtime-process's modules plus test_concurrency_cpp.
-    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/peering";
+    # top (logoscore-cli#149): `logosctl peer`, which PeeredDaemons drives. The
+    # tcp and tcp_ssl removal (logoscore-cli#156, protocol 0.15) on top of that.
+    logos-logoscore-cli.url = "github:logos-co/logos-logoscore-cli/feat/drop-legacy-remote";
+    # feat/runtime-process's modules plus test_concurrency_cpp.
+    logos-test-modules.url = "github:logos-co/logos-test-modules/feat/drop-legacy-remote";
     # logos-test-modules at its last commit before the qt_remote_plain chain,
     # built from its own lock: unchanged binaries for the transport matrix to
     # pair with the new runtime. No follows, on purpose: following would
@@ -37,8 +38,8 @@
       # `nix build` produces a Python wheel. The `logoscore` CLI is propagated
       # so anyone using this package also has the binary on PATH.
       #
-      # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
-      # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
+      # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare the
+      # logosctl `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
       # — the smoke image's stage-1 nix-build copies it into the
       # ubuntu-based runtime stage. The actual docker image is built
       # via `tests/docker_smoke/build_smoke_image.sh`, not directly
@@ -64,55 +65,46 @@
           };
 
           # ── Docker bundles ─────────────────────────────────────────────
-          # The bundle is **just the logoscore CLI** plus whatever modules
-          # it ships with (currently capability_module, package_manager_module).
-          # No test modules — those get bind-mounted at runtime via
-          # `-v $modules_dir:/user-modules` and `-m /user-modules`. That
-          # makes the image reusable for anyone who wants to test their
-          # own module: pull the image, `docker run -v ./my-modules:/user-modules
-          # logoscore:smoke-dev daemon -m /user-modules …`.
+          # The bundle is **just the logosctl CLI** plus the modules it
+          # ships with (capability_module, modules_state, the peering
+          # modules, and the package modules). No test modules — those get
+          # bind-mounted at runtime (`-v $modules_dir:/user-modules`, named
+          # in the daemon config's `modules_dirs`). That makes the image
+          # reusable for anyone who wants to test their own module against
+          # a daemon they operate over Remote Runtime Control.
           #
           # Two flavors:
           #
-          #   * `dockerBundle` (dev) — uses `.#cli` (the default logoscore
-          #     package, which links against Qt/Boost/OpenSSL from the nix
-          #     store via rpath). Smaller bundle (~60 MB payload) but the
-          #     runtime image MUST ship the nix store so those rpaths
-          #     resolve, and the CLI's built-in modules are found via
-          #     LOGOS_BUNDLED_MODULES_DIR (set by `wrapQtAppsNoGuiHook`
-          #     when the CLI was built). This is the flavor the
-          #     `logoscore-py` dev shell matches.
+          #   * `dockerBundle` (dev) — the `ctl` package: logosctl, its
+          #     runtime and module hosts, linked against Qt/Boost/OpenSSL
+          #     in the nix store via rpath, so the runtime image MUST ship
+          #     the nix store. Its modules/ sits beside bin/, where the
+          #     daemon finds it.
           #
-          #   * `dockerBundlePortable` — uses `.#cli-bundle-dir` (a
-          #     self-contained `bin/ + lib/ + modules/` tree with every
-          #     Qt dep + the CLI's built-in modules copied in). Larger
-          #     (~400 MB) but runs standalone — no nix store needed. The
-          #     CLI's built-in modules live at `/opt/logoscore/modules`
-          #     and are discovered by explicitly passing `-m
-          #     /opt/logoscore/modules` (no wrapper env var here).
+          #   * `dockerBundlePortable` — `ctl-bundle-dir`, a self-contained
+          #     `bin/ + lib/ + modules/` tree with every Qt dep copied in.
+          #     Larger but runs standalone — no nix store needed.
           #
           # The Dockerfile picks one via `--build-arg FLAVOR=dev|portable`.
           # The pytest suite parametrises over both flavors so regressions
           # in either path surface in the smoke matrix.
 
-          logoscorePortable = logos-logoscore-cli.packages.${system}.cli-bundle-dir;
+          logosctlBin = logos-logoscore-cli.packages.${system}.ctl;
+          logosctlPortable = logos-logoscore-cli.packages.${system}.ctl-bundle-dir;
 
-          dockerBundle = pkgs.runCommand "logoscore-bundle-dev" { } ''
-            # Dev flavor: just the binary. rpath points into /nix/store
-            # (copied wholesale in Dockerfile stage 2), and the
-            # wrapped binary carries `LOGOS_BUNDLED_MODULES_DIR` baked
-            # in — pointing at the CLI's own modules dir in the store —
-            # so capability_module etc. resolve without extra `-m` flags.
-            mkdir -p $out/bin
-            cp ${logoscoreBin}/bin/logoscore $out/bin/
+          dockerBundle = pkgs.runCommand "logosctl-bundle-dev" { } ''
+            # Dev flavor: the ctl tree, dereferenced. Its rpaths point into
+            # /nix/store (copied wholesale in Dockerfile stage 2).
+            mkdir -p $out
+            cp -rL ${logosctlBin}/. $out/
+            chmod -R u+w $out
           '';
 
-          dockerBundlePortable = pkgs.runCommand "logoscore-bundle-portable" { } ''
-            # Portable flavor: cli-bundle-dir is already a self-contained
-            # bin/ + lib/ + modules/ tree — the CLI's own built-in
-            # modules live under its modules/ subdir. Copy it as-is.
+          dockerBundlePortable = pkgs.runCommand "logosctl-bundle-portable" { } ''
+            # Portable flavor: ctl-bundle-dir is already a self-contained
+            # bin/ + lib/ + modules/ tree. Copy it as-is.
             mkdir -p $out
-            cp -r ${logoscorePortable}/* $out/
+            cp -r ${logosctlPortable}/* $out/
             chmod -R u+w $out
           '';
         in {
@@ -150,12 +142,13 @@
           # parameter/return/event surface. `.install` lays out
           # modules/<name>/… ready for the daemon's `-m` flag.
           testModulesInstall         = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
+          # The portable variant, which the portable docker smoke image loads.
           testModulesInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
           # Its plain build, the one a daemon can export (test_peering.py).
           testModulesPlainInstall =
             logos-test-modules.modules.${system}.test_fullapi_cpp_qt_remote_plain.install;
         in {
-        default = pkgs.mkShell {
+        default = pkgs.mkShell ({
           packages = [
             (pkgs.python3.withPackages (ps: [ ps.pytest ]))
             logoscoreBin
@@ -166,15 +159,8 @@
           # `pytest` on a plain Python env doesn't try to spawn daemons).
           # Exporting them here means the dev shell exercises the full
           # suite out of the box.
-          #
-          # Two module-dir vars because the docker smoke flavors differ:
-          # the `dev` image has /nix/store so `.install` modules (which
-          # rpath into the store) work; the `portable` image is standalone
-          # so we need `.install-portable` (self-contained). The docker
-          # smoke fixture picks the right one per flavor.
           LOGOSCORE_BIN                       = "${logoscoreBin}/bin/logoscore";
           LOGOSCORE_TEST_MODULES_DIR          = "${testModulesInstall}/modules";
-          LOGOSCORE_TEST_MODULES_DIR_PORTABLE = "${testModulesInstallPortable}/modules";
 
           # The logosctl suite reads its own pair of variables (its conftest
           # rebinds `test_modules_dir` to LOGOSCTL_TEST_MODULES_DIR) so a
@@ -190,32 +176,31 @@
             echo "  logoscore:                               $(logoscore --version 2>/dev/null || echo 'not on PATH')"
             echo "  logosctl:                                $(logosctl --version 2>/dev/null || echo 'not on PATH')"
             echo "  LOGOSCORE_BIN:                           $LOGOSCORE_BIN"
-            echo "  LOGOSCORE_TEST_MODULES_DIR (dev):        $LOGOSCORE_TEST_MODULES_DIR"
-            echo "  LOGOSCORE_TEST_MODULES_DIR_PORTABLE:     $LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
+            echo "  LOGOSCORE_TEST_MODULES_DIR:              $LOGOSCORE_TEST_MODULES_DIR"
             echo "  LOGOSCTL_BIN:                            $LOGOSCTL_BIN"
             echo "  LOGOSCTL_TEST_MODULES_DIR:               $LOGOSCTL_TEST_MODULES_DIR"
             echo "  LOGOSCTL_PLAIN_MODULES_DIR:              $LOGOSCTL_PLAIN_MODULES_DIR"
+            echo "  LOGOSCTL_DOCKER_MODULES_DIR:             ''${LOGOSCTL_DOCKER_MODULES_DIR:-(built in docker)}"
+            echo "  LOGOSCTL_DOCKER_DEV_MODULES_DIR:         ''${LOGOSCTL_DOCKER_DEV_MODULES_DIR:-(built in docker)}"
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
           '';
-        };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # The docker smoke mounts these into its daemons, one variant per
+          # image flavor; elsewhere a host build would not load in the Linux
+          # container, so it builds them in docker.
+          LOGOSCTL_DOCKER_MODULES_DIR         = "${testModulesInstallPortable}/modules";
+          LOGOSCTL_DOCKER_DEV_MODULES_DIR     = "${testModulesInstall}/modules";
+        });
       });
 
       # ── Checks ────────────────────────────────────────────────────────────
       # `nix flake check` runs the unit tests (no daemon required) and the
       # integration test suite against a real CLI + test modules.
       #
-      # Both suites exist twice, once per client: `unit` / `integration-*`
-      # drive `logoscore`, `unit-logosctl` / `integration-logosctl-*` drive
-      # `logosctl`. Separate derivations throughout, never one derivation
-      # looping over both — see the `unit-logosctl` comment.
-      #
-      # The integration suite is replicated across three transports so a
-      # regression in tcp framing or tcp_ssl handshaking surfaces at the
-      # same layer the test names already cover. Three separate flake
-      # outputs (rather than one derivation that loops) so:
-      #   - CI can fan them out across runners in parallel,
-      #   - a tcp_ssl failure doesn't block the local/tcp signal,
-      #   - the build log of any single transport stays focused.
+      # Both suites exist twice, once per client: `unit` / `integration-local`
+      # drive `logoscore`, `unit-logosctl` / `integration-logosctl-local`
+      # drive `logosctl`. Separate derivations throughout, never one
+      # derivation looping over both — see the `unit-logosctl` comment.
       checks = forAllSystems ({ pkgs, system }:
         let
           python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
@@ -261,8 +246,7 @@
           testModulesExtQtProxyInstall =
             logos-test-modules.modules.${system}.test_fullapi_ext_qtproxy.install;
 
-          # Explicit module-process transport builds. These are separate from
-          # the Python client's local/tcp/tcp_ssl axis: they choose how each
+          # Explicit module-process transport builds: they choose how each
           # module host talks to logoscore. Provider and proxy builds are paired
           # independently below so mixed QRO/plain topologies cannot hide.
           transportCppQro =
@@ -298,13 +282,11 @@
           testModulesProxyRustInstall =
             logos-test-modules.modules.${system}.test_fullapi_proxy_rust.install;
 
-          # Helper: run the integration suite once with the given
-          # `--transport` value. Same env wiring as the unit check
-          # plus openssl (needed by the `self_signed_cert` fixture
-          # for `tcp_ssl`; harmless for `local` / `tcp`).
-          mkIntegration = transport: pkgs.runCommand
-            "logoscore-py-integration-tests-${transport}" {
-              nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+          # Helper: run the integration suite. Same env wiring as the unit
+          # check, plus the CLI and the test modules.
+          mkIntegration = pkgs.runCommand
+            "logoscore-py-integration-tests" {
+              nativeBuildInputs = [ python logoscoreBin ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               cp -r ${./.}/. .
@@ -320,7 +302,7 @@
               # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
               export HOME=$PWD/home
               mkdir -p $HOME
-              ${python}/bin/pytest tests/integration -v --transport=${transport}
+              ${python}/bin/pytest tests/integration -v
               touch $out
             '';
 
@@ -330,9 +312,9 @@
           # two CLIs configure a daemon through different mechanisms, and
           # retiring logoscore should be a delete, not an untangle. The two
           # helpers drifting apart is expected, not a smell.
-          mkIntegrationLogosctl = transport: pkgs.runCommand
-            "logosctl-py-integration-tests-${transport}" {
-              nativeBuildInputs = [ python logosctlBin pkgs.openssl ]
+          mkIntegrationLogosctl = pkgs.runCommand
+            "logosctl-py-integration-tests" {
+              nativeBuildInputs = [ python logosctlBin ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               cp -r ${./.}/. .
@@ -358,7 +340,7 @@
               # default-session write must still land somewhere sandbox-local.
               export HOME=$PWD/home
               mkdir -p $HOME
-              ${python}/bin/pytest tests/logosctl/integration -v --transport=${transport}
+              ${python}/bin/pytest tests/logosctl/integration -v
               touch $out
             '';
 
@@ -369,7 +351,7 @@
           # proxy -> provider call.
           mkModuleTransportMatrixArgs = daemon: extraArgs: label: cppInstall: rustInstall: proxyInstall:
             pkgs.runCommand "logoscore-py-module-transport-${label}" {
-              nativeBuildInputs = [ python daemon pkgs.openssl ]
+              nativeBuildInputs = [ python daemon ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               cp -r ${./.}/. .
@@ -405,7 +387,7 @@
           # The ext table for a given pair of providers; its consumers are py
           # and the ext Qt proxy (see conformance-matrix-ext).
           mkExtMatrix = name: rustInstall: cppInstall: pkgs.runCommand name {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+            nativeBuildInputs = [ python logoscoreBin ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -457,8 +439,8 @@
           # A parallel suite for the parallel client, in its own derivations
           # so nix builds it concurrently with the logoscore ones and a red
           # logosctl cannot mask a logoscore regression. Dropping logosctl
-          # later is deleting these four attributes, `mkIntegrationLogosctl`,
-          # and `logosctlBin`.
+          # later is deleting `unit-logosctl`, `integration-logosctl-local`,
+          # `mkIntegrationLogosctl`, and `logosctlBin`.
           #
           # Deliberately NOT duplicated: the conformance matrix. It measures
           # the LIDL type contract, which lives in the runtime both binaries
@@ -503,7 +485,7 @@
           # external requests, publishable to Pages the way the doctest
           # harness's report already is.
           conformance-matrix = pkgs.runCommand "logoscore-py-conformance-matrix" {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+            nativeBuildInputs = [ python logoscoreBin ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -591,7 +573,7 @@
           # exported by one logosctl daemon, called on another through its
           # facade, and compared cell by cell with the provider measured here.
           conformance-transport-peered = pkgs.runCommand "logoscore-py-module-transport-peered" {
-            nativeBuildInputs = [ python logoscoreBin logosctlBin pkgs.openssl ]
+            nativeBuildInputs = [ python logoscoreBin logosctlBin ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -699,22 +681,15 @@
                 -o $out/index.html
             '';
 
-          # One check per transport. CI's matrix fans them out; a local
-          # `nix flake check` runs all three sequentially.
-          integration-local   = mkIntegration "local";
-          integration-tcp     = mkIntegration "tcp";
-          integration-tcp_ssl = mkIntegration "tcp_ssl";
-
-          # Same three transports, driven through logosctl. Split the same way
-          # and for the same reasons.
-          integration-logosctl-local   = mkIntegrationLogosctl "local";
-          integration-logosctl-tcp     = mkIntegrationLogosctl "tcp";
-          integration-logosctl-tcp_ssl = mkIntegrationLogosctl "tcp_ssl";
+          # The client reaches its daemons over the local socket; a daemon
+          # elsewhere is Remote Runtime Control (test_runtime_control.py).
+          integration-local          = mkIntegration;
+          integration-logosctl-local = mkIntegrationLogosctl;
 
           # Back-compat alias — equivalent to `integration-local`. Kept
           # so anyone with `nix build .#checks.<system>.integration` in
           # muscle memory still gets a green path.
-          integration = mkIntegration "local";
+          integration = mkIntegration;
         }
       );
     };

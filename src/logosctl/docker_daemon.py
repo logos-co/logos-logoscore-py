@@ -1,11 +1,10 @@
 """Lifecycle manager for a `logosctl` daemon running inside docker.
 
-`LogosctlDockerDaemon` is to `LogosctlDaemon` what its name suggests:
-the same context-manager shape, but the daemon runs in a container and
-speaks TCP to the host. Use it when your test setup deliberately
-crosses a container boundary — e.g. you want to smoke-test a real
-distribution of logosctl, or you need the daemon to be reachable from
-multiple processes on the host.
+`LogosctlDockerDaemon` is to `LogosctlDaemon` what its name suggests: the
+same context-manager shape, but the daemon runs in a container and the host
+operates it with Remote Runtime Control. Use it when your test setup
+deliberately crosses a container boundary — e.g. to smoke-test a real
+distribution of logosctl, or your own module against one.
 
 Example:
     from logosctl import LogosctlDockerDaemon
@@ -13,20 +12,32 @@ Example:
     with LogosctlDockerDaemon(
         image="logosctl:smoke-portable",
         modules_dir="./my-module/result/modules",
+        binary="logosctl",                  # the host-side client
     ) as daemon:
-        client = daemon.client(binary="./logosctl")
+        client = daemon.client()
         client.load_module("my_module")
         print(client.call("my_module", "do_something", 42))
+
+Remote Runtime Control:
+    The container shares the host's network (`--network host`), and the
+    daemon's `peering` section puts its control endpoint on a fixed loopback
+    port with `runtime_control: true`, so core_service also listens on
+    `tls_tcp`. `start()` mints a runtime-control invite inside the container,
+    pairs a host-side logosctl (a config dir of its own, no daemon) with
+    `logosctl remote pair`, accepts it inside the container, and grants it
+    methods in the daemon's remote policy (`grants`, `DEFAULT_GRANTS` by
+    default). `client()` runs every command with `--remote`. Host networking
+    is what lets the client reach the runtime-control listener, whose port
+    the daemon picks; Docker Desktop has it only as an opt-in setting.
 
 Volume layout inside the container (all three dirs are on the host and
 bind-mounted in — they survive the container):
     /config       — the session directory. Holds `daemon.yaml` (the
-                    config document this wrapper writes) plus everything
-                    logosctl puts under a session: `daemon/config.yaml`,
-                    `daemon/state.json`, `daemon/tokens/<name>.json`,
-                    `client/`, `logs/`, `modules/`, `plugins/`. The
-                    host-side client config is built from the forwarded
-                    ports plus a named network token issued inside the container.
+                    config document this wrapper writes) and
+                    `remote-policy.json` (the last policy it set) plus
+                    everything logosctl puts under a session:
+                    `daemon/config.yaml`, `daemon/state.json`, `peering/`,
+                    `client/`, `logs/`, `modules/`, `plugins/`.
     /persistence  — the `persistence_path` config key; pre-seed to
                     restore a session, read back to inspect what modules
                     wrote
@@ -34,28 +45,14 @@ bind-mounted in — they survive the container):
                     the daemon through `modules_dirs`
 
 Configuration is a document, not flags:
-    logosctl has no `-m`, `--persistence-path`, `--module-transport` or
-    `--insecure-tcp` — every one of them was deleted, and passing one is
-    a parse error that stops the daemon before it starts. All of it is
-    now a YAML document installed into the session BEFORE the daemon
-    boots. So `start()` runs two containers over the same `/config`
-    bind-mount: a throwaway `daemon config set /config/daemon.yaml`,
-    then the real `daemon start`. Going through the CLI rather than
-    dropping the file straight into `/config/daemon/config.yaml` is what
-    buys the top-level-key allowlist — a near-miss like `insecureTcp`
-    comes back as an error naming the key instead of being silently
-    dropped and leaving the daemon to boot without the operator's intent.
-
-Port strategy (status-go `tests-functional` pattern):
-    container-internal TCP ports are fixed: `core_service` on
-    `CONTAINER_TCP_PORT` (6000), `capability_module` on
-    `CONTAINER_CAP_TCP_PORT` (6001). The host maps an ephemeral port to
-    each via `-p …:6000` / `-p …:6001`. The client dials those forwarded
-    host ports from a per-module `client/config.yaml` written by
-    `LogosctlClient.write_config` — one entry per module, each with its
-    own port. There is no env-var shortcut to reach for here even if we
-    wanted one: `LOGOSCTL_CONFIG_DIR` and `LOGOSCTL_TOKEN` are the only
-    variables the binary reads, and the dial spec is a file.
+    logosctl has no `-m` or `--persistence-path`; all of it is a YAML
+    document installed into the session BEFORE the daemon boots. So
+    `start()` runs two containers over the same `/config` bind-mount: a
+    throwaway `daemon config set /config/daemon.yaml`, then the real
+    `daemon start`. Going through the CLI rather than dropping the file
+    straight into `/config/daemon/config.yaml` is what buys the
+    top-level-key allowlist — a near-miss like `persistencePath` comes back
+    as an error naming the key instead of being silently dropped.
 """
 from __future__ import annotations
 
@@ -70,50 +67,31 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .client import DaemonEndpoint, LogosctlClient
+from ._proc import _error_codes_from_stdout
+from .client import LogosctlClient
 # The daemon document has one shape and one set of hazards whether the
 # daemon runs here or in a container, so its emitter and its type checks
 # live once, next to the flavor that came first.
 from .daemon import _check_config_types, _yaml_document
-from .errors import LogosctlError
+from .errors import LogosctlError, from_exit_code
+from .remote import RuntimeControl, runtime_control_config
 
 
 # ── Module-level helpers (also re-exported from the package) ──────────────
 
-# Fixed TCP ports the daemon binds *inside* the container. The host
-# side always uses dynamically-picked ephemeral ports and port-forwards
-# them in. See module docstring for the full rationale.
-#
-# core_service is on CONTAINER_TCP_PORT; capability_module on
-# CONTAINER_CAP_TCP_PORT. The latter is needed because the SDK's
-# auto-`requestModule` path inside LogosAPIClient dials capability_module
-# transparently — without forwarding it through, every host-side RPC
-# would either fail (post-config-split) or hit a 20s waitForSource
-# timeout (pre-fix). Stable, distinct container ports lets us
-# `docker run -p host_core:6000 -p host_cap:6001 ...` and keep the
-# host-side mapping deterministic.
-CONTAINER_TCP_PORT     = 6000
-CONTAINER_CAP_TCP_PORT = 6001
-
-# Paths *inside* the container. The first three are bind-mount targets we
-# choose; the last three are properties of the image. The daemon config
-# document is written in these terms, so every path in it has to be the
-# container's, never the host's.
+# Paths *inside* the container: bind-mount targets we choose. The daemon
+# config document is written in these terms, so every path in it has to be
+# the container's, never the host's. The image's own modules sit beside its
+# binary, where the daemon finds them unasked.
 CONTAINER_CONFIG_DIR       = "/config"
 CONTAINER_PERSISTENCE_DIR  = "/persistence"
 CONTAINER_USER_MODULES_DIR = "/user-modules"
-# The image's own modules dir — capability_module et al. The portable
-# bundle also finds it on its own (the daemon adds `<bin>/../modules`
-# unconditionally), but naming it keeps the two image flavors symmetric
-# and the config document self-describing.
-CONTAINER_BUNDLED_MODULES_DIR = "/opt/logosctl/modules"
-CONTAINER_CERT_PATH = "/certs/cert.pem"
-CONTAINER_KEY_PATH  = "/certs/key.pem"
 # The document `daemon config set` reads. Written by the host into the
 # root of the bind-mounted session dir, deliberately NOT at
 # `daemon/config.yaml` — that path is the CLI's to write, and this is
 # only the input it writes it from.
 CONTAINER_CONFIG_DOC = f"{CONTAINER_CONFIG_DIR}/daemon.yaml"
+CONTAINER_POLICY_FILE = f"{CONTAINER_CONFIG_DIR}/remote-policy.json"
 
 # Every logosctl invocation in the container selects its session this way
 # rather than with `--config-dir`. The flag is app-level, so it only
@@ -302,13 +280,13 @@ def build_modules_in_docker(
 # ── The helper ────────────────────────────────────────────────────────────
 
 class LogosctlDockerDaemon:
-    """Spawn a logosctl daemon inside a docker container and drive it
-    from the host over TCP.
+    """Spawn a logosctl daemon inside a docker container and operate it
+    from the host with Remote Runtime Control.
 
     Construction stores config only. `start()` installs the session's
-    daemon config, runs the container, and waits for `state.json`;
-    `stop()` kills it. Use the context-manager form to get start/stop
-    bracketing automatically.
+    daemon config, runs the container, waits for `state.json`, and pairs
+    the host-side client; `stop()` kills it. Use the context-manager form
+    to get start/stop bracketing automatically.
     """
 
     def __init__(
@@ -316,71 +294,35 @@ class LogosctlDockerDaemon:
         *,
         image: str,
         modules_dir: str | Path,
-        # Optional bits — sane defaults mean you can do
-        # `LogosctlDockerDaemon(image=..., modules_dir=...)`.
+        # The HOST-side logosctl that pairs with the daemon and runs every
+        # client command; the container's own binary never leaves it.
+        binary: str = "logosctl",
         config_dir: str | Path | None = None,
         persistence_dir: str | Path | None = None,
-        host_port: int | None = None,
-        codec: str = "json",
-        transport: str = "tcp",
-        ssl_cert: str | Path | None = None,
-        ssl_key: str | Path | None = None,
-        # HOST-side path to the CA that signs `ssl_cert`. Unlike the cert
-        # and key — which are the daemon's and get bind-mounted into the
-        # container — this one is read by the client, which runs on the
-        # host, so it is never mounted anywhere. For the usual
-        # self-signed smoke cert the cert IS its own CA, so passing
-        # `ssl_ca=ssl_cert` is what makes `verify_peer=True` work at all;
-        # without a CA a verifying handshake fails closed.
-        ssl_ca: str | Path | None = None,
-        # On-disk dial-spec value for `verify_peer` in the host client/
-        # config.yaml. True = verify the daemon's cert against `ssl_ca`
-        # (correct default; what a real deployment with a CA-issued
-        # cert would use). False = skip verification (the smoke-test
-        # default — the caller's `ssl_cert` is typically self-signed).
-        # Independent of the per-call `no_verify_peer` knob in
-        # `client()`, which rewrites this value on disk: logosctl has no
-        # client-side flags or env vars, so the file is the only place
-        # either of them can land.
-        verify_peer: bool = False,
-        # Lifetime of the named token issued for tcp/tls clients. stop()
-        # revokes it; the expiry bounds one a killed process leaves behind.
-        network_token_ttl: str = "24h",
+        # The daemon's control endpoint, on the loopback the container
+        # shares with the host. None: a free port picked at start().
+        control_port: int | None = None,
+        # The daemon's peering name: the alias the host client lists it as.
+        name: str = "node",
+        # What the host client may call, as its remote-policy entry
+        # (`DEFAULT_GRANTS` when None). `runtime_control.grant()` changes it.
+        grants: Mapping[str, Any] | None = None,
         container_name: str | None = None,
-        # Name of an EXISTING docker network to attach the container to.
-        # Caller-managed: the daemon never creates or removes networks.
-        # Use to make multiple daemon containers discover each other by
-        # container name via docker's embedded DNS.
-        network: str | None = None,
         extra_module_dirs: Sequence[str] | None = None,
         # Extra top-level keys merged into the daemon config document —
-        # `access_group`, `dirs`, `logging`, `access_policy`, … This is
-        # where logoscore's free-form `extra_args` went: every daemon
-        # knob that used to be a flag is a config key now, so an argv
-        # escape hatch could no longer express any of them. Merged last,
-        # so a caller can also override what this wrapper computes. Keys
-        # are allowlisted by the CLI; an unknown one fails `config set`
-        # with a message naming it.
+        # `access_group`, `dirs`, `logging`, `access_policy`, … Merged
+        # last, so a caller can also override what this wrapper computes
+        # (the `peering` section included). Keys are allowlisted by the
+        # CLI; an unknown one fails `config set` with a message naming it.
         extra_config: Mapping[str, Any] | None = None,
         # Still argv, but only the app-level flags are left (`--verbose`,
-        # `--quiet`) — everything that configured the daemon moved into
-        # `extra_config`.
+        # `--quiet`) — everything that configures the daemon is config.
         extra_args: Sequence[str] | None = None,
-        # 20s was already generous for logoscore; keep it, because a
-        # logosctl daemon does strictly more before it writes state.json:
-        # it creates the session's modules/plugins/keyring/cache dirs and
-        # loads package_manager + package_downloader unconditionally.
-        startup_timeout: float = 20.0,
+        # A logosctl daemon creates the session's modules/plugins/keyring/
+        # cache dirs and loads package_manager + package_downloader and
+        # peering before it writes state.json.
+        startup_timeout: float = 30.0,
     ) -> None:
-        if transport not in ("tcp", "tcp_ssl"):
-            raise ValueError(
-                f"transport must be 'tcp' or 'tcp_ssl' (got {transport!r})"
-            )
-        if transport == "tcp_ssl" and not (ssl_cert and ssl_key):
-            raise ValueError(
-                "transport='tcp_ssl' requires ssl_cert and ssl_key"
-            )
-
         self.image = image
         self.modules_dir = Path(modules_dir)
         # Validate up front. `docker run -v <missing-host-path>:...`
@@ -391,20 +333,16 @@ class LogosctlDockerDaemon:
         if not self.modules_dir.exists():
             raise FileNotFoundError(
                 f"modules_dir does not exist: {self.modules_dir}. "
-                "Build your module(s) first (e.g. `nix build .#install` "
+                "Build your module(s) first (e.g. `nix build .#install-portable` "
                 "or via build_modules_in_docker())."
             )
         if not self.modules_dir.is_dir():
             raise NotADirectoryError(
                 f"modules_dir is not a directory: {self.modules_dir}"
             )
-        self.codec = codec
-        self.transport = transport
-        self.ssl_cert = Path(ssl_cert) if ssl_cert else None
-        self.ssl_key = Path(ssl_key) if ssl_key else None
-        self.ssl_ca = Path(ssl_ca) if ssl_ca else None
-        self.verify_peer = verify_peer
-        self.network_token_ttl = network_token_ttl
+        self.binary = binary
+        self.name = name
+        self.grants = dict(grants) if grants is not None else None
         self.startup_timeout = startup_timeout
         # Additional dirs *inside the container* to scan for modules, on
         # top of the image's own bundled modules and `/user-modules`
@@ -435,61 +373,53 @@ class LogosctlDockerDaemon:
             self._persistence_dir = Path(persistence_dir)
             self._persistence_dir.mkdir(parents=True, exist_ok=True)
 
-        # Host-only client config dir. The daemon's view of /config
-        # (and the LogosctlClient's `config_dir` argument when this
-        # daemon hands one out) are NOT the same on disk — the
-        # container writes /config/{daemon,client}/* as root, and the
-        # host process can't overwrite root-owned files in there. The
-        # client side gets its own dir which the host populates with
-        # client/config.yaml (host-correct ports) + a named network token.
-        # Keeping the two apart is also what
-        # the CLI wants: a daemon rewrites `client/config.yaml` in its
-        # OWN session on every boot, so a dial spec written into
-        # /config would be refreshed out from under us. Cleaned up on
-        # stop() alongside _config_dir.
-        self._host_client_dir = Path(
-            tempfile.mkdtemp(prefix="logosctl-docker-client-"))
-
-        self._host_port = host_port  # may be None until start()
-        # Capability_module's host-side port. Picked alongside
-        # `_host_port` in start() so the container's stable
-        # CONTAINER_CAP_TCP_PORT can be forwarded to a known host port.
-        # Tracked separately so the post-startup client/config.yaml
-        # build (see `_build_host_client_config`) knows what to point
-        # the host client at for capability_module.
-        self._host_cap_port: int | None = None
+        self._control_port = control_port  # may be None until start()
         self._container_name = (
             container_name
             or f"logosctl-{uuid.uuid4().hex[:12]}"
         )
-        self.network = network
         self._container_id: str | None = None
-        self._network_token_name: str | None = None
+        # The image's entrypoint: the logosctl that `docker exec` runs.
+        self._container_binary: str | None = None
+        # The host-side client's pairing, from start() to stop(). Its config
+        # dir is the host's own: the container writes /config as root.
+        self._runtime_control: RuntimeControl | None = None
+        # Set once a container has written into the bind-mounted dirs.
+        self._wrote_as_root = False
 
     # ── Public properties ───────────────────────────────────────────────
 
     @property
-    def host_port(self) -> int:
-        """Dynamic host port mapped to the container's TCP listener.
-        Only valid once `start()` has completed."""
-        if self._host_port is None:
+    def control_port(self) -> int:
+        """The daemon's control endpoint port, on 127.0.0.1. Only valid once
+        `start()` has picked it."""
+        if self._control_port is None:
             raise LogosctlError("daemon hasn't started yet")
-        return self._host_port
+        return self._control_port
+
+    @property
+    def runtime_control(self) -> RuntimeControl:
+        """The host-side client's pairing: `grant()` changes what it may
+        call, `runtime_id` is its runtime ID."""
+        if self._runtime_control is None:
+            raise LogosctlError(
+                "daemon is not running — call start() or use the context manager"
+            )
+        return self._runtime_control
 
     @property
     def config_dir(self) -> Path:
         """Host path of the daemon's session directory. The container
         runs as root and writes `daemon/config.yaml`, `daemon/state.json`,
-        `daemon/tokens.json`, `daemon/tokens/<name>.json`,
-        `client/config.yaml`, `client/auto.json` and `logs/` here as
-        root-owned, with the credential-adjacent ones at 0600 (and
-        `daemon/` itself locked to 0700 when an access group is set).
-        The host process generally can't read those directly even though
-        it owns the surrounding dir. Use `read_container_file()` (which
-        goes through `docker exec ... cat`) or the higher-level helpers
-        (`state_json`, `instance_id`, `daemon_log`) to extract content;
-        reaching into this path with `read_text()` will hit a
-        PermissionError."""
+        `daemon/tokens.json`, `peering/`, `client/config.yaml`,
+        `client/auto.json` and `logs/` here as root-owned, with the
+        credential-adjacent ones at 0600 (and `daemon/` itself locked to
+        0700 when an access group is set). The host process generally
+        can't read those directly even though it owns the surrounding dir.
+        Use `read_container_file()` (which goes through `docker exec ...
+        cat`) or the higher-level helpers (`state_json`, `instance_id`,
+        `daemon_log`) to extract content; reaching into this path with
+        `read_text()` will hit a PermissionError."""
         return self._config_dir
 
     # ── Container-side reads ─────────────────────────────────────────────
@@ -510,7 +440,7 @@ class LogosctlDockerDaemon:
         Use this for any host-side inspection of files the daemon
         writes under `/config/` — the host process can't read them
         directly. Examples: `state.json` (instance_id, resolved
-        transport endpoints), `tokens.json` (hashed token list),
+        configuration), `tokens.json` (hashed token list),
         `tokens/<name>.json` (raw tokens, when needed for testing).
         `cat` follows symlinks, so `logs/daemon.log` — which is a link
         to this boot's timestamped log — reads as the live file."""
@@ -542,7 +472,7 @@ class LogosctlDockerDaemon:
         produced it yet, the container isn't running, or the JSON is
         malformed — every call site handles these the same way
         (treat the daemon as not-yet-ready). Source of truth for
-        `instance_id` and the actually-bound transport ports."""
+        `instance_id` and the listeners the daemon bound."""
         text = self.read_container_file(
             f"{CONTAINER_CONFIG_DIR}/daemon/state.json")
         if text is None:
@@ -590,46 +520,50 @@ class LogosctlDockerDaemon:
     def container_name(self) -> str:
         return self._container_name
 
+    # ── Operating it from inside ─────────────────────────────────────────
+
+    def peer(self, verb: str, *args: str) -> Any:
+        """`logosctl peer <verb> [args…]` inside the container, as the
+        daemon's local operator; the reply parsed like `LogosctlClient`'s."""
+        cmd = ["docker", "exec", self.container_id, self._entrypoint(),
+               "--config-dir", CONTAINER_CONFIG_DIR, "--json", "peer", verb, *args]
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           timeout=self.startup_timeout)
+        if r.returncode != 0:
+            code, detail = _error_codes_from_stdout(r.stdout or "")
+            raise from_exit_code(
+                r.returncode,
+                f"logosctl command failed in the container (exit {r.returncode}): "
+                f"{' '.join(cmd)}\n{(r.stdout or r.stderr or '').strip()}",
+                stderr=r.stderr, error_code=code, detail_error_code=detail)
+        return json.loads(r.stdout) if (r.stdout or "").strip() else None
+
+    def set_remote_policy(self, policy: Mapping[str, Any]) -> Any:
+        """Replace the daemon's remote policy (`logosctl peer policy set`),
+        through a file in the host side of `/config`."""
+        (self._config_dir / "remote-policy.json").write_text(
+            json.dumps(policy), encoding="utf-8")
+        reply = self.peer("policy", "set", CONTAINER_POLICY_FILE)
+        if not (isinstance(reply, dict) and reply.get("ok") is True):
+            raise LogosctlError(f"the daemon did not take its remote policy: {reply!r}")
+        return reply
+
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> "LogosctlDockerDaemon":
         """Install the session's daemon config, `docker run` the daemon,
-        and block until it writes state.json.
+        block until it writes state.json, and pair the host-side client.
 
         Raises LogosctlError on docker failure / bad config / startup
-        timeout. Does NOT check `docker_available()` or `image_present()`
-        up front — callers that care about environmental skips should do
-        so before calling start().
+        timeout / a refused pairing. Does NOT check `docker_available()` or
+        `image_present()` up front — callers that care about environmental
+        skips should do so before calling start().
         """
         if self._container_id is not None:
             raise LogosctlError("daemon is already started")
 
-        if self._host_port is None:
-            self._host_port = pick_free_port()
-        # Capability_module rides its own host:container port pair.
-        # Pick eagerly here so the docker `-p` mapping and the
-        # listener the config document declares for capability_module
-        # line up.
-        if self._host_cap_port is None:
-            self._host_cap_port = pick_free_port()
-
-        # Pre-flight: catch a missing network with a readable error
-        # rather than the raw `Error response from daemon: network NAME
-        # not found.` that `docker run` would emit. Same idea as the
-        # modules_dir validation in __init__ — fail fast with a hint.
-        # Done before the config-set container so a typo in the network
-        # name doesn't leave a half-configured session behind.
-        if self.network:
-            inspect = subprocess.run(
-                ["docker", "network", "inspect", self.network],
-                capture_output=True, text=True,
-            )
-            if inspect.returncode != 0:
-                raise LogosctlError(
-                    f"docker network {self.network!r} does not exist; "
-                    "create it before starting the daemon "
-                    f"(stderr: {inspect.stderr.strip()})"
-                )
+        if self._control_port is None:
+            self._control_port = pick_free_port()
 
         # Everything logoscore passed as daemon flags is a document now,
         # and `daemon start` acts on whatever is already on disk — so the
@@ -637,29 +571,17 @@ class LogosctlDockerDaemon:
         # container over the same bind-mount.
         self._install_daemon_config()
 
-        # Note: deliberately no --rm. If the daemon exits during startup
-        # (e.g. a listener fails to bind, or the plaintext-TCP guard
-        # refuses the config), --rm would auto-remove the container
-        # before _capture_logs gets a chance to read it — the on-fail
-        # diagnostic would just say "No such container". stop() below
-        # explicitly does `docker rm -f`, so we don't leak containers
-        # either.
+        # Deliberately no --rm. If the daemon exits during startup, --rm
+        # would auto-remove the container before _capture_logs gets a
+        # chance to read it — the on-fail diagnostic would just say "No
+        # such container". stop() below explicitly does `docker rm -f`,
+        # so we don't leak containers either.
         cmd: list[str] = [
             "docker", "run", "-d",
             "--name", self._container_name,
-            # Attach to a caller-managed docker network so multiple
-            # daemon containers can discover each other by name via
-            # docker's embedded DNS. No-op when network is None — the
-            # splat injects nothing and `docker run` uses the default
-            # bridge, byte-equivalent to the pre-feature command.
-            *(["--network", self.network] if self.network else []),
-            # Two host:container port mappings. core_service binds
-            # CONTAINER_TCP_PORT inside the container; capability_module
-            # binds CONTAINER_CAP_TCP_PORT. Each is forwarded to its
-            # own dynamically-picked host port. See the module
-            # docstring for the rationale.
-            "-p", f"{self._host_port}:{CONTAINER_TCP_PORT}",
-            "-p", f"{self._host_cap_port}:{CONTAINER_CAP_TCP_PORT}",
+            # The host's network: its loopback reaches the control endpoint
+            # and the runtime-control listener, on a port the daemon picks.
+            "--network", "host",
             *self._volume_args(),
             *_CONFIG_DIR_ENV,
             self.image,
@@ -698,115 +620,52 @@ class LogosctlDockerDaemon:
                     + daemon_log.strip())
             raise LogosctlError("\n".join(sections))
 
-        # Build a host-side client config (separate from the
-        # daemon's bind-mounted /config — that one's owned by root
-        # because the container ran as root, and the daemon rewrites
-        # its own client/config.yaml at every boot anyway). Writes
-        # `<host_client_dir>/client/config.yaml` (host-correct ports)
-        # and `<host_client_dir>/client/auto.json` (a named network token
-        # issued inside the container). The `client(...)` factory
-        # below points the LogosctlClient at `host_client_dir` so it
-        # reads from this host-owned tree instead of the container-owned
-        # bind-mount. Tear the container down if seeding fails (e.g. the
-        # network token cannot be issued) so a failed start() doesn't leak a
-        # running container.
+        # Tear the container down if pairing fails, so a failed start()
+        # doesn't leak a running container.
         try:
-            self._build_host_client_config()
-        except Exception:
+            self._runtime_control = RuntimeControl(self, binary=self.binary)
+            self._runtime_control.pair()
+            self._runtime_control.grant(self.grants)
+        except Exception as e:
             self.stop()
+            if "UNREACHABLE" in str(e):
+                raise LogosctlError(
+                    f"{e}\nThe host reaches the daemon over the network it shares "
+                    "with the container; Docker Desktop needs host networking "
+                    "turned on for that (Settings > Resources > Network).") from e
             raise
-
         return self
 
     def _volume_args(self) -> list[str]:
-        """Bind mounts common to both transports, plus the cert pair for
-        tcp_ssl."""
-        volumes = [
+        return [
             "-v", f"{self._config_dir}:{CONTAINER_CONFIG_DIR}",
             "-v", f"{self._persistence_dir}:{CONTAINER_PERSISTENCE_DIR}",
             "-v", f"{self.modules_dir}:{CONTAINER_USER_MODULES_DIR}:ro",
         ]
-        # For tcp_ssl, also bind-mount the cert+key into /certs:ro.
-        # They're exposed read-only because the daemon only reads them.
-        if self.transport == "tcp_ssl":
-            # Mounting each cert file's parent as /certs would be wrong
-            # if cert and key live in different dirs — mount them as
-            # individual files to avoid that pitfall. Docker supports
-            # file-level bind mounts natively.
-            volumes += [
-                "-v", f"{self.ssl_cert}:{CONTAINER_CERT_PATH}:ro",
-                "-v", f"{self.ssl_key}:{CONTAINER_KEY_PATH}:ro",
-            ]
-        return volumes
 
     def _daemon_config_document(self) -> dict:
         """The daemon config document — the same one `LogosctlDaemon`
-        builds, except every path in it is the container's.
+        builds, except every path in it is the container's, plus the
+        `peering` section that turns Remote Runtime Control on.
 
-        That is the one thing to be careful about here: `modules_dirs`,
-        `persistence_path` and the listeners' `cert`/`key` are read
-        inside the container, so a host path in any of them names a file
-        that isn't there (or, worse, a directory the daemon will happily
-        create and find empty).
+        `modules_dirs` and `persistence_path` are read inside the
+        container, so a host path in either names a directory that isn't
+        there (or, worse, one the daemon will happily create and find
+        empty).
         """
         doc: dict = {
-            # Replaces every `-m` / `--modules-dir`. The image's own
-            # modules first (capability_module and friends), then the
-            # user's bind-mount, then anything the caller added.
-            "modules_dirs": [
-                CONTAINER_BUNDLED_MODULES_DIR,
-                CONTAINER_USER_MODULES_DIR,
-                *self.extra_module_dirs,
-            ],
+            # Replaces every `-m` / `--modules-dir`: the user's bind-mount,
+            # then anything the caller added.
+            "modules_dirs": [CONTAINER_USER_MODULES_DIR, *self.extra_module_dirs],
             # Replaces `--persistence-path`. `dirs: {data: …}` is the
             # newer spelling for the same thing and wins if both are
             # given; one is enough.
             "persistence_path": CONTAINER_PERSISTENCE_DIR,
-            "modules": {
-                "core_service": [self._listener(CONTAINER_TCP_PORT)],
-                "capability_module": [
-                    self._listener(CONTAINER_CAP_TCP_PORT)],
-            },
+            "peering": runtime_control_config(
+                self.name, host="127.0.0.1", port=self.control_port),
         }
-        if self.transport == "tcp":
-            # The daemon refuses to bind plaintext tcp on a non-loopback
-            # host without this. The whole docker setup *is* a
-            # non-loopback bind by design (0.0.0.0 with port-forwarded
-            # host:container access), so the guard legitimately needs the
-            # override here. tcp_ssl doesn't trip it — SSL is exactly the
-            # production-shaped alternative the guard recommends.
-            doc["insecure_tcp"] = True
         doc.update(self.extra_config)
         return doc
-
-    def _listener(self, port: int) -> dict:
-        """One outward-facing listener entry for the `modules` block.
-
-        These are the DAEMON's key names: `protocol`, and for tcp_ssl the
-        server's own `cert`/`key`. The client half of the wire
-        description spells the same ideas `transport` and `ca` — see
-        `DaemonEndpoint`. Using one document's names in the other fails
-        the parse, and on this side an unrecognised `protocol` sinks the
-        whole config, not just the entry.
-
-        The daemon prepends a `local` listener to every module
-        unconditionally, so what we declare here is the *additional*
-        outward-facing surface, and intra-daemon traffic keeps using the
-        local socket.
-        """
-        listener: dict = {
-            "protocol": self.transport,
-            # Bind on all interfaces: docker's port-forwarding reaches
-            # the container through its own veth address, so a loopback
-            # bind would be unreachable from the host.
-            "host": "0.0.0.0",
-            "port": port,
-            "codec": self.codec,
-        }
-        if self.transport == "tcp_ssl":
-            listener["cert"] = CONTAINER_CERT_PATH
-            listener["key"] = CONTAINER_KEY_PATH
-        return listener
 
     def _install_daemon_config(self) -> None:
         """Write the config document to the host side of /config and
@@ -829,6 +688,7 @@ class LogosctlDockerDaemon:
 
         doc_path = self._config_dir / "daemon.yaml"
         doc_path.write_text(_yaml_document(doc))
+        self._wrote_as_root = True
 
         cmd = [
             "docker", "run", "--rm",
@@ -855,100 +715,10 @@ class LogosctlDockerDaemon:
                 stderr=r.stderr,
             )
 
-    def _client_endpoints(
-        self,
-        tcp_host: str,
-        wire_codec: str,
-        verify: bool | None,
-    ) -> dict[str, DaemonEndpoint]:
-        """Per-module dial spec for the two well-known modules.
-
-        Each module rides its OWN forwarded host port — `core_service` on
-        `host_port`, `capability_module` on `host_cap_port` — so the two
-        endpoints MUST carry distinct ports. Both entries are required:
-        `core_service` is mandatory outright, and without
-        `capability_module` the SDK falls back to a local socket for its
-        first handshake, which a client outside the container doesn't
-        have.
-
-        `verify` and the CA are only serialized for `tcp_ssl`
-        (DaemonEndpoint drops them for plain tcp). The CA is a host path:
-        the client reads it, and the client runs on this side of the
-        container boundary."""
-        if self._host_port is None or self._host_cap_port is None:
-            raise LogosctlError(
-                "forwarded host ports not assigned — call start() first "
-                "(both core_service and capability_module need a port)"
-            )
-        transport_kind = "tcp_ssl" if self.transport == "tcp_ssl" else "tcp"
-        ca = str(self.ssl_ca) if self.ssl_ca else None
-        return {
-            "core_service": DaemonEndpoint(
-                transport_kind, tcp_host, self._host_port, wire_codec,
-                verify, ca),
-            "capability_module": DaemonEndpoint(
-                transport_kind, tcp_host, self._host_cap_port, wire_codec,
-                verify, ca),
-        }
-
-    def _build_host_client_config(self) -> None:
-        """Seed the host-only client config dir with a named network
-        token (`client/auto.json`) plus a default `client/config.yaml`
-        pointing at the forwarded host ports. Called once after the daemon
-        comes up; `client()` rewrites config.yaml with the caller's dial
-        params, but the token written here is what every client reuses.
-
-        The token is issued with `docker exec` because the daemon's boot
-        token is local-only and the root-owned token store is not writable
-        from the host bind-mount."""
-        if self._container_id is None:
-            return
-
-        # Default disk spec (localhost, constructor's verify_peer). The
-        # token is the essential artifact — config.yaml is a sane default
-        # that client() supersedes with the caller's tcp_host/codec/verify.
-        endpoints = self._client_endpoints(
-            "localhost", self.codec, self.verify_peer)
-
-        raw_token = self._issue_network_token()
-
-        LogosctlClient.write_config(
-            self._host_client_dir, endpoints, token=raw_token)
-
-    def _issue_network_token(self) -> str:
-        """Issue a revocable credential inside the root-owned session."""
-        assert self._container_id is not None
-        name = "ctl-py-docker-" + uuid.uuid4().hex[:16]
-        result = subprocess.run(
-            ["docker", "exec", self._container_id, "/proc/1/exe",
-             "--config-dir", CONTAINER_CONFIG_DIR, "--json",
-             "token", "issue", "--name", name,
-             "--expires", self.network_token_ttl],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            raise LogosctlError(
-                f"could not issue docker network token (exit {result.returncode}): "
-                f"{(result.stderr or result.stdout).strip()}")
-        try:
-            token = json.loads(result.stdout)["token"]
-        except (ValueError, KeyError, TypeError) as exc:
-            raise LogosctlError("docker token issue did not return a token") from exc
-        self._network_token_name = name
-        return token
-
     def stop(self) -> None:
         """Kill the container. Idempotent; safe to call even if start()
         never succeeded."""
         if self._container_id is not None:
-            if self._network_token_name is not None:
-                subprocess.run(
-                    ["docker", "exec", self._container_id, "/proc/1/exe",
-                     "--config-dir", CONTAINER_CONFIG_DIR, "--json",
-                     "token", "revoke", self._network_token_name],
-                    capture_output=True, text=True,
-                )
-                self._network_token_name = None
             # Mirror the daemon's container logs to the parent's stderr
             # before tearing down — symmetric with _proc.py's CLI
             # forwarding, so a single env flag dumps both sides of the
@@ -967,90 +737,44 @@ class LogosctlDockerDaemon:
                 capture_output=True, text=True,
             )
             self._container_id = None
+            self._container_binary = None
 
+        if self._runtime_control is not None:
+            self._runtime_control.close()
+            self._runtime_control = None
         # Only clean up dirs we created ourselves. Anything the caller
         # passed in (e.g. a pre-seeded persistence dir they want to
         # inspect after the test) stays on disk.
-        if self._owns_config_dir and self._config_dir.exists():
-            shutil.rmtree(self._config_dir, ignore_errors=True)
-        if self._owns_persistence_dir and self._persistence_dir.exists():
-            shutil.rmtree(self._persistence_dir, ignore_errors=True)
-        # The host-only client dir is always self-owned.
-        if self._host_client_dir.exists():
-            shutil.rmtree(self._host_client_dir, ignore_errors=True)
+        owned = [d for d, own in ((self._config_dir, self._owns_config_dir),
+                                  (self._persistence_dir, self._owns_persistence_dir))
+                 if own and d.exists()]
+        if owned and self._wrote_as_root:
+            # What the container wrote is root's on a Linux host: empty the
+            # dirs through a container, or they outlive the rmtree.
+            mounts = [a for i, d in enumerate(owned) for a in ("-v", f"{d}:/owned/{i}")]
+            subprocess.run(
+                ["docker", "run", "--rm", *mounts, "--entrypoint", "/bin/sh",
+                 self.image, "-c", "rm -rf /owned/*/* /owned/*/.[!.]*"],
+                capture_output=True, text=True,
+            )
+            self._wrote_as_root = False
+        for d in owned:
+            shutil.rmtree(d, ignore_errors=True)
 
     # ── Client factory ──────────────────────────────────────────────────
 
-    def client(
-        self,
-        *,
-        binary: str = "logosctl",
-        timeout: float | None = 30.0,
-        tcp_host: str = "localhost",
-        codec: str | None = None,
-        no_verify_peer: bool | None = None,
-    ) -> LogosctlClient:
-        """Build a LogosctlClient wired to dial this daemon.
-
-        `binary` is the host-side `logosctl` executable — the client
-        shells out to it for every operation. Defaults to whatever
-        `logosctl` resolves to on PATH.
-
-        `tcp_host` defaults to localhost because the container's port
-        is published there. Override for remote-docker setups — it is
-        baked into BOTH modules' endpoints in the on-disk config.
-
-        `no_verify_peer`: for `tcp_ssl` daemons this defaults to True so
-        self-signed certs work out of the box (the common case for smoke
-        tests) — it sets the on-disk `verify_peer` to False. Set it to
-        False to exercise the verification path, in which case the
-        constructor's `verify_peer` (controlled by
-        `LogosctlDockerDaemon(verify_peer=...)`) takes effect and
-        `ssl_ca` has to name the CA that signed the daemon's cert, or the
-        handshake fails closed. Ignored when transport is plain `tcp`.
-
-        Each call rewrites the on-disk dial spec, because on-disk is the
-        only place a dial spec can live: `RpcClient::connect()` reads
-        `client/config.yaml` verbatim, with no merge layer and no
-        environment override — the whole `LOGOSCORE_CLIENT_*` family is
-        gone. That also means the per-module ports, which a single
-        uniform env override could never have expressed, are just two
-        ordinary entries in the file.
-        """
-        if self._container_id is None:
-            raise LogosctlError(
-                "daemon is not running — call start() or use the context manager"
-            )
-        wire_codec = codec or self.codec
-        # On-disk verify_peer (tcp_ssl only): skip by default so a
-        # self-signed smoke cert connects; no_verify_peer=False exercises
-        # the verify path against the constructor's verify_peer base.
-        if self.transport == "tcp_ssl":
-            if no_verify_peer is None:
-                no_verify_peer = True
-            verify: bool | None = False if no_verify_peer else self.verify_peer
-        else:
-            verify = None
-
-        # Rewrite config.yaml in the host-only client dir (the daemon's
-        # bind-mounted /config is root-owned, and the daemon rewrites its
-        # own copy at every boot) with the caller's dial params + both
-        # modules' distinct forwarded ports. The network token written by
-        # _build_host_client_config() at startup is left in place.
-        endpoints = self._client_endpoints(tcp_host, wire_codec, verify)
-        return LogosctlClient.connect(
-            endpoints,
-            binary=binary,
-            config_dir=self._host_client_dir,
-            timeout=timeout,
-        )
+    def client(self, *, timeout: float | None = 30.0) -> LogosctlClient:
+        """A LogosctlClient that runs every command on this daemon over
+        Remote Runtime Control, as the host-side logosctl `start()` paired.
+        What it may call is `grants` (see `runtime_control.grant()`)."""
+        return self.runtime_control.client(timeout=timeout)
 
     # ── Internals ───────────────────────────────────────────────────────
 
     def _wait_for_conn_file(self) -> bool:
         deadline = time.monotonic() + self.startup_timeout
-        # state.json appears once every transport has bound AND the
-        # bundled package modules are loaded — i.e. it means ready, with
+        # state.json appears once every listener has bound AND the
+        # bundled modules are loaded — i.e. it means ready, with
         # no further sleep needed. Poll for it through `docker exec ...
         # test -f` rather than the host bind-mount: the daemon writes the
         # file as root with restrictive perms, so a host-side
@@ -1063,6 +787,22 @@ class LogosctlDockerDaemon:
                 return True
             time.sleep(0.1)
         return False
+
+    def _entrypoint(self) -> str:
+        # Not /proc/1/exe: under emulation (an amd64 image on Apple Silicon)
+        # that is the emulator.
+        if self._container_binary is None:
+            r = subprocess.run(
+                ["docker", "container", "inspect", "--format",
+                 "{{json .Config.Entrypoint}}", self.container_id],
+                capture_output=True, text=True,
+            )
+            entrypoint = json.loads(r.stdout) if r.returncode == 0 else None
+            if not entrypoint:
+                raise LogosctlError(
+                    f"the image {self.image!r} has no entrypoint to run logosctl with")
+            self._container_binary = entrypoint[0]
+        return self._container_binary
 
     def _capture_logs(self) -> str:
         if self._container_id is None:

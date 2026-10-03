@@ -57,11 +57,9 @@ class Subscription:
     ) -> "Subscription":
         # These two are the only variables logosctl reads. `watch` is an RPC
         # like any other client command, so which daemon it reaches is decided
-        # by `<config_dir>/client/config.yaml`, not by the environment — the
-        # LOGOSCORE_CLIENT_* family that used to retarget a single call no
-        # longer exists. `extra_env` therefore carries ordinary process env
-        # (TMPDIR for the local socket path, forwarding switches), never a
-        # dial spec.
+        # by `<config_dir>/client/config.yaml` (or a `--remote` in `args`), not
+        # by the environment. `extra_env` therefore carries ordinary process
+        # env (TMPDIR for the local socket path, forwarding switches).
         env = os.environ.copy()
         if config_dir is not None:
             env["LOGOSCTL_CONFIG_DIR"] = str(config_dir)

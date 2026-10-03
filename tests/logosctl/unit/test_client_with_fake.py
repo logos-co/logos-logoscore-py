@@ -6,9 +6,9 @@ parsing, and exit-code → exception mapping — without needing a real
 
 DELIBERATE DUPLICATE of tests/unit/test_client_with_fake.py — do not
 refactor the two into one suite. They assert different command lines
-(`module ls` vs `list-modules`), different env vars, and a different
-transport story; sharing them would mean parametrizing over the very
-differences that are the point. Retiring logoscore should be a delete of
+(`module ls` vs `list-modules`, global flags first) and different env vars;
+sharing them would mean parametrizing over the very differences that are
+the point. Retiring logoscore should be a delete of
 src/logoscore/ + tests/unit/, not an unpick.
 """
 from __future__ import annotations
@@ -102,10 +102,8 @@ def test_config_dir_travels_as_env_not_flag(rec: Recorder):
 
 def test_env_delta_is_exactly_the_two_variables(rec: Recorder):
     # LOGOSCTL_CONFIG_DIR and LOGOSCTL_TOKEN are the only variables the
-    # binary reads. The LOGOSCORE_CLIENT_* family that used to retarget a
-    # single call has no counterpart — which dial spec a client uses is a
-    # document now — so anything else here would be dead weight the reader
-    # would have to chase.
+    # binary reads — which dial spec a client uses is a document — so
+    # anything else here would be dead weight the reader would have to chase.
     rec.respond(stdout="{}")
     LogosctlClient(config_dir=Path("/tmp/xcfg"), token="t").status()
     env = rec.calls[0]["env"]
@@ -120,17 +118,32 @@ def test_no_config_dir_leaves_env_untouched(rec: Recorder):
     assert {k for k, v in env.items() if os.environ.get(k) != v} == set()
 
 
-@pytest.mark.parametrize("kwarg", [
-    "transport", "tcp_host", "tcp_port", "no_verify_peer", "codec",
-])
-def test_deleted_transport_kwargs_are_rejected(kwarg: str):
-    # logoscore turned these into LOGOSCORE_CLIENT_* env vars that the CLI
-    # merged over the on-disk spec per call. `RpcClient::connect()` now
-    # reads client/config.yaml verbatim with no merge layer, so there is
-    # nothing they could set — they raise rather than being silently
-    # ignored, which is the failure mode that would cost an afternoon.
-    with pytest.raises(TypeError):
-        LogosctlClient(**{kwarg: "x"})
+# ── Remote Runtime Control: every command runs on a paired daemon ─────────
+
+
+def test_remote_goes_before_every_subcommand(rec: Recorder):
+    # `--remote` is app-level, and a trailing one would be lifted out of a
+    # call's arguments like `--json` is.
+    client = LogosctlClient(config_dir=Path("/tmp/rc"), remote="node")
+    for method, args, subcmd in [
+        ("status", (), ["status"]),
+        ("list_modules", (), ["module", "ls"]),
+        ("load_module", ("chat",), ["module", "load", "chat"]),
+        ("call", ("m", "meth", "a"), ["call", "m", "meth", "a"]),
+        ("peer", ("status",), ["peer", "status"]),
+        ("stop", (), ["daemon", "stop"]),
+    ]:
+        rec.respond(stdout=json.dumps({"status": "success", "result": 1}))
+        getattr(client, method)(*args)
+        assert rec.calls[-1]["cmd"] == ["logosctl", "--json", "--remote", "node", *subcmd]
+
+
+def test_a_remote_client_sends_no_token(rec: Recorder):
+    # The daemon knows a paired client by its key, kept in the config dir.
+    rec.respond(stdout="{}")
+    LogosctlClient(config_dir=Path("/tmp/rc"), remote="node").status()
+    env = rec.calls[0]["env"]
+    assert {k for k, v in env.items() if os.environ.get(k) != v} == {"LOGOSCTL_CONFIG_DIR"}
 
 
 def test_list_modules_loaded_flag(rec: Recorder):
@@ -357,9 +370,7 @@ def test_issue_token_optional_flags_argv(rec: Recorder):
 
 
 def test_issue_token_omits_unset_flags(rec: Recorder):
-    # `--local-only` in particular must not appear by accident: the daemon
-    # rejects a local-only token presented over tcp/tcp_ssl, so a stray one
-    # here would authenticate in the local tests and fail on the wire.
+    # None of these may appear by accident: each changes what the token is.
     rec.respond(stdout=json.dumps({"name": "carol", "token": "t"}))
     issue_token("carol")
     for flag in ("--replace", "--local-only", "--expires"):
@@ -426,6 +437,9 @@ def test_watch_argv(rec: Recorder, monkeypatch: pytest.MonkeyPatch):
     ]
     assert spawned["env"]["LOGOSCTL_CONFIG_DIR"] == "/tmp/xcfg"
     assert spawned["env"]["LOGOSCTL_TOKEN"] == "t"
+
+    LogosctlClient(remote="node").on_event("chat", None, lambda _e: None).cancel()
+    assert spawned["cmd"] == ["logosctl", "--json", "--remote", "node", "watch", "chat"]
 
 
 # ── Copilot review findings (PR #18) ────────────────────────────────────────

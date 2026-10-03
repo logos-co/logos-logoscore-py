@@ -11,9 +11,10 @@ hand-writing subprocess invocations or parsing CLI text.
 It exists for one primary audience: **test suites and automation tooling** that
 need to drive a *real* Logos runtime from Python. A module author wants to smoke-test
 a freshly built plugin against a genuine distribution of the daemon; a CI pipeline
-wants to exercise the full wire stack (local socket, TCP, TCP+TLS; JSON and CBOR
-codecs) end-to-end; an orchestration script wants several daemons running side by
-side, possibly across container boundaries. `logoscore-py` is the layer that makes
+wants to exercise the wire stack end-to-end — the local socket, and the mutually
+authenticated `tls_tcp` sessions of Remote Runtime Control and peering; an
+orchestration script wants several daemons running side by side, possibly across
+container boundaries or linked to one another. `logoscore-py` is the layer that makes
 those journeys ordinary Python — context managers, method calls, callbacks, and
 exceptions — instead of shell plumbing.
 
@@ -23,8 +24,8 @@ is the daemon's own structured response. It introduces no new module-management
 semantics of its own — it adopts the daemon's behavior, exit-code contract, and
 data shapes wholesale, and presents them with Python ergonomics. What it adds is
 *lifecycle orchestration* (spawning and tearing down daemons in isolated state,
-locally or in containers), *connection management* (expressing how to dial a
-daemon whose well-known modules live on separate listeners), and *idiomatic
+locally or in containers), *connection management* (a local dial description per
+well-known module, or a pairing with a daemon elsewhere), and *idiomatic
 surfacing* (typed exceptions, background-threaded event delivery, argument and
 result conversion at the language boundary).
 
@@ -42,7 +43,8 @@ result conversion at the language boundary).
    ┌──────────────────────┐
    │   logoscore daemon   │   headless module runtime
    └──────────┬───────────┘
-              │  hosts Logos modules, RPC over local socket / TCP / TCP+TLS
+              │  hosts Logos modules; RPC over the local socket, and over
+              │  tls_tcp for Remote Runtime Control and peering
               ▼
    ┌──────────────────────┐
    │   Logos modules      │   process-isolated plugins exposing methods + events
@@ -60,8 +62,9 @@ nor speaks the RPC protocol itself; it commands the daemon, which does both.
 |-----------|--------------------|
 | **No new semantics** | Every capability mirrors a daemon command. Behavior, return shapes, and failure modes are the daemon's; the wrapper does not reinterpret them. |
 | **Isolation by default** | A spawned daemon gets its own private configuration scope, so concurrent daemons never collide and nothing leaks into the developer's global state. |
-| **Connection is per-module** | A daemon serves two well-known modules on *separate* listeners. The wrapper always describes a connection per module, never as a single collapsed endpoint. |
-| **Disk config is authoritative for the general case** | Reaching a multi-listener or remote daemon is expressed as an on-disk connection description, because a single uniform endpoint override cannot represent two modules on two ports. |
+| **Connection is per-module** | A daemon serves two well-known modules on *separate* listeners. The wrapper always describes a local connection per module, never as a single collapsed endpoint. |
+| **Disk config is authoritative** | A local connection is an on-disk connection description; a remote one is a pairing the client keeps in its own configuration scope. Neither is an environment override. |
+| **The daemon decides remote access** | Pairing grants a remote client nothing; the daemon's remote policy names each method it may call. |
 | **Idiomatic surfacing** | Lifecycle is a context manager; failures are typed exceptions keyed off the daemon's exit-code contract; events arrive on a background thread via a callback. |
 
 ---
@@ -77,15 +80,17 @@ nor speaks the RPC protocol itself; it commands the daemon, which does both.
 | **Well-known modules** | Two modules the daemon always serves — **`core_service`** (the management gateway: load/unload, status, proxied method calls) and **`capability_module`** (the authorization handshake). Each is served on its *own* listener, which is why a connection must be described per module. |
 | **Invokable method** | A method a module exposes for remote invocation. Calling one is the core "do something" operation; arguments are positional and the daemon returns the method's result value. |
 | **Event** | A fire-and-forget message a module emits. A subscription streams events as they occur. |
-| **Connection description** | The per-module dial specification: for each well-known module, which transport, host, port, and codec to use. This is the authoritative way to reach a daemon, especially when its modules bound different ports. |
-| **Daemon endpoint** | One module's slice of a connection description — a single (transport, host, port, codec, verify-peer) tuple. |
+| **Connection description** | The per-module dial specification for a daemon on the same host: for each well-known module, the local socket to dial. |
+| **Daemon endpoint** | One module's slice of a connection description. |
 | **Runtime-state signal** | The daemon publishes its live runtime state (instance identity, resolved listener endpoints) once it has finished binding. Its appearance is the readiness signal the wrapper waits for before declaring a daemon up. |
-| **Token** | A signed credential the daemon issues per authorized client; the daemon validates an RPC connection against it. The daemon stores only a hash at rest; the raw value is handed to the client once. |
-| **Transport** | How a connection is carried: a same-host **local** socket (the default), plaintext **TCP**, or **TCP with TLS**. |
-| **Codec** | The wire encoding for a network transport: **JSON** (debuggable, default) or **CBOR** (compact). |
+| **Token** | A signed credential the daemon issues per authorized local client; the daemon validates an RPC connection against it. The daemon stores only a hash at rest; the raw value is handed to the client once. |
+| **Transport** | How a client's connection is carried: the same-host **local** socket, the only client transport. (The legacy plaintext TCP and server-only TLS transports, with their JSON/CBOR codecs, are gone.) |
+| **Remote Runtime Control** | Operating a daemon from a client elsewhere: the client **pairs** once through a runtime-control invite the daemon mints and accepts, then runs its commands on the daemon over a mutually authenticated `tls_tcp` session. The client holds its key in its own configuration scope and needs no daemon or token. |
+| **Remote policy** | The daemon's per-client grants: which management methods, and which module methods, each paired client may call. Pairing alone grants nothing, and a module wildcard never covers management methods. |
+| **Peering** | Two runtimes linked so a module on one calls a module on the other: the provider exports it, the consumer imports it as a forwarding facade. |
 | **Subscription** | A live event stream from a module, delivered to a callback on a background thread until cancelled. |
 | **Tagged-bytes form** | The platform's canonical encoding for binary values crossing the JSON boundary. Byte arrays travel as a tagged object and are decoded back to raw bytes exactly once, at the client boundary. |
-| **Structured result wrapper** | A common module return shape — `success` / `value` / `error` — used by methods that report ok-or-error outcomes. The same shape is returned regardless of which transport carried the call. |
+| **Structured result wrapper** | A common module return shape — `success` / `value` / `error` — used by methods that report ok-or-error outcomes. The same shape is returned whether the call was local or remote. |
 | **Image flavor** | For containerized daemons, the packaging of the daemon image: **portable** (self-contained, matches released binaries) vs **dev** (linked against an external store). User modules supplied to a containerized daemon must match the image's flavor. |
 
 ### The two well-known modules and why connection is per-module
@@ -94,13 +99,12 @@ The single most load-bearing fact in this system's design: the daemon serves
 `core_service` and `capability_module` on **distinct listeners**. A client cannot
 reach the daemon through one endpoint — it must know how to dial each module
 separately, because the authorization handshake against `capability_module`
-happens before (and alongside) any request to `core_service`.
+happens before (and alongside) any request to `core_service`. The general, correct
+way to describe a local connection is therefore a **per-module connection
+description**, with one endpoint entry per well-known module.
 
-A naive single-endpoint override — "dial everything at host:port" — cannot express
-this: applied uniformly, it would collapse both modules onto one port and break the
-handshake. Therefore the general, correct way to describe a connection in this
-system is a **per-module connection description**, with one endpoint entry per
-well-known module. This constraint shapes every connection-related feature below.
+A remote client needs none of this: Remote Runtime Control reaches `core_service`
+alone, and the daemon's remote policy stands in for the authorization handshake.
 
 ---
 
@@ -117,16 +121,16 @@ The system offers three ways to obtain a usable connection to a daemon:
    leaving it shuts the daemon down cleanly and removes any state directory the
    wrapper created.
 
-2. **Launch a containerized daemon.** Run the daemon inside a container and dial it
-   over forwarded network ports — the right choice for testing against a real
-   distributed build, or when the daemon must be reachable from multiple processes.
-   The wrapper handles port forwarding per module, mounts the host directories the
-   daemon reads and writes, waits for readiness, and hands back a client already
-   wired to the forwarded endpoints.
+2. **Launch a containerized daemon.** Run the daemon inside a container and operate
+   it from the host over Remote Runtime Control — the right choice for testing
+   against a real distributed build. The wrapper mounts the host directories the
+   daemon reads and writes, waits for readiness, pairs a host-side client with the
+   daemon, grants it methods, and hands it back.
 
 3. **Connect to an existing daemon.** Attach to a daemon already running — on the
-   same host (using its published configuration) or remote/multi-port (using an
-   explicit per-module connection description).
+   same host (using its published configuration, or an explicit per-module
+   connection description from a scope the daemon does not own), or elsewhere
+   (pairing with it for Remote Runtime Control).
 
 **Requirements**
 
@@ -145,16 +149,17 @@ The system offers three ways to obtain a usable connection to a daemon:
 
 - A client MUST be obtainable from a launched daemon with no transport arguments;
   the daemon's published per-module endpoints are sufficient to dial it.
-- For a daemon whose well-known modules listen on **different ports** (the general
-  remote case, and every containerized case), the connection MUST be expressed as a
-  per-module connection description rather than a single endpoint.
-- The system MUST support the **local**, **TCP**, and **TCP+TLS** transports, and the
-  **JSON** and **CBOR** codecs, for both launching daemons and dialing them.
-- For TLS, peer verification MUST be expressible per endpoint, and MUST default to a
-  setting that lets self-signed certificates connect in the common test case while
-  allowing the full verification path to be selected.
-- The system MUST NOT expose a single per-call port override, by deliberate design:
-  applied uniformly it would collapse the two well-known modules onto one port.
+- A client in a configuration scope the daemon does not own MUST be able to reach
+  a same-host daemon through a per-module connection description plus a token.
+- The only client transport is the same-host **local** socket. A daemon elsewhere
+  MUST be reached with **Remote Runtime Control**: pairing through a runtime-control
+  invite the daemon mints and accepts, after which every command runs on the daemon.
+- Pairing MUST grant nothing by itself; the daemon's remote policy MUST decide each
+  management method and each module method a paired client calls, and a refused
+  call MUST surface as a typed exception carrying the refusal's code.
+- A module call between two runtimes is **peering**, not a client connection: the
+  system MUST support standing up two linked daemons, one exporting modules and the
+  other importing them.
 - A standalone way to write a per-module connection description to disk MUST exist,
   so callers can produce a dial spec without holding a live client.
 
@@ -188,7 +193,7 @@ The client exposes the daemon's module-management surface and method invocation:
 - Result conversion MUST decode the platform's tagged-bytes form back to raw bytes,
   applied recursively so tagged values nested in maps and lists are decoded too.
 - The structured result wrapper (`success` / `value` / `error`) returned by ok-or-error
-  methods MUST come through identically regardless of which transport carried the call.
+  methods MUST come through identically whether the call was local or remote.
 
 ### Event subscriptions
 
@@ -215,12 +220,12 @@ The client exposes the daemon's module-management surface and method invocation:
 
 ### Containerized and multi-host operation
 
-- A containerized daemon MUST forward each well-known module to its own host port and
-  hand back a client wired to those forwarded ports via a per-module connection
-  description.
-- Multiple containerized daemons MUST be attachable to a caller-managed shared network
-  so they can discover each other by name; the wrapper MUST NOT create or destroy
-  networks (the caller owns their lifecycle).
+- A containerized daemon MUST be operated over Remote Runtime Control: the container
+  shares the host's network, the daemon's control endpoint listens on a known
+  loopback port, and the wrapper pairs a host-side client with it (minting and
+  accepting the invite inside the container) and grants it methods.
+- The wrapper MUST let the caller change a paired client's grants while the daemon
+  runs.
 - Files the containerized daemon writes with restrictive ownership MUST be readable
   through the container (not assumed to be host-readable), and the system MUST provide
   a way to extract such content and to read the daemon's runtime-state and identity.
@@ -293,24 +298,23 @@ and joins the thread.
 ### 3. Container smoke test
 
 To test against a real distributed build, the author launches a containerized daemon
-over their compiled plugins. The wrapper forwards each well-known module to its own
-host port, waits for readiness, and returns a client dialing the forwarded endpoints.
-The same method matrix that passes locally is replayed over the network transport —
-across JSON and CBOR codecs, and over TLS — to exercise the full wire stack.
+over their compiled plugins. The wrapper waits for readiness, pairs a host-side client
+with the daemon over Remote Runtime Control, and returns it. The same method and event
+matrix that passes locally is replayed through that pairing, and the daemon's policy
+is shown to refuse what it does not grant.
 
-### 4. Remote / multi-port connection
+### 4. Remote operation
 
-A daemon runs on another host (or simply bound its two well-known modules to
-different ports). The caller builds a client from an explicit per-module connection
-description — one endpoint for `core_service`, one for `capability_module` — and the
-raw token the daemon issued for them. The on-disk connection description is
-authoritative; no uniform endpoint override is involved.
+A daemon runs on another host. Its operator turns Remote Runtime Control on and mints
+a runtime-control invite; the caller's client redeems it from a configuration scope of
+its own, the operator accepts the pairing and grants the client methods in the remote
+policy, and the client's commands then run on the daemon.
 
-### 5. Cross-container discovery
+### 5. Linked runtimes
 
-Several containerized daemons are attached to a shared, caller-managed network so they
-can resolve each other by name. The caller creates and destroys the network; the
-wrapper only attaches containers to it.
+A module on one daemon calls a module on another. The two daemons pair; the provider
+exports the module, the consumer imports it as a facade that forwards each call and
+event, and the provider's policy decides which of the consumer's modules may call.
 
 ### 6. Token provisioning
 
@@ -339,10 +343,10 @@ mounted into the daemon.
 - **One operation, one invocation.** Each operation is an independent round-trip to
   the daemon. This favors correctness and isolation over throughput — the system is a
   control and testing surface, not a high-frequency RPC path.
-- **Connection is always per-module for the general case.** Same-host launched
-  daemons can be dialed from their published config with no extra input; any
-  multi-port or remote daemon requires a per-module connection description, by the
-  design constraint above.
+- **Local connections are per-module; remote operation is a pairing.** Same-host
+  launched daemons can be dialed from their published config with no extra input; a
+  daemon elsewhere is operated only through a pairing its operator accepted, and only
+  with the methods its policy grants.
 - **Flavor must match.** For containerized daemons, user-supplied module plugins must
   match the daemon image's flavor (self-contained vs externally linked) and the
   daemon platform; mismatched plugins will not load.

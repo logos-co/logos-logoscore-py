@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import shutil
 import subprocess
 import tempfile
@@ -23,9 +22,8 @@ from pathlib import Path
 from typing import IO
 
 from . import _proc
-from .client import DaemonEndpoint, LogoscoreClient
+from .client import LogoscoreClient
 from .errors import LogoscoreError
-from .tokens import issue_token, revoke_token
 
 
 class LogoscoreDaemon:
@@ -41,51 +39,6 @@ class LogoscoreDaemon:
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
         startup_timeout: float = 15.0,
-        # Per-module transport list applied to BOTH `core_service` and
-        # `capability_module` — i.e. every protocol named here becomes
-        # one `--module-transport <module>=<protocol>[,k=v...]` flag
-        # per module on the daemon command line.
-        #
-        # The daemon ALWAYS adds an implicit LocalSocket listener for
-        # each module regardless of what's in this list — so
-        # `transports=["tcp"]` actually binds `[local, tcp]` per
-        # module, and a same-host client can still dial via
-        # LocalSocket. The list controls what *additional*
-        # outside-facing listeners get bound. Naming `local` here is
-        # a no-op (idempotent with the implicit one). Omitting this
-        # argument entirely emits no `--module-transport` flags and
-        # the daemon's default (a single `local` listener per
-        # well-known module) applies.
-        transports: list[str] | None = None,
-        tcp_host: str = "127.0.0.1",
-        # `tcp_port` is core_service's port. `tcp_cap_port` is
-        # capability_module's. They MUST be distinct: each module
-        # opens its own listener, and two QTcpServers can't share an
-        # address:port pair. Default 0 on both → daemon auto-allocates
-        # ephemerals via PortAllocator (always distinct). Tests that
-        # need the host to know the port up front pre-pick two free
-        # ports and pass both.
-        tcp_port: int = 0,
-        tcp_cap_port: int = 0,
-        tcp_codec: str = "json",        # "json" | "cbor"
-        tcp_ssl_host: str = "127.0.0.1",
-        tcp_ssl_port: int = 0,
-        # Same dual-port story for tcp_ssl — capability_module's
-        # tcp_ssl listener needs its own port when both are bound.
-        tcp_ssl_cap_port: int = 0,
-        tcp_ssl_codec: str = "json",    # "json" | "cbor"
-        ssl_cert: str | Path | None = None,
-        ssl_key: str | Path | None = None,
-        ssl_ca: str | Path | None = None,
-        # On-disk dial-spec value for `verify_peer` in the host
-        # client/config.json that the wrapper rewrites for tcp_ssl
-        # after startup. False (default) suits the typical test
-        # setup where ssl_cert is self-signed and wouldn't validate
-        # against any CA. Override to True with a CA-issued cert if
-        # you want the full verification path. The CLI's run-time
-        # `--no-verify-peer` flag (or `LOGOSCORE_CLIENT_NO_VERIFY_PEER`
-        # env) overrides this on a per-call basis.
-        verify_peer: bool = False,
     ) -> None:
         if isinstance(modules_dir, (str, Path)):
             self.modules_dirs: list[Path] = [Path(modules_dir)]
@@ -99,19 +52,6 @@ class LogoscoreDaemon:
         self.extra_args = list(extra_args or [])
         self.extra_env = dict(env or {})
         self.startup_timeout = startup_timeout
-        self.transports = list(transports or [])
-        self.tcp_host = tcp_host
-        self.tcp_port = tcp_port
-        self.tcp_cap_port = tcp_cap_port
-        self.tcp_codec = tcp_codec
-        self.tcp_ssl_host = tcp_ssl_host
-        self.tcp_ssl_port = tcp_ssl_port
-        self.tcp_ssl_cap_port = tcp_ssl_cap_port
-        self.tcp_ssl_codec = tcp_ssl_codec
-        self.ssl_cert = Path(ssl_cert) if ssl_cert else None
-        self.ssl_key = Path(ssl_key) if ssl_key else None
-        self.ssl_ca = Path(ssl_ca) if ssl_ca else None
-        self.verify_peer = verify_peer
 
         if config_dir is None:
             self._config_dir = Path(tempfile.mkdtemp(prefix="logoscore-"))
@@ -124,8 +64,6 @@ class LogoscoreDaemon:
         self._process: subprocess.Popen[str] | None = None
         self._stdout_file: IO[str] | None = None
         self._stderr_file: IO[str] | None = None
-        self._network_token: str | None = None
-        self._network_token_name: str | None = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -136,12 +74,11 @@ class LogoscoreDaemon:
     @property
     def state_file(self) -> Path:
         # Path to the daemon's live runtime-state file. Created at boot
-        # (after transports actually bind) and removed at clean
-        # shutdown. Carries instance_id, pid, started_at, and the
-        # resolved transport endpoints (post-bind, with real ports).
-        # Persistent state (tokens.json) and operator preferences
-        # (config.json, written only on --persist-config) live in
-        # their own files.
+        # (after its listeners bind) and removed at clean shutdown.
+        # Carries instance_id, pid, started_at, and the resolved
+        # configuration. Persistent state (tokens.json) and operator
+        # preferences (config.json, written only on --persist-config)
+        # live in their own files.
         return self._config_dir / "daemon" / "state.json"
 
     @property
@@ -172,44 +109,6 @@ class LogoscoreDaemon:
             cmd.extend(["-m", str(d)])
         if self.persistence_path is not None:
             cmd.extend(["--persistence-path", str(self.persistence_path)])
-        # Per-module transport flags. The daemon expects
-        # `--module-transport NAME=PROTOCOL[,k=v...]` (repeatable). We
-        # emit one entry per requested protocol for both well-known
-        # modules (`core_service` and `capability_module`).
-        #
-        # Crucially, each module gets its OWN port — `tcp_port` /
-        # `tcp_ssl_port` for core_service, `tcp_cap_port` /
-        # `tcp_ssl_cap_port` for capability_module. Reusing a single
-        # port across both fails the second listener's bind because
-        # QTcpServer can't share an address:port pair. Default 0
-        # makes the daemon auto-allocate distinct ephemerals.
-        port_for = {
-            ("tcp",     "core_service"):      self.tcp_port,
-            ("tcp",     "capability_module"): self.tcp_cap_port,
-            ("tcp_ssl", "core_service"):      self.tcp_ssl_port,
-            ("tcp_ssl", "capability_module"): self.tcp_ssl_cap_port,
-        }
-        for proto in self.transports:
-            for module in ("core_service", "capability_module"):
-                spec = f"{module}={proto}"
-                if proto == "tcp":
-                    spec += (f",host={self.tcp_host}"
-                             f",port={port_for[(proto, module)]}"
-                             f",codec={self.tcp_codec}")
-                elif proto == "tcp_ssl":
-                    if not (self.ssl_cert and self.ssl_key):
-                        raise LogoscoreError(
-                            "transports includes 'tcp_ssl' but "
-                            "ssl_cert/ssl_key not set"
-                        )
-                    spec += (f",host={self.tcp_ssl_host}"
-                             f",port={port_for[(proto, module)]}"
-                             f",codec={self.tcp_ssl_codec}"
-                             f",cert={self.ssl_cert}"
-                             f",key={self.ssl_key}")
-                    if self.ssl_ca:
-                        spec += f",ca={self.ssl_ca}"
-                cmd.extend(["--module-transport", spec])
         cmd.extend(self.extra_args)
 
         env = os.environ.copy()
@@ -267,55 +166,16 @@ class LogoscoreDaemon:
         self._stdout_file = None
         self._stderr_file = None
 
-        if self._network_token_name is not None:
-            try:
-                revoke_token(self._network_token_name, binary=self.binary,
-                             config_dir=self._config_dir)
-            except Exception:
-                pass
-            self._network_token_name = None
-            self._network_token = None
-
         if self._owns_config_dir and self._config_dir.exists():
             shutil.rmtree(self._config_dir, ignore_errors=True)
 
-    def client(
-        self,
-        *,
-        timeout: float | None = 30.0,
-        transport: str | None = None,
-        tcp_host: str | None = None,
-        no_verify_peer: bool = False,
-        codec: str | None = None,
-    ) -> LogoscoreClient:
-        """Build a client wired to this daemon's `client/config.json`.
-
-        The daemon writes a per-module dial spec at startup (auto-emitted
-        for `local`; rewritten from `state.json` for `tcp`/`tcp_ssl` — see
-        `_rewrite_client_config_from_state`), so the default `client()`
-        needs no transport args: `core_service` and `capability_module`
-        each dial their own bound port straight from disk.
-
-        The optional `transport` / `tcp_host` / `codec` / `no_verify_peer`
-        overrides are merged INTO that on-disk spec (uniformly across both
-        modules, since they share host/transport/codec/verify), never via
-        `LOGOSCORE_CLIENT_*` env vars. There is deliberately no per-call
-        port override: the CLI applies a single port to every module
-        uniformly, which would collapse `capability_module` onto
-        `core_service`'s port. Each module's port comes from the daemon's
-        own config and is left untouched.
-        """
+    def client(self, *, timeout: float | None = 30.0) -> LogoscoreClient:
+        """Build a client wired to this daemon's `client/config.json`, which
+        the daemon writes into its own session at boot."""
         if self._process is None:
             raise LogoscoreError(
                 "daemon is not running — call start() or use the context manager"
             )
-        if (transport is not None or tcp_host is not None
-                or codec is not None or no_verify_peer):
-            self._apply_client_overrides(
-                transport=transport, tcp_host=tcp_host,
-                codec=codec, no_verify_peer=no_verify_peer)
-        # No transport kwargs → no LOGOSCORE_CLIENT_* env overrides; the
-        # per-module client/config.json is authoritative.
         return LogoscoreClient(
             binary=self.binary,
             config_dir=self._config_dir,
@@ -344,10 +204,6 @@ class LogoscoreDaemon:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _read_token(self) -> str | None:
-        if self._network_token is not None:
-            return self._network_token
-        # The daemon-emitted credential is local-only. Network runs use the
-        # wrapper's separately issued token above; local runs read auto.json.
         path = self.client_token_file
         if not path.exists():
             return None
@@ -396,21 +252,6 @@ class LogoscoreDaemon:
                     + "\n".join(err_tail))
             raise LogoscoreError("\n".join(sections))
 
-        # Phase 1.5: issue a network credential and rewrite client/config.json
-        # from state.json. The daemon's auto-emitted config advertises the
-        # local endpoint; network runs need their resolved per-module ports
-        # before the next phase calls `status`.
-        if any(p in ("tcp", "tcp_ssl") for p in self.transports):
-            # The daemon's boot token is local-only. Give this wrapper its own
-            # revocable network credential before switching the client dial
-            # spec to the network listener.
-            name = "py-" + secrets.token_hex(8)
-            issued = issue_token(name, binary=self.binary,
-                                 config_dir=self._config_dir)
-            self._network_token_name = name
-            self._network_token = issued["token"]
-        self._rewrite_client_config_from_state()
-
         # Phase 2: verify we can talk to it via `status`.
         remaining = max(1.0, deadline - time.monotonic())
         try:
@@ -422,115 +263,3 @@ class LogoscoreDaemon:
             )
         except LogoscoreError as e:
             raise LogoscoreError(f"daemon status check failed: {e}") from e
-
-    def _apply_client_overrides(
-        self,
-        *,
-        transport: str | None,
-        tcp_host: str | None,
-        codec: str | None,
-        no_verify_peer: bool,
-    ) -> None:
-        """Merge uniform dial overrides into `client/config.json` in place.
-
-        Only the explicitly-overridden fields are touched, and the per-module
-        `port` is NEVER changed — that's the whole point: a single
-        `LOGOSCORE_CLIENT_TCP_PORT` env override is applied to every module
-        uniformly by the CLI, which would collapse `capability_module` onto
-        `core_service`'s port. Editing each module entry directly (rather than
-        rebuilding via `write_config`) also preserves any field the daemon
-        emitted that the high-level API doesn't model — e.g. a tcp_ssl `ca`."""
-        cfg_path = self._config_dir / "client" / "config.json"
-        try:
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return  # daemon's own config stands
-        daemon_block = cfg.get("daemon")
-        if not isinstance(daemon_block, dict) or not daemon_block:
-            return
-        for entry in daemon_block.values():
-            if not isinstance(entry, dict):
-                continue
-            if transport is not None:
-                entry["transport"] = transport
-            if entry.get("transport") == "local":
-                # Local sockets carry no network fields — drop any stale
-                # ones so the entry matches the minimal local shape and
-                # doesn't leave a misleading host/port/codec behind.
-                for k in ("host", "port", "codec", "ca", "verify_peer"):
-                    entry.pop(k, None)
-                continue
-            if tcp_host is not None:
-                entry["host"] = tcp_host
-            if codec is not None:
-                entry["codec"] = codec
-            if no_verify_peer and entry.get("transport") == "tcp_ssl":
-                entry["verify_peer"] = False
-        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n", encoding="utf-8")
-
-    def _rewrite_client_config_from_state(self) -> None:
-        """For `tcp` / `tcp_ssl` runs, replace the daemon's auto-emitted
-        `client/config.json` (which only knows about LocalSocket) with
-        per-module entries pointing at the actually-bound network
-        endpoints from `state.json`.
-
-        No-op for `local` (the auto-emit already matches reality) and
-        when the wrapper isn't configuring transports at all (the
-        daemon defaults to LocalSocket-only for the well-knowns)."""
-        if not self.transports or self.transports == ["local"]:
-            return  # daemon's auto-emit is already correct
-
-        # Pick the first non-local protocol the wrapper requested.
-        # Tests pass exactly one of {tcp, tcp_ssl}; if a future caller
-        # passes ["local", "tcp"] we still surface the network listener
-        # in client/config.json so the tcp path is reachable.
-        target_proto: str | None = None
-        for p in self.transports:
-            if p in ("tcp", "tcp_ssl"):
-                target_proto = p
-                break
-        if target_proto is None:
-            return
-
-        try:
-            state = json.loads(self.state_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            raise LogoscoreError(
-                f"daemon state.json unreadable: {e}"
-            ) from e
-
-        modules = state.get("resolved", {}).get("modules", {})
-        endpoints: dict[str, DaemonEndpoint] = {}
-        for module_name in ("core_service", "capability_module"):
-            transports = modules.get(module_name, {}).get("transports", [])
-            match = next(
-                (t for t in transports if t.get("protocol") == target_proto),
-                None,
-            )
-            if match is None:
-                raise LogoscoreError(
-                    f"daemon state.json doesn't advertise '{target_proto}' "
-                    f"for module '{module_name}' — wrapper transports "
-                    f"setup is out of sync with the running daemon"
-                )
-
-            host = match.get("host", "127.0.0.1")
-            # Daemons that bind 0.0.0.0 are reachable via 127.0.0.1
-            # for same-host clients. Any host-side dial that goes
-            # through the bind address would refuse on platforms
-            # that don't auto-route 0.0.0.0 → loopback.
-            endpoints[module_name] = DaemonEndpoint(
-                transport=target_proto,
-                host="127.0.0.1" if host == "0.0.0.0" else host,
-                port=match.get("port", 0),
-                codec=match.get("codec", "json"),
-                verify_peer=(
-                    self.verify_peer if target_proto == "tcp_ssl" else None),
-            )
-
-        # Merge into the daemon's auto-emitted config.json (keeping any
-        # keys it already wrote, e.g. token_file) — write_config owns the
-        # schema. The daemon emitted its own auto.json token, so no token
-        # is written here.
-        LogoscoreClient.write_config(
-            self._config_dir, endpoints, instance_id=None, merge=True)
