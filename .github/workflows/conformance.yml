@@ -112,7 +112,8 @@ jobs:
 
   transport-interop:
     # Each check runs the full API with independently selected module
-    # transports: QRO→QRO, QRO→plain, plain→QRO, and plain→plain.
+    # transports: QRO→QRO, QRO→plain, plain→QRO, and plain→plain, plus the
+    # plain C++ provider hosted in the daemon's process (inproc-plain).
     environment: ${{ github.ref == 'refs/heads/master' && 'public-cache' || '' }}
     name: Module transport interop (${{ matrix.system }})
     strategy:
