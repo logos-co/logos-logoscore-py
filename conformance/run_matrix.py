@@ -281,6 +281,32 @@ def error_code_of(exc) -> str:
             or type(exc).__name__)
 
 
+# A provider reached through an import (`--peered`): its facade reports every
+# upstream failure as dispatch_failed, naming the provider's class after `remote/`.
+PEERED = "@peered"
+_REMOTE_CLASS = re.compile(r"remote/([A-Za-z_]+):")
+
+
+def base_provider(label: str) -> str:
+    return label[:-len(PEERED)] if label.endswith(PEERED) else label
+
+
+def remote_error_code_of(exc) -> str:
+    """The provider's own class under a facade's dispatch_failed, so a peered cell
+    compares with the local one: the class must survive the hop, in the message."""
+    code = error_code_of(exc)
+    found = _REMOTE_CLASS.search(str(exc)) if code == "dispatch_failed" else None
+    return found.group(1) if found else code
+
+
+def client_errors() -> tuple:
+    """What either client raises for a failed call: logoscore's errors, and
+    logosctl's for the cells of a peered provider."""
+    from logoscore.errors import LogoscoreError
+    from logosctl.errors import LogosctlError
+    return (LogoscoreError, LogosctlError)
+
+
 class Result:
     __slots__ = ("value", "error", "status")
 
@@ -630,8 +656,10 @@ def check_placements(client, provider: str, placements: dict) -> None:
     print(f"placement: {provider} runs {got}")
 
 
-def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeout: float):
-    from logoscore.errors import LogoscoreError, MethodError
+def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeout: float,
+                remote: bool = False):
+    errors = client_errors()
+    code_of = remote_error_code_of if remote else error_code_of
 
     out: dict[str, Result] = {}
     for case in cases:
@@ -655,8 +683,8 @@ def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeou
             # and no change to any C++ repo could ever have moved them.
             r = Result(value=client.call(
                 module, case["method"], *args, timeout=t, decode_bytes=not raw))
-        except (MethodError, LogoscoreError) as e:
-            r = Result(error=error_code_of(e))
+        except errors as e:
+            r = Result(error=code_of(e))
         except Exception as e:
             # An adversarial payload can HANG the call rather than fail it (the
             # pending-call sentinel does exactly that), which surfaces as a
@@ -677,8 +705,10 @@ def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeou
     return out
 
 
-def run_events(client, consumer: "Consumer", provider: str, events: list, timeout: float):
-    from logoscore.errors import LogoscoreError, MethodError
+def run_events(client, consumer: "Consumer", provider: str, events: list, timeout: float,
+               remote: bool = False):
+    errors = client_errors()
+    code_of = remote_error_code_of if remote else error_code_of
 
     module = consumer.target(provider)
     out: dict[str, Result] = {}
@@ -689,8 +719,8 @@ def run_events(client, consumer: "Consumer", provider: str, events: list, timeou
         try:
             out[ev["id"]] = Result(value=capture_event(
                 client, module, ev["event"], ev["fire"], values, timeout))
-        except (MethodError, LogoscoreError) as e:
-            out[ev["id"]] = Result(error=error_code_of(e))
+        except errors as e:
+            out[ev["id"]] = Result(error=code_of(e))
         except Exception as e:
             out[ev["id"]] = Result(error=type(e).__name__)
     return out
@@ -720,7 +750,7 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
     import threading
     import time
 
-    from logoscore.errors import LogoscoreError, MethodError
+    errors = client_errors()
 
     received: list = []
     got = threading.Event()
@@ -736,7 +766,7 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
             sub = client.on_event(module, event, on_event)
             sub.__enter__()
             break
-        except (MethodError, LogoscoreError):
+        except errors:
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.25)
@@ -796,6 +826,11 @@ def main() -> int:
                     metavar="MODULE=PLACEMENT",
                     help="once loaded, MODULE must run there (inproc|subprocess); "
                          "a coordinate that silently fell back measures the wrong thing")
+    ap.add_argument("--peered", action="store_true",
+                    help="also run each provider through an import: exported by one logosctl "
+                         "daemon, called on another through its facade (<provider>@peered)")
+    ap.add_argument("--logosctl", default=os.environ.get("LOGOSCTL_BIN", "logosctl"),
+                    help="the logosctl binary --peered runs its two daemons with")
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--quiet", action="store_true")
     # Reporting. `--report` is the artifact (self-contained HTML, no CDN, same
@@ -876,11 +911,18 @@ def main() -> int:
 
     by_case = {c["id"]: c for c in cases} | {e["id"]: e for e in events}
     setup_errors = []
+    # A peered provider is the same module, measured through an import, by the
+    # direct consumer only: a proxy would call the facade from a third place.
+    providers = list(modules) + ([p + PEERED for p in modules] if args.peered else [])
 
     # measured[(consumer, provider)][case] = Result
     measured: dict[tuple[str, str], dict[str, Result]] = {}
     for consumer in consumers:
-        for provider in modules:
+        for provider in providers:
+            peered = provider.endswith(PEERED)
+            if peered and consumer.is_proxy:
+                continue
+            base = base_provider(provider)
             key = (consumer.label, provider)
             measured[key] = {}
             # One daemon per PHASE. Every event subscription spawns a `logoscore
@@ -909,14 +951,25 @@ def main() -> int:
             phases += [(run_methods, [c]) for c in cases if c.get("isolate")]
             phases += [(run_events, events)]
             for runner, work in phases:
-                with LogoscoreDaemon(
+                if peered:
+                    from logosctl import PeeredDaemons
+                    daemons = PeeredDaemons(modules[base], [base], binary=args.logosctl)
+                else:
+                    daemons = LogoscoreDaemon(
                         modules_dir=consumer.modules_dirs(modules),
                         binary=args.logoscore,
-                        extra_args=args.daemon_arg) as daemon:
-                    client = daemon.client()
+                        extra_args=args.daemon_arg)
+                try:
+                    daemons.__enter__()
+                except Exception as e:
+                    setup_errors.append(f"{consumer.label}/{provider}: {e}")
+                    break
+                try:
+                    client = daemons.importer_client() if peered else daemons.client()
                     try:
-                        consumer.prepare(client, provider, args.timeout)
-                        check_placements(client, provider, placements)
+                        consumer.prepare(client, base, args.timeout)
+                        if not peered:
+                            check_placements(client, base, placements)
                     except Exception as e:
                         # A consumer that cannot be pointed at a provider must not
                         # quietly contribute a block of `not-run` cells that read
@@ -924,7 +977,9 @@ def main() -> int:
                         setup_errors.append(f"{consumer.label}/{provider}: {e}")
                         break
                     measured[key].update(
-                        runner(client, consumer, provider, work, args.timeout))
+                        runner(client, consumer, base, work, args.timeout, remote=peered))
+                finally:
+                    daemons.__exit__(None, None, None)
 
     rows, counts = [], {}
 
@@ -933,15 +988,21 @@ def main() -> int:
 
     for cid, case in by_case.items():
         for consumer in consumers:
-            for module in modules:
+            for module in providers:
+                if (consumer.label, module) not in measured:
+                    continue
+                base = base_provider(module)
                 got = measured[(consumer.label, module)].get(cid, Result(error="not-run"))
                 want, have_want = (
-                    expectation(case, module) if "method" in case
+                    expectation(case, base) if "method" in case
                     else (case["values"] if "values" in case else case["value"], True)
                 )
                 ok = have_want and matches(got, want, case.get("raw", False))
-                registered = xfail.get((cid, module, consumer.label))
-                skipped = skips.reason(cid, module, consumer.label)
+                # A peered cell answers to its own entry, else to the provider's.
+                registered = (xfail.get((cid, module, consumer.label))
+                              or xfail.get((cid, base, consumer.label)))
+                skipped = (skips.reason(cid, module, consumer.label)
+                           or skips.reason(cid, base, consumer.label))
 
                 if skipped:
                     # A skip claims the surface CANNOT express the cell. If it
@@ -1000,7 +1061,7 @@ def main() -> int:
         else:
             status = "fail"
         bump(f"differential-{kind}-{status}")
-        if kind == "provider":
+        if kind in ("provider", "peered"):
             diffs.append({"case": cid, "consumer": label_a[1], "declared": False,
                           "agree": agree, "status": status, "known": registered,
                           **({} if agree else {"values": {
@@ -1052,6 +1113,21 @@ def main() -> int:
                     (names[0], consumer.label), res_a,
                     (names[1], consumer.label), res_b,
                     "providers disagree and the contract declares no divergence")
+
+    # Peered differential: a provider answers through an import exactly as it
+    # does locally. Every case, declared divergences included: it is one module.
+    for module in (names if args.peered else []):
+        label, c = module + PEERED, consumers[0].label
+        if (c, label) not in measured:
+            continue
+        for cid, case in by_case.items():
+            if not (comparable(cid, module, c) and comparable(cid, label, c)):
+                continue
+            differential(
+                "peered", cid, case,
+                (module, c), measured[(c, module)].get(cid, Result(error="not-run")),
+                (label, c), measured[(c, label)].get(cid, Result(error="not-run")),
+                "the provider answers differently through an import")
 
     # Consumer differential, per provider: the same value read by two consumer
     # surfaces. Every unordered pair, not just each-against-py — the sync/async

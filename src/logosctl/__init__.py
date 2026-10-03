@@ -63,12 +63,14 @@ from .errors import (
     ModuleError,
 )
 from .events import Subscription
+from .peering import PeeredDaemons
 from .tokens import issue_token, revoke_token, list_tokens
 
 __all__ = [
     "LogosctlDaemon",
     "LogosctlDockerDaemon",
     "LogosctlClient",
+    "PeeredDaemons",
     "DaemonEndpoint",
     "Subscription",
     "LogosctlError",
