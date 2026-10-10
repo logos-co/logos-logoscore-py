@@ -463,3 +463,34 @@ ws test logos-logoscore-py --auto-local
 ## Licence
 
 Dual-licensed under MIT or Apache-2.0.
+
+## Typed CLI + MCP server (reflected from `module-info`)
+
+Two thin, stdlib-only frontends generated from each module's own API — names, typed parameters and
+return types come from `module-info`, so adding a method to a module surfaces it automatically.
+Both **attach to a running daemon** by its config dir (for a long-running / externally-managed
+daemon) or **own a private one** (`--modules DIR --load M`).
+
+### `logoscore-cli` — a typed CLI
+
+```sh
+export LOGOSCORE_CONFIG_DIR=~/.some-daemon/cfg           # attach to a running daemon
+python -m logoscore describe kym_core                    # typed signatures
+python -m logoscore call kym_core createBudget --name Groceries
+python -m logoscore call kym_core addAccount --name Checking --type asset --balance 100
+source <(python -m logoscore completions)                # bash completion
+```
+
+Named `--flags` are coerced per each parameter's Qt type, so a mismatch is a clear error rather than
+a silent no-op. A raw positional arg is still forwarded unchanged.
+
+### `logoscore-mcp` — module methods as MCP tools
+
+```sh
+logoscore-mcp --attach ~/.some-daemon/cfg                # or --modules ./modules --load kym_core
+```
+
+Exposes one Model Context Protocol tool per invokable method (`<module>__<method>`, with a JSON
+schema derived from the Qt parameter types), over stdio. Any MCP client (Claude, an agent runtime)
+then drives the modules with typed tool-calls. MCP client config: command `logoscore-mcp`, args
+`["--attach", "<config_dir>"]`.
