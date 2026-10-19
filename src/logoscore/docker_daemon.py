@@ -291,6 +291,8 @@ class LogoscoreDockerDaemon:
         network: str | None = None,
         extra_module_dirs: Sequence[str] | None = None,
         extra_args: Sequence[str] | None = None,
+        # Extra env vars for the daemon process.
+        env: dict[str, str] | None = None,
         startup_timeout: float = 20.0,
     ) -> None:
         if transport not in ("tcp", "tcp_ssl"):
@@ -331,6 +333,7 @@ class LogoscoreDockerDaemon:
         # callers empty.
         self.extra_module_dirs = list(extra_module_dirs or [])
         self.extra_args = list(extra_args or [])
+        self.extra_env = dict(env or {})
 
         # Host-side dirs: either caller-supplied (persistent across
         # runs — useful for session restore) or freshly-minted tmpdirs
@@ -528,6 +531,10 @@ class LogoscoreDockerDaemon:
                 "-v", f"{self.ssl_key}:/certs/key.pem:ro",
             ]
 
+        env_flags: list[str] = []
+        for name, value in self.extra_env.items():
+            env_flags += ["-e", f"{name}={value}"]
+
         # Per-module transport flags. The daemon takes
         # `--module-transport NAME=PROTOCOL[,k=v...]` and uses each
         # module's set independently — there's no implicit
@@ -589,6 +596,7 @@ class LogoscoreDockerDaemon:
             "-p", f"{self._host_port}:{CONTAINER_TCP_PORT}",
             "-p", f"{self._host_cap_port}:{CONTAINER_CAP_TCP_PORT}",
             *volumes,
+            *env_flags,
             self.image,
             "daemon",
             "--config-dir", "/config",

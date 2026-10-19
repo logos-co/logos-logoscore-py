@@ -391,3 +391,20 @@ def test_nonexistent_network_raises(docker_flavor, linux_test_modules_dir):
     # Defensive: if start() somehow created a container before raising,
     # clean it up. stop() is safe on a never-started daemon.
     d.stop()
+
+
+# ── Env vars: set on the daemon process ───────────────────────────────────
+
+def test_env_reaches_daemon_process(docker_flavor, linux_test_modules_dir):
+    """`env=` entries are in the environment of the daemon (PID 1)."""
+    _require_docker_and_image(docker_flavor)
+    with LogoscoreDockerDaemon(
+        image=_docker_image_for(docker_flavor),
+        modules_dir=linux_test_modules_dir,
+        env={"LOGOSCORE_TEST_ENV": "from-host"},
+    ) as daemon:
+        r = subprocess.run(
+            ["docker", "exec", daemon.container_name, "cat", "/proc/1/environ"],
+            capture_output=True, text=True, check=True,
+        )
+    assert "LOGOSCORE_TEST_ENV=from-host" in r.stdout.split("\0")
