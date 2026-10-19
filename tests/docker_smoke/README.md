@@ -37,7 +37,8 @@ container, waits for `state.json`, and returns a `LogoscoreClient`
 configured to dial the right port. Optional knobs: `host_port=...` to
 pin a port, `persistence_dir=...` to restore a pre-seeded session,
 `codec="cbor"` to pick a wire codec, `extra_module_dirs=[...]` /
-`extra_args=[...]` to extend the daemon invocation.
+`extra_args=[...]` to extend the daemon invocation, `env={...}` to set
+env vars on the daemon process.
 
 ### Equivalent raw `docker run`
 

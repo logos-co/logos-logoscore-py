@@ -288,7 +288,7 @@ LogoscoreDockerDaemon(
     codec="json", transport="tcp",
     ssl_cert=None, ssl_key=None, verify_peer=False,
     container_name=None, network=None,
-    extra_module_dirs=None, extra_args=None, startup_timeout=20.0,
+    extra_module_dirs=None, extra_args=None, env=None, startup_timeout=20.0,
 )
 ```
 

@@ -123,7 +123,8 @@ modules are always bind-mounted at runtime.
 Knobs: `host_port=`, `persistence_dir=` (pre-seeded + not cleaned up on
 exit), `codec="cbor"`, `extra_module_dirs=[...]`, `extra_args=[...]`,
 `container_name=`, `network=` (attach to a caller-managed docker
-network). See `help(LogoscoreDockerDaemon)` for the full list.
+network), `env={...}` (env vars for the daemon process).
+See `help(LogoscoreDockerDaemon)` for the full list.
 
 ### Multiple daemons in a shared docker network
 
@@ -340,6 +341,7 @@ LogoscoreDockerDaemon(
     network=None,             # attach to existing caller-managed docker network
     extra_module_dirs=None,   # extra -m paths *inside* the container
     extra_args=None,          # extra daemon args
+    env=None,                 # extra env vars for the daemon process
     startup_timeout=20.0,
 )
 ```
