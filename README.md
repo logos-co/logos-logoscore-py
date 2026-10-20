@@ -424,9 +424,10 @@ tests/
 ├── unit/          # no logoscore required; runs anywhere
 ├── integration/   # spawns local logoscore daemons; nix check covers this
 ├── docker_smoke/  # docker-required; see tests/docker_smoke/README.md
-└── logosctl/      # the same two suites against logosctl
+└── logosctl/      # the same suites against logosctl
     ├── unit/
-    └── integration/
+    ├── integration/
+    └── docker_smoke/  # see tests/logosctl/docker_smoke/README.md
 ```
 
 `tests/logosctl/` is a deliberate duplicate rather than a parametrisation:
@@ -450,6 +451,9 @@ explicitly:
 ```bash
 ./tests/docker_smoke/build_smoke_image.sh  # FLAVOR=portable (default)
 pytest tests/docker_smoke                   # --docker-flavor={portable|dev|both}
+
+./tests/logosctl/docker_smoke/build_smoke_image.sh  # logosctl:smoke-<flavor>
+pytest tests/logosctl/docker_smoke
 ```
 
 See [`tests/docker_smoke/README.md`](tests/docker_smoke/README.md)

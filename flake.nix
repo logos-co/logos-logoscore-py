@@ -100,11 +100,31 @@
             cp -r ${logoscorePortable}/* $out/
             chmod -R u+w $out
           '';
+
+          # The same two flavors for `tests/logosctl/docker_smoke/Dockerfile`.
+          # Both are a `bin/ + modules/` tree; the daemon finds its built-in
+          # modules beside `bin/`.
+          logosctlBin      = logos-logoscore-cli.packages.${system}.ctl;
+          logosctlPortable = logos-logoscore-cli.packages.${system}.ctl-bundle-dir;
+
+          logosctlDockerBundle = pkgs.runCommand "logosctl-bundle-dev" { } ''
+            mkdir -p $out
+            cp -rL ${logosctlBin}/. $out/
+            chmod -R u+w $out
+          '';
+
+          logosctlDockerBundlePortable = pkgs.runCommand "logosctl-bundle-portable" { } ''
+            mkdir -p $out
+            cp -r ${logosctlPortable}/* $out/
+            chmod -R u+w $out
+          '';
         in {
           default              = pythonPkg;
           logoscore-py         = pythonPkg;
           dockerBundle         = dockerBundle;
           dockerBundlePortable = dockerBundlePortable;
+          logosctlDockerBundle         = logosctlDockerBundle;
+          logosctlDockerBundlePortable = logosctlDockerBundlePortable;
         }
       );
 

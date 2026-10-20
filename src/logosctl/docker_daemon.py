@@ -363,6 +363,8 @@ class LogosctlDockerDaemon:
         # `--quiet`) — everything that configured the daemon moved into
         # `extra_config`.
         extra_args: Sequence[str] | None = None,
+        # Extra env vars for the daemon process.
+        env: dict[str, str] | None = None,
         # 20s was already generous for logoscore; keep it, because a
         # logosctl daemon does strictly more before it writes state.json:
         # it creates the session's modules/plugins/keyring/cache dirs and
@@ -408,6 +410,7 @@ class LogosctlDockerDaemon:
         self.extra_module_dirs = list(extra_module_dirs or [])
         self.extra_config = dict(extra_config or {})
         self.extra_args = list(extra_args or [])
+        self.extra_env = dict(env or {})
 
         # Host-side dirs: either caller-supplied (persistent across
         # runs — useful for session restore) or freshly-minted tmpdirs
@@ -632,6 +635,10 @@ class LogosctlDockerDaemon:
         # container over the same bind-mount.
         self._install_daemon_config()
 
+        env_flags: list[str] = []
+        for name, value in self.extra_env.items():
+            env_flags += ["-e", f"{name}={value}"]
+
         # Note: deliberately no --rm. If the daemon exits during startup
         # (e.g. a listener fails to bind, or the plaintext-TCP guard
         # refuses the config), --rm would auto-remove the container
@@ -657,6 +664,7 @@ class LogosctlDockerDaemon:
             "-p", f"{self._host_cap_port}:{CONTAINER_CAP_TCP_PORT}",
             *self._volume_args(),
             *_CONFIG_DIR_ENV,
+            *env_flags,
             self.image,
             # Foreground, NOT `daemon start --detach`. Detaching forks a
             # setsid'd child and returns, which in a container means PID
