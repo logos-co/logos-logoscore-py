@@ -452,7 +452,7 @@ explicitly:
 ./tests/docker_smoke/build_smoke_image.sh  # FLAVOR=portable (default)
 pytest tests/docker_smoke                   # --docker-flavor={portable|dev|both}
 
-./tests/logosctl/docker_smoke/build_smoke_image.sh  # logosctl:smoke-<flavor>
+./tests/logosctl/docker_smoke/build_smoke_image.sh  # logosctl:smoke-portable
 pytest tests/logosctl/docker_smoke
 ```
 

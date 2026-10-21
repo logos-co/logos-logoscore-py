@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# Builds `logosctl:smoke-<flavor>` via `docker buildx build`. Two flavors:
-#
-#   ./build_smoke_image.sh                  # tag: logosctl:smoke-portable (default)
-#   FLAVOR=dev      ./build_smoke_image.sh  # tag: logosctl:smoke-dev
-#   FLAVOR=both     ./build_smoke_image.sh  # builds both tags
-#
-# - `portable` (default) → .#logosctlDockerBundlePortable (self-contained)
-# - `dev`                → .#logosctlDockerBundle (linked against
-#                          /nix/store)
+# Builds `logosctl:smoke-portable` via `docker buildx build`, from
+# .#logosctlDockerBundlePortable (self-contained).
 #
 # The image is a *CLI-only runtime* — it does not bake in any user
 # modules. User modules are bind-mounted into the container at runtime;
@@ -65,41 +58,23 @@ if [[ -n "${BUILDX_CACHE_TO:-}" ]]; then
     cache_flags+=( --cache-to "$BUILDX_CACHE_TO" )
 fi
 
-build_flavor() {
-    local flavor="$1"
-    local tag="logosctl:smoke-$flavor"
-    echo "=================================================================="
-    echo "Building $tag from $py_repo (FLAVOR=$flavor)"
-    echo "(first run takes ~5 min while nix populates its store;"
-    echo " subsequent builds are incremental)"
-    echo "=================================================================="
-    # `--load` exports the built image to the local docker daemon's
-    # image store. Without it, buildx leaves the image inside the
-    # buildx builder instance's containerd-style store, where
-    # `docker run logosctl:smoke-portable` (the smoke tests' next
-    # step) can't find it.
-    docker buildx build \
-        "${platform_flags[@]+"${platform_flags[@]}"}" \
-        --build-arg "FLAVOR=$flavor" \
-        -f "$here/Dockerfile" \
-        -t "$tag" \
-        --load \
-        "${cache_flags[@]+"${cache_flags[@]}"}" \
-        "$py_repo"
-}
-
-case "${FLAVOR:-portable}" in
-    dev|portable)
-        build_flavor "${FLAVOR:-portable}"
-        ;;
-    both)
-        build_flavor portable
-        build_flavor dev
-        ;;
-    *)
-        echo "Unknown FLAVOR='$FLAVOR'; use dev|portable|both" >&2
-        exit 1
-        ;;
-esac
+tag="logosctl:smoke-portable"
+echo "=================================================================="
+echo "Building $tag from $py_repo"
+echo "(first run takes ~5 min while nix populates its store;"
+echo " subsequent builds are incremental)"
+echo "=================================================================="
+# `--load` exports the built image to the local docker daemon's
+# image store. Without it, buildx leaves the image inside the
+# buildx builder instance's containerd-style store, where
+# `docker run logosctl:smoke-portable` (the smoke tests' next
+# step) can't find it.
+docker buildx build \
+    "${platform_flags[@]+"${platform_flags[@]}"}" \
+    -f "$here/Dockerfile" \
+    -t "$tag" \
+    --load \
+    "${cache_flags[@]+"${cache_flags[@]}"}" \
+    "$py_repo"
 
 docker images 'logosctl:smoke-*'

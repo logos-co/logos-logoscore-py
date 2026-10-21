@@ -49,7 +49,7 @@ from ..._fullapi_module_cases import FULLAPI_METHOD_CASES, FULLAPI_EVENT_CASES
 
 
 # Docker image tag convention: logosctl:smoke-<flavor>, where <flavor>
-# is `dev` or `portable`. Override for one-off images via the env var.
+# is `portable`. Override for one-off images via the env var.
 DOCKER_IMAGE_FMT = os.environ.get(
     "LOGOSCTL_DOCKER_IMAGE_FMT", "logosctl:smoke-{flavor}")
 MODULE = "test_fullapi_cpp"
@@ -72,7 +72,7 @@ def _require_docker_and_image(flavor: str) -> None:
     if not image_present(image):
         pytest.skip(
             f"docker image '{image}' not built — run "
-            f"FLAVOR={flavor} tests/logosctl/docker_smoke/build_smoke_image.sh first"
+            "tests/logosctl/docker_smoke/build_smoke_image.sh first"
         )
 
 
@@ -244,10 +244,7 @@ def test_two_daemons_in_docker(two_dockerized_daemons, logosctl_bin):
 def shared_docker_network(docker_flavor) -> Iterator[str]:
     """Create a docker network for the duration of the module, then remove
     it. Network is owned by the fixture, NOT by LogosctlDockerDaemon —
-    daemon just attaches via the `network=` kwarg.
-
-    Depends on `docker_flavor` so `--docker-flavor=both` gets a fresh
-    network per flavor parametrisation."""
+    daemon just attaches via the `network=` kwarg."""
     _require_docker_and_image(docker_flavor)
 
     name = f"logosctl-test-{docker_flavor}-{uuid.uuid4().hex[:8]}"

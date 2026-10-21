@@ -8,18 +8,11 @@
 #
 # Usage (from this repo's root):
 #   tests/logosctl/docker_smoke/build_smoke_image.sh
-#   FLAVOR=dev tests/logosctl/docker_smoke/build_smoke_image.sh
 #
-# Tag: logosctl:smoke-<flavor>. FLAVOR selects the flake's bundle output:
-#   - dev       → .#logosctlDockerBundle
-#   - portable  → .#logosctlDockerBundlePortable
-
-# Global, so that it can pick the runtime stage (`FROM runtime-${FLAVOR}`).
-ARG FLAVOR=portable
+# Tag: logosctl:smoke-portable, from the flake's
+# .#logosctlDockerBundlePortable.
 
 FROM nixos/nix:2.24.9 AS build
-
-ARG FLAVOR
 
 # Enable flakes. Disable the sandbox + seccomp filter: Docker Desktop's
 # Rosetta layer (on Apple Silicon's linux/amd64 fallback) blocks the
@@ -41,29 +34,15 @@ WORKDIR /src
 COPY flake.nix flake.lock pyproject.toml README.md ./
 COPY src ./src
 
-# Map FLAVOR → flake attribute.
-RUN case "$FLAVOR" in \
-        dev)      ATTR=logosctlDockerBundle         ;; \
-        portable) ATTR=logosctlDockerBundlePortable ;; \
-        *) echo "Unknown FLAVOR='$FLAVOR'; use dev|portable" >&2; exit 1 ;; \
-    esac && \
-    nix build -L ".#$ATTR" --out-link /out/bundle
+RUN nix build -L .#logosctlDockerBundlePortable --out-link /out/bundle
 
 # ubuntu:24.04 ships a normal glibc runtime, so the portable bundle's ELF
 # interpreter and system libraries resolve at their canonical paths.
-FROM ubuntu:24.04 AS runtime-base
+FROM ubuntu:24.04
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# dev links into /nix/store through rpath.
-FROM runtime-base AS runtime-dev
-COPY --from=build /nix/store /nix/store
-
-# portable links into its own lib/ and the system libraries.
-FROM runtime-base AS runtime-portable
-
-FROM runtime-${FLAVOR}
 COPY --from=build /out/bundle /opt/logosctl
 EXPOSE 6000 6001
 ENTRYPOINT ["/opt/logosctl/bin/logosctl"]

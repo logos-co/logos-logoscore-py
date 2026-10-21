@@ -25,11 +25,10 @@
       # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
       # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
       # — the smoke image's stage-1 nix-build copies it into the
-      # ubuntu-based runtime stage. `logosctlDockerBundle` /
-      # `logosctlDockerBundlePortable` do the same for
-      # `tests/logosctl/docker_smoke/Dockerfile`. The actual docker images
-      # are built by each directory's `build_smoke_image.sh`, not directly
-      # from these flake outputs.
+      # ubuntu-based runtime stage. `logosctlDockerBundlePortable` does the
+      # same for `tests/logosctl/docker_smoke/Dockerfile`. The actual docker
+      # images are built by each directory's `build_smoke_image.sh`, not
+      # directly from these flake outputs.
       packages = forAllSystems ({ pkgs, system }:
         let
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
@@ -103,17 +102,10 @@
             chmod -R u+w $out
           '';
 
-          # The same two flavors for `tests/logosctl/docker_smoke/Dockerfile`.
-          # Both are a `bin/ + modules/` tree; the daemon finds its built-in
-          # modules beside `bin/`.
-          logosctlBin      = logos-logoscore-cli.packages.${system}.ctl;
+          # The portable flavor for `tests/logosctl/docker_smoke/Dockerfile`:
+          # a `bin/ + modules/` tree; the daemon finds its built-in modules
+          # beside `bin/`.
           logosctlPortable = logos-logoscore-cli.packages.${system}.ctl-bundle-dir;
-
-          logosctlDockerBundle = pkgs.runCommand "logosctl-bundle-dev" { } ''
-            mkdir -p $out
-            cp -rL ${logosctlBin}/. $out/
-            chmod -R u+w $out
-          '';
 
           logosctlDockerBundlePortable = pkgs.runCommand "logosctl-bundle-portable" { } ''
             mkdir -p $out
@@ -125,7 +117,6 @@
           logoscore-py         = pythonPkg;
           dockerBundle         = dockerBundle;
           dockerBundlePortable = dockerBundlePortable;
-          logosctlDockerBundle         = logosctlDockerBundle;
           logosctlDockerBundlePortable = logosctlDockerBundlePortable;
         }
       );

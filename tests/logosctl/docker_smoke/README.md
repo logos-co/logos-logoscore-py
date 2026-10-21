@@ -13,23 +13,16 @@ are bind-mounted in at `/user-modules` by `LogosctlDockerDaemon`
 (`src/logosctl/docker_daemon.py`), which also installs the daemon's
 config document into the session before starting the daemon.
 
-Two flavors:
-
-| Flavor     | Flake attr                  | Contents                          |
-|------------|-----------------------------|-----------------------------------|
-| `portable` | `.#logosctlDockerBundlePortable` | self-contained bundle (default) |
-| `dev`      | `.#logosctlDockerBundle`    | linked against `/nix/store`, which the image carries |
+The image is built from `.#logosctlDockerBundlePortable`, a self-contained
+bundle, and tagged `logosctl:smoke-portable`. There is no `dev` flavor.
 
 ## Build and run
 
 ```bash
-# Build one flavor (default: portable) or both
 tests/logosctl/docker_smoke/build_smoke_image.sh
-FLAVOR=dev  tests/logosctl/docker_smoke/build_smoke_image.sh
-FLAVOR=both tests/logosctl/docker_smoke/build_smoke_image.sh
 
 # Run the suite
-pytest tests/logosctl/docker_smoke --docker-flavor=portable
+pytest tests/logosctl/docker_smoke
 nix develop --command pytest tests/logosctl/docker_smoke -v
 ```
 

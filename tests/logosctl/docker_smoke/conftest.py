@@ -26,12 +26,12 @@ from logosctl import build_modules_in_docker, docker_available
 
 def _flavors_to_run(config) -> list[str]:
     """Turn `--docker-flavor` into the list of flavors to parametrise on.
-    `dev` | `portable` run the matrix once; `both` replays it twice."""
+    The logosctl image comes in `portable` only, so `dev` selects none."""
     choice = config.getoption("--docker-flavor")
-    if choice == "both":
-        return ["portable", "dev"]
-    if choice in ("dev", "portable"):
-        return [choice]
+    if choice in ("portable", "both"):
+        return ["portable"]
+    if choice == "dev":
+        return []
     raise pytest.UsageError(
         f"--docker-flavor must be dev|portable|both (got: {choice!r})"
     )
@@ -53,9 +53,6 @@ def linux_test_modules_dir(tmp_path_factory) -> Path:
 
     Builds `test_fullapi_cpp` — the universal-C++ provider whose methods
     and typed events span the full parameter/return/event surface.
-
-    Independent of `docker_flavor` because the `.install-portable` output
-    works in both the `portable` and `dev` images.
 
     Override the source flake via `LOGOSCTL_TEST_MODULES_FLAKE`.
     """

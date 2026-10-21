@@ -31,8 +31,8 @@ from logosctl import (
 MODULE = "test_fullapi_cpp"
 
 
-# Same image-tag convention as `test_docker_smoke.py`. Shared so that one
-# FLAVOR=... build_smoke_image.sh run covers both suites.
+# Same image-tag convention as `test_docker_smoke.py`, so one
+# build_smoke_image.sh run covers both files.
 DOCKER_IMAGE_FMT = os.environ.get(
     "LOGOSCTL_DOCKER_IMAGE_FMT", "logosctl:smoke-{flavor}")
 
@@ -53,7 +53,7 @@ def _require_docker_and_image(flavor: str) -> None:
     if not image_present(image):
         pytest.skip(
             f"docker image '{image}' not built — run "
-            f"FLAVOR={flavor} tests/logosctl/docker_smoke/build_smoke_image.sh first"
+            "tests/logosctl/docker_smoke/build_smoke_image.sh first"
         )
 
 
