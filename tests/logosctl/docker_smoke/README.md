@@ -38,4 +38,4 @@ and the test-modules flake with `LOGOSCTL_TEST_MODULES_FLAKE`.
 
 The suite covers every echo method and typed event of `test_fullapi_cpp`
 over both wire codecs, two independent daemons, a shared docker network,
-and env vars reaching the daemon process.
+env vars reaching the daemon process, and the `tcp_ssl` transport.

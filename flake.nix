@@ -25,8 +25,10 @@
       # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
       # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
       # — the smoke image's stage-1 nix-build copies it into the
-      # ubuntu-based runtime stage. The actual docker image is built
-      # via `tests/docker_smoke/build_smoke_image.sh`, not directly
+      # ubuntu-based runtime stage. `logosctlDockerBundle` /
+      # `logosctlDockerBundlePortable` do the same for
+      # `tests/logosctl/docker_smoke/Dockerfile`. The actual docker images
+      # are built by each directory's `build_smoke_image.sh`, not directly
       # from these flake outputs.
       packages = forAllSystems ({ pkgs, system }:
         let
@@ -336,7 +338,8 @@
           # so nix builds it concurrently with the logoscore ones and a red
           # logosctl cannot mask a logoscore regression. Dropping logosctl
           # later is deleting these four attributes, `mkIntegrationLogosctl`,
-          # and `logosctlBin`.
+          # `logosctlBin`, and the `logosctl*` bindings and outputs in
+          # `packages`.
           #
           # Deliberately NOT duplicated: the conformance matrix. It measures
           # the LIDL type contract, which lives in the runtime both binaries

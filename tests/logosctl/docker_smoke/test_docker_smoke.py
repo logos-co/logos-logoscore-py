@@ -316,19 +316,13 @@ def test_two_daemons_share_docker_network(
 def test_daemons_can_resolve_peer_by_container_name(
     two_dockerized_daemons_in_shared_network,
 ):
-    """Daemon A can resolve daemon B's container name via docker DNS.
-    Skips when `getent` isn't in the image (minimal builds)."""
+    """Daemon A can resolve daemon B's container name via docker DNS."""
     a, b = two_dockerized_daemons_in_shared_network
     r = subprocess.run(
         ["docker", "exec", a.container_name,
          "getent", "hosts", b.container_name],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=True,
     )
-    if r.returncode != 0:
-        pytest.skip(
-            f"`getent` not available in {a.container_name!r} or peer not "
-            f"resolvable; stderr={r.stderr!r}"
-        )
     assert b.container_name in r.stdout
 
 
