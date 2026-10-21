@@ -116,10 +116,6 @@ jobs:
   # clients side by side is to find out whether the new one holds up, and a
   # suite nobody has to fix measures nothing. Branch protection is the place
   # to decide whether it blocks a merge, not this file.
-  #
-  # No docker smoke step: `src/logosctl/docker_daemon.py` targets a
-  # `logosctl:smoke-*` image that does not exist yet, and there is no
-  # tests/logosctl/docker_smoke to run against it.
   test-logosctl:
     # ATTIC_TOKEN_PUBLIC only exists in the public-cache environment.
     environment: ${{ github.ref == 'refs/heads/master' && 'public-cache' || '' }}
@@ -159,3 +155,18 @@ jobs:
 
       - name: Run integration tests (logosctl, tcp_ssl)
         run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-tcp_ssl' --print-build-logs
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The cache scope keeps this job's layers from overwriting the `test`
+      # job's, which uses the default scope.
+      - name: Build docker smoke image
+        env:
+          BUILDX_CACHE_FROM: type=gha,scope=logosctl-smoke-${{ matrix.arch }}
+          BUILDX_CACHE_TO: type=gha,mode=max,scope=logosctl-smoke-${{ matrix.arch }}
+        run: ./tests/logosctl/docker_smoke/build_smoke_image.sh
+
+      - name: Run docker smoke tests
+        run: |
+          nix develop --command pytest tests/logosctl/docker_smoke -v

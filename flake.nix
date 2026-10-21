@@ -25,9 +25,10 @@
       # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
       # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
       # — the smoke image's stage-1 nix-build copies it into the
-      # ubuntu-based runtime stage. The actual docker image is built
-      # via `tests/docker_smoke/build_smoke_image.sh`, not directly
-      # from these flake outputs.
+      # ubuntu-based runtime stage. `logosctlDockerBundlePortable` does the
+      # same for `tests/logosctl/docker_smoke/Dockerfile`. The actual docker
+      # images are built by each directory's `build_smoke_image.sh`, not
+      # directly from these flake outputs.
       packages = forAllSystems ({ pkgs, system }:
         let
           logoscoreBin = logos-logoscore-cli.packages.${system}.default;
@@ -100,11 +101,23 @@
             cp -r ${logoscorePortable}/* $out/
             chmod -R u+w $out
           '';
+
+          # The portable flavor for `tests/logosctl/docker_smoke/Dockerfile`:
+          # a `bin/ + modules/` tree; the daemon finds its built-in modules
+          # beside `bin/`.
+          logosctlPortable = logos-logoscore-cli.packages.${system}.ctl-bundle-dir;
+
+          logosctlDockerBundlePortable = pkgs.runCommand "logosctl-bundle-portable" { } ''
+            mkdir -p $out
+            cp -r ${logosctlPortable}/* $out/
+            chmod -R u+w $out
+          '';
         in {
           default              = pythonPkg;
           logoscore-py         = pythonPkg;
           dockerBundle         = dockerBundle;
           dockerBundlePortable = dockerBundlePortable;
+          logosctlDockerBundlePortable = logosctlDockerBundlePortable;
         }
       );
 
@@ -316,7 +329,8 @@
           # so nix builds it concurrently with the logoscore ones and a red
           # logosctl cannot mask a logoscore regression. Dropping logosctl
           # later is deleting these four attributes, `mkIntegrationLogosctl`,
-          # and `logosctlBin`.
+          # `logosctlBin`, and the `logosctl*` bindings and outputs in
+          # `packages`.
           #
           # Deliberately NOT duplicated: the conformance matrix. It measures
           # the LIDL type contract, which lives in the runtime both binaries
