@@ -18,6 +18,7 @@ enforcement CLI is pinned, the guard passes and these run.
 """
 from __future__ import annotations
 
+import json
 import pytest
 
 from logoscore import LogoscoreDaemon, issue_token, revoke_token
@@ -126,3 +127,10 @@ def test_local_only_token_enforced_by_transport(daemon, transport, logoscore_bin
     else:
         assert not _module_visible(c), \
             f"a local_only token must be rejected over {transport}"
+
+
+def test_boot_token_stays_local_only(daemon, transport):
+    """The daemon's boot credential must obey the same local-only policy."""
+    token = json.loads(daemon.client_token_file.read_text())["token"]
+    c = _client_for(daemon, transport, token)
+    assert _module_visible(c) is (transport == "local")

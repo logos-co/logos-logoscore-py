@@ -195,6 +195,7 @@ def run_json(
         cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=_prep_env(config_dir, token, env),
         timeout=timeout,
     )

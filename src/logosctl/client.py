@@ -199,7 +199,7 @@ class LogosctlClient:
         cfg: dict = {}
         if merge and cfg_path.exists():
             try:
-                cfg = json.loads(cfg_path.read_text())
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 # A daemon-written config.yaml is canonical block YAML,
                 # not JSON, so this is the normal path when merging onto
@@ -235,11 +235,11 @@ class LogosctlClient:
         cfg["daemon"] = {
             name: ep._to_config_block() for name, ep in endpoints.items()
         }
-        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
+        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n", encoding="utf-8")
 
         if token is not None:
             (client_dir / cfg["token_file"]).write_text(
-                json.dumps({"token": token}, indent=4) + "\n")
+                json.dumps({"token": token}, indent=4) + "\n", encoding="utf-8")
 
     @classmethod
     def connect(
@@ -267,10 +267,8 @@ class LogosctlClient:
         would silently replace a spec written into its dir.
 
         `token` is the raw token string the daemon issued for this client
-        (see `issue_token`). Prefer a named token over a copy of the
-        daemon's `client/auto.json` for tcp/tcp_ssl: auto.json is issued
-        local-only, and the fact that it currently authenticates over the
-        network is a runtime quirk, not a promise. When `config_dir` is
+        (see `issue_token`). TCP and TLS clients need a named token: the
+        daemon's `client/auto.json` boot token is local-only. When `config_dir` is
         None a private temp dir is created and removed when the returned
         client is garbage collected; pass a `config_dir` to keep the
         config around (it is never deleted).

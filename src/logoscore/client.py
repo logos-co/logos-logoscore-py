@@ -179,7 +179,7 @@ class LogoscoreClient:
         cfg: dict = {}
         if merge and cfg_path.exists():
             try:
-                cfg = json.loads(cfg_path.read_text())
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 cfg = {}
         cfg["version"] = 2
@@ -198,11 +198,11 @@ class LogoscoreClient:
         cfg["daemon"] = {
             name: ep._to_config_block() for name, ep in endpoints.items()
         }
-        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n")
+        cfg_path.write_text(json.dumps(cfg, indent=4) + "\n", encoding="utf-8")
 
         if token is not None:
             (client_dir / cfg["token_file"]).write_text(
-                json.dumps({"token": token}, indent=4) + "\n")
+                json.dumps({"token": token}, indent=4) + "\n", encoding="utf-8")
 
     @classmethod
     def connect(

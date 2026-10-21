@@ -100,6 +100,15 @@ def test_echo_string(client):
     assert client.call(MODULE, "echoString", "round-trip") == "round-trip"
 
 
+# Text is UTF-8 in every exchange with the CLI. On Windows the client decoded
+# the CLI's output in the ANSI code page, and the CLI took its arguments in it.
+NON_ASCII = "h\u00e9llo \u65e5\u672c \U0001F600"
+
+
+def test_echo_non_ascii_string(client):
+    assert client.call(MODULE, "echoString", NON_ASCII) == NON_ASCII
+
+
 # 64-bit boundaries belong here specifically. This module is replayed by the
 # local, tcp and tcp_ssl checks, and the highest value it used to carry was
 # 2^53-1 (int) / 2^32-1 (uint) — so the plain wire's 64-bit handling was never
@@ -276,3 +285,8 @@ def test_typed_event(client, event, fire, value):
         assert payload == pytest.approx(value)
     else:
         assert payload == value
+
+
+def test_non_ascii_string_event(client):
+    evt = _capture_event(client, "stringEvent", "fireStringEvent", NON_ASCII)
+    assert evt["data"]["arg0"] == NON_ASCII
