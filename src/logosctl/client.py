@@ -98,7 +98,12 @@ def _arg_to_str(arg: Any) -> str:
     (`[tstr]`, `[int]`, `[any]`, `{tstr:any}`) plus non-scalar `any`
     values pass as natural Python objects. Strings/numbers/bools are
     passed as-is for the CLI's type coercion.
+
+    A top-level `None` is an empty positional slot, which the contract spells
+    as null: it goes as `json:null`, not `str(None)`, so the arity holds.
     """
+    if arg is None:
+        return "json:null"
     if isinstance(arg, Path):
         return f"@{arg}"
     if isinstance(arg, bool):

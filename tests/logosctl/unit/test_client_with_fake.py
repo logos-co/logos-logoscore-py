@@ -180,15 +180,29 @@ def test_call_container_args_use_json_prefix(rec: Recorder):
     assert map_arg.startswith("json:") and json.loads(map_arg[5:]) == {"k": "v"}
 
 
+def test_call_none_arg_is_json_null(rec: Recorder):
+    # A top-level None is the empty optional; "None" would arrive as a string.
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    LogosctlClient().call("m", "echoOptional", None)
+    assert rec.calls[0]["cmd"] == [
+        "logosctl", "--json", "call", "m", "echoOptional", "json:null",
+    ]
+
+
+def test_call_none_arg_keeps_arity_and_does_not_catch_the_string(rec: Recorder):
+    # None in the middle keeps its slot; the string "None" still goes as itself.
+    rec.respond(stdout=json.dumps({"status": "success", "result": None}))
+    LogosctlClient().call("m", "many", "a", None, 3, "None")
+    assert rec.calls[0]["cmd"] == [
+        "logosctl", "--json", "call", "m", "many", "a", "json:null", "3", "None",
+    ]
+
+
 def test_call_multi_arg_mixed_types_argv(rec: Recorder):
     """A multi-argument call mixing every `_arg_to_str` branch — locks in
     both argument arity (>2 positional args) and the per-arg wire encoding.
     `test_fullapi_cpp`'s methods are all 0/1-arg, so this unit test is where
-    multi-argument argv construction is pinned.
-
-    The encoding is byte-identical to logoscore's on purpose: both binaries
-    compile the same `call_command.cpp`, so the argument grammar is one
-    contract, not two."""
+    multi-argument argv construction is pinned."""
     rec.respond(stdout=json.dumps({"status": "success", "result": None}))
     client = LogosctlClient()
     client.call("m", "many", "s", 7, True, b"\x00\xff", [1, "x"], {"k": 1})
