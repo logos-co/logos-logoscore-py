@@ -23,11 +23,6 @@ the store validator that would reject it. That is a runtime inconsistency,
 not a CLI promise, and a test asserting either behaviour would be pinning
 an accident. Named tokens go through the validator, which is what these
 tests measure.
-
-Deliberate duplicate of `tests/integration/test_token_auth.py` (the
-logoscore twin). The daemons are configured through entirely different
-mechanisms, and keeping the files apart means retiring logoscore is a
-delete rather than an unpick — please don't merge them back together.
 """
 from __future__ import annotations
 
@@ -103,8 +98,7 @@ def _client_for(daemon, token):
     """A client presenting `token` instead of the daemon's auto token.
 
     The transport comes from the daemon's on-disk dial spec — there is no
-    per-client transport argument any more — so, unlike the logoscore
-    version, this needs nothing but the token. It travels as
+    per-client transport argument — so this needs nothing but the token. It travels as
     `LOGOSCTL_TOKEN`, which `RpcClient::connect` consults ahead of the
     file `client/config.yaml` points at.
     """

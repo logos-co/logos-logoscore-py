@@ -1,6 +1,6 @@
 """Client for a running logosctl daemon.
 
-Each method spawns a fresh `logosctl <subcommand> --json` subprocess and
+Each method spawns a fresh `logosctl --json <subcommand>` subprocess and
 parses its output. When obtained via `LogosctlDaemon.client()`, the client
 is bound to a specific `config_dir` so it talks to that session's dial
 spec, not the user's global `~/.logosctl/`.
@@ -98,10 +98,6 @@ def _arg_to_str(arg: Any) -> str:
     (`[tstr]`, `[int]`, `[any]`, `{tstr:any}`) plus non-scalar `any`
     values pass as natural Python objects. Strings/numbers/bools are
     passed as-is for the CLI's type coercion.
-
-    Byte-identical to the logoscore encoding on purpose: both binaries
-    compile the same `src/client/commands/call_command.cpp`, so the
-    argument grammar is one contract, not two.
     """
     if isinstance(arg, Path):
         return f"@{arg}"

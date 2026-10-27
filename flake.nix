@@ -1,5 +1,5 @@
 {
-  description = "Python wrappers for the logoscore and logosctl CLIs — launch daemons, load modules, call methods, subscribe to events";
+  description = "Python wrapper for the logosctl CLI — launch daemons, load modules, call methods, subscribe to events";
 
   inputs = {
     logos-nix.url = "github:logos-co/logos-nix";
@@ -19,92 +19,27 @@
     in
     {
       # ── Packages ──────────────────────────────────────────────────────────
-      # `nix build` produces a Python wheel. The `logoscore` CLI is propagated
-      # so anyone using this package also has the binary on PATH.
+      # `nix build` produces the Python package, with `logosctl` propagated so
+      # anyone using it also has the binary on PATH.
       #
-      # `dockerBundle` / `dockerBundlePortable` (Linux only) prepare an
-      # `out/bundle` directory consumed by `tests/docker_smoke/Dockerfile`
-      # — the smoke image's stage-1 nix-build copies it into the
-      # ubuntu-based runtime stage. `logosctlDockerBundlePortable` does the
-      # same for `tests/logosctl/docker_smoke/Dockerfile`. The actual docker
-      # images are built by each directory's `build_smoke_image.sh`, not
-      # directly from these flake outputs.
+      # `logosctlDockerBundlePortable` (Linux only) is the `bin/ + modules/`
+      # tree `tests/logosctl/docker_smoke/Dockerfile` copies into its runtime
+      # stage; the daemon finds its built-in modules beside `bin/`. The image
+      # itself is built by that directory's `build_smoke_image.sh`.
       packages = forAllSystems ({ pkgs, system }:
         let
-          logoscoreBin = logos-logoscore-cli.packages.${system}.default;
+          logosctlBin = logos-logoscore-cli.packages.${system}.ctl;
           pythonPkg = pkgs.python3Packages.buildPythonPackage {
             pname = "logoscore";
             version = "0.1.0";
             format = "pyproject";
             src = ./.;
             nativeBuildInputs = [ pkgs.python3Packages.hatchling ];
-            # Only `logoscore` is propagated, even though the wheel now also
-            # ships the `logosctl` client. Propagating `ctl` would put both
-            # binaries on the critical path of `nix build` — the one output
-            # every consumer of this flake pulls. Anyone who wants logosctl
-            # takes it from `logos-logoscore-cli.packages.*.ctl` explicitly
-            # (the dev shell and the logosctl checks below do exactly that).
-            propagatedBuildInputs = [ logoscoreBin ];
+            propagatedBuildInputs = [ logosctlBin ];
             doCheck = false;
-            pythonImportsCheck = [ "logoscore" "logosctl" ];
+            pythonImportsCheck = [ "logosctl" ];
           };
 
-          # ── Docker bundles ─────────────────────────────────────────────
-          # The bundle is **just the logoscore CLI** plus whatever modules
-          # it ships with (currently capability_module, package_manager_module).
-          # No test modules — those get bind-mounted at runtime via
-          # `-v $modules_dir:/user-modules` and `-m /user-modules`. That
-          # makes the image reusable for anyone who wants to test their
-          # own module: pull the image, `docker run -v ./my-modules:/user-modules
-          # logoscore:smoke-dev daemon -m /user-modules …`.
-          #
-          # Two flavors:
-          #
-          #   * `dockerBundle` (dev) — uses `.#cli` (the default logoscore
-          #     package, which links against Qt/Boost/OpenSSL from the nix
-          #     store via rpath). Smaller bundle (~60 MB payload) but the
-          #     runtime image MUST ship the nix store so those rpaths
-          #     resolve, and the CLI's built-in modules are found via
-          #     LOGOS_BUNDLED_MODULES_DIR (set by `wrapQtAppsNoGuiHook`
-          #     when the CLI was built). This is the flavor the
-          #     `logoscore-py` dev shell matches.
-          #
-          #   * `dockerBundlePortable` — uses `.#cli-bundle-dir` (a
-          #     self-contained `bin/ + lib/ + modules/` tree with every
-          #     Qt dep + the CLI's built-in modules copied in). Larger
-          #     (~400 MB) but runs standalone — no nix store needed. The
-          #     CLI's built-in modules live at `/opt/logoscore/modules`
-          #     and are discovered by explicitly passing `-m
-          #     /opt/logoscore/modules` (no wrapper env var here).
-          #
-          # The Dockerfile picks one via `--build-arg FLAVOR=dev|portable`.
-          # The pytest suite parametrises over both flavors so regressions
-          # in either path surface in the smoke matrix.
-
-          logoscorePortable = logos-logoscore-cli.packages.${system}.cli-bundle-dir;
-
-          dockerBundle = pkgs.runCommand "logoscore-bundle-dev" { } ''
-            # Dev flavor: just the binary. rpath points into /nix/store
-            # (copied wholesale in Dockerfile stage 2), and the
-            # wrapped binary carries `LOGOS_BUNDLED_MODULES_DIR` baked
-            # in — pointing at the CLI's own modules dir in the store —
-            # so capability_module etc. resolve without extra `-m` flags.
-            mkdir -p $out/bin
-            cp ${logoscoreBin}/bin/logoscore $out/bin/
-          '';
-
-          dockerBundlePortable = pkgs.runCommand "logoscore-bundle-portable" { } ''
-            # Portable flavor: cli-bundle-dir is already a self-contained
-            # bin/ + lib/ + modules/ tree — the CLI's own built-in
-            # modules live under its modules/ subdir. Copy it as-is.
-            mkdir -p $out
-            cp -r ${logoscorePortable}/* $out/
-            chmod -R u+w $out
-          '';
-
-          # The portable flavor for `tests/logosctl/docker_smoke/Dockerfile`:
-          # a `bin/ + modules/` tree; the daemon finds its built-in modules
-          # beside `bin/`.
           logosctlPortable = logos-logoscore-cli.packages.${system}.ctl-bundle-dir;
 
           logosctlDockerBundlePortable = pkgs.runCommand "logosctl-bundle-portable" { } ''
@@ -115,69 +50,39 @@
         in {
           default              = pythonPkg;
           logoscore-py         = pythonPkg;
-          dockerBundle         = dockerBundle;
-          dockerBundlePortable = dockerBundlePortable;
           logosctlDockerBundlePortable = logosctlDockerBundlePortable;
         }
       );
 
       # ── Dev shell ─────────────────────────────────────────────────────────
-      # `nix develop` drops you into a shell with python + pytest + logoscore
-      # + a pre-built test_fullapi_cpp install tree, so `pytest` just works
-      # without any extra environment setup. The nix `integration` check
-      # sets the same two env vars, so the dev shell matches CI behaviour.
+      # `nix develop` drops you into a shell with python + pytest + logosctl
+      # + a pre-built test_fullapi_cpp install tree, so `pytest` runs the
+      # integration suite too. The `integration-*` checks set the same vars.
       devShells = forAllSystems ({ pkgs, system }:
         let
-          logoscoreBin             = logos-logoscore-cli.packages.${system}.default;
-          # Both binaries are on PATH here so a plain `pytest` covers both
-          # suites — tests/logosctl skips silently when LOGOSCTL_BIN is unset,
-          # which would make the new suite look green while never running.
-          logosctlBin              = logos-logoscore-cli.packages.${system}.ctl;
+          logosctlBin        = logos-logoscore-cli.packages.${system}.ctl;
           # `test_fullapi_cpp` (universal C++) is the single test module the
           # suite loads — its methods + typed events span the whole
-          # parameter/return/event surface. `.install` lays out
-          # modules/<name>/… ready for the daemon's `-m` flag.
-          testModulesInstall         = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
-          testModulesInstallPortable = logos-test-modules.modules.${system}.test_fullapi_cpp.install-portable;
+          # parameter/return/event surface.
+          testModulesInstall = logos-test-modules.modules.${system}.test_fullapi_cpp.install;
         in {
         default = pkgs.mkShell {
           packages = [
             (pkgs.python3.withPackages (ps: [ ps.pytest ]))
-            logoscoreBin
             logosctlBin
           ];
 
-          # Integration tests skip when these are unset (by design, so
-          # `pytest` on a plain Python env doesn't try to spawn daemons).
-          # Exporting them here means the dev shell exercises the full
-          # suite out of the box.
-          #
-          # Two module-dir vars because the docker smoke flavors differ:
-          # the `dev` image has /nix/store so `.install` modules (which
-          # rpath into the store) work; the `portable` image is standalone
-          # so we need `.install-portable` (self-contained). The docker
-          # smoke fixture picks the right one per flavor.
-          LOGOSCORE_BIN                       = "${logoscoreBin}/bin/logoscore";
-          LOGOSCORE_TEST_MODULES_DIR          = "${testModulesInstall}/modules";
-          LOGOSCORE_TEST_MODULES_DIR_PORTABLE = "${testModulesInstallPortable}/modules";
-
-          # The logosctl suite reads its own pair of variables (its conftest
-          # rebinds `test_modules_dir` to LOGOSCTL_TEST_MODULES_DIR) so a
-          # machine can point the two suites at different builds. Here they
-          # are the same modules — the module ABI is shared, only the CLI differs.
-          LOGOSCTL_BIN                        = "${logosctlBin}/bin/logosctl";
-          LOGOSCTL_TEST_MODULES_DIR           = "${testModulesInstall}/modules";
+          # tests/logosctl/conftest.py skips the integration suite when these
+          # are unset, so `pytest` on a plain Python env doesn't spawn daemons.
+          LOGOSCTL_BIN              = "${logosctlBin}/bin/logosctl";
+          LOGOSCTL_TEST_MODULES_DIR = "${testModulesInstall}/modules";
 
           shellHook = ''
             echo "logos-logoscore-py dev shell"
-            echo "  python:                                  $(python --version)"
-            echo "  logoscore:                               $(logoscore --version 2>/dev/null || echo 'not on PATH')"
-            echo "  logosctl:                                $(logosctl --version 2>/dev/null || echo 'not on PATH')"
-            echo "  LOGOSCORE_BIN:                           $LOGOSCORE_BIN"
-            echo "  LOGOSCORE_TEST_MODULES_DIR (dev):        $LOGOSCORE_TEST_MODULES_DIR"
-            echo "  LOGOSCORE_TEST_MODULES_DIR_PORTABLE:     $LOGOSCORE_TEST_MODULES_DIR_PORTABLE"
-            echo "  LOGOSCTL_BIN:                            $LOGOSCTL_BIN"
-            echo "  LOGOSCTL_TEST_MODULES_DIR:               $LOGOSCTL_TEST_MODULES_DIR"
+            echo "  python:                    $(python --version)"
+            echo "  logosctl:                  $(logosctl --version 2>/dev/null || echo 'not on PATH')"
+            echo "  LOGOSCTL_BIN:              $LOGOSCTL_BIN"
+            echo "  LOGOSCTL_TEST_MODULES_DIR: $LOGOSCTL_TEST_MODULES_DIR"
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
           '';
         };
@@ -186,11 +91,6 @@
       # ── Checks ────────────────────────────────────────────────────────────
       # `nix flake check` runs the unit tests (no daemon required) and the
       # integration test suite against a real CLI + test modules.
-      #
-      # Both suites exist twice, once per client: `unit` / `integration-*`
-      # drive `logoscore`, `unit-logosctl` / `integration-logosctl-*` drive
-      # `logosctl`. Separate derivations throughout, never one derivation
-      # looping over both — see the `unit-logosctl` comment.
       #
       # The integration suite is replicated across three transports so a
       # regression in tcp framing or tcp_ssl handshaking surfaces at the
@@ -202,14 +102,9 @@
       checks = forAllSystems ({ pkgs, system }:
         let
           python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
-          logoscoreBin = logos-logoscore-cli.packages.${system}.default;
-          # Same repo, sibling output: `ctl` ships alongside `default`/
-          # `cli` since logos-logoscore-cli#76. Referenced only from the
-          # `*-logosctl` checks below so a logosctl hiccup cannot redden a
-          # logoscore check's evaluation path either.
           logosctlBin = logos-logoscore-cli.packages.${system}.ctl;
           # `.install` lays out modules/<name>/<name>_plugin.{so,dylib} +
-          # manifest.json — the layout logoscore's `-m` flag expects.
+          # manifest.json — the layout a daemon `modules_dirs` entry expects.
           # `test_fullapi_cpp` (universal C++) is the single test module the
           # integration suite loads; its methods + typed events span the
           # whole parameter/return/event surface.
@@ -245,39 +140,10 @@
             logos-test-modules.modules.${system}.test_fullapi_ext_qtproxy.install;
 
           # Helper: run the integration suite once with the given
-          # `--transport` value. Same env wiring as the unit check
-          # plus openssl (needed by the `self_signed_cert` fixture
-          # for `tcp_ssl`; harmless for `local` / `tcp`).
+          # `--transport` value. openssl is for the `self_signed_cert`
+          # fixture (`tcp_ssl`); harmless for `local` / `tcp`.
           mkIntegration = transport: pkgs.runCommand
             "logoscore-py-integration-tests-${transport}" {
-              nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
-                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
-            } ''
-              cp -r ${./.}/. .
-              chmod -R +w .
-              export QT_QPA_PLATFORM=offscreen
-              export QT_FORCE_STDERR_LOGGING=1
-              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-                export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
-              ''}
-              export PYTHONPATH=$PWD/src
-              export LOGOSCORE_BIN=${logoscoreBin}/bin/logoscore
-              export LOGOSCORE_TEST_MODULES_DIR=${testModulesInstall}/modules
-              # Run from a writable HOME so any stray ~/.logoscore writes are isolated.
-              export HOME=$PWD/home
-              mkdir -p $HOME
-              ${python}/bin/pytest tests/integration -v --transport=${transport}
-              touch $out
-            '';
-
-          # Helper: the same thing for the logosctl suite. A sibling rather
-          # than a `binary:`/`suite:` parameter on `mkIntegration`, for the
-          # reason the two test trees are duplicated in the first place — the
-          # two CLIs configure a daemon through different mechanisms, and
-          # retiring logoscore should be a delete, not an untangle. The two
-          # helpers drifting apart is expected, not a smell.
-          mkIntegrationLogosctl = transport: pkgs.runCommand
-            "logosctl-py-integration-tests-${transport}" {
               nativeBuildInputs = [ python logosctlBin pkgs.openssl ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
@@ -320,33 +186,9 @@
             # guard: pointed at the table it found two boundaries pinned inline
             # and absent from cases.json.
             export LOGOS_CONFORMANCE_DIR=${logos-test-modules}/conformance
-            ${python}/bin/pytest tests/unit -v
-            touch $out
-          '';
-
-          # ── logosctl ────────────────────────────────────────────────────
-          # A parallel suite for the parallel client, in its own derivations
-          # so nix builds it concurrently with the logoscore ones and a red
-          # logosctl cannot mask a logoscore regression. Dropping logosctl
-          # later is deleting these four attributes, `mkIntegrationLogosctl`,
-          # `logosctlBin`, and the `logosctl*` bindings and outputs in
-          # `packages`.
-          #
-          # Deliberately NOT duplicated: the conformance matrix. It measures
-          # the LIDL type contract, which lives in the runtime both binaries
-          # embed — replaying the whole matrix through a second CLI would
-          # double the longest job in the flake for no signal the first run
-          # does not already carry.
-          unit-logosctl = pkgs.runCommand "logosctl-py-unit-tests" {
-            nativeBuildInputs = [ python ];
-          } ''
-            cp -r ${./.}/. .
-            chmod -R +w .
-            export PYTHONPATH=$PWD/src
-            # No LOGOSCTL_BIN: these tests drive a fake binary and assert on
-            # argv, env and the generated config documents. Nothing here
-            # spawns a daemon, which is why they run without the CLI closure.
-            ${python}/bin/pytest tests/logosctl/unit -v
+            # No LOGOSCTL_BIN: the client tests drive a fake binary and assert
+            # on argv, env and the generated config documents.
+            ${python}/bin/pytest tests/unit tests/logosctl/unit -v
             touch $out
           '';
 
@@ -375,7 +217,7 @@
           # external requests, publishable to Pages the way the doctest
           # harness's report already is.
           conformance-matrix = pkgs.runCommand "logoscore-py-conformance-matrix" {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+            nativeBuildInputs = [ python logosctlBin pkgs.openssl ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -389,7 +231,7 @@
             export HOME=$PWD/home
             mkdir -p $HOME $out
             ${python}/bin/python conformance/run_matrix.py \
-              --logoscore ${logoscoreBin}/bin/logoscore \
+              --logosctl ${logosctlBin}/bin/logosctl \
               --cases   ${logos-test-modules}/conformance/cases.json \
               --known   ${logos-test-modules}/conformance/known.json \
               --contract ${logos-test-modules}/test-fullapi-proxy-module-rust/full_api.lidl \
@@ -415,7 +257,7 @@
           # given explicitly (fifth field of --proxy-consumer): the driver's
           # default is `echoInt`, which full_api_ext does not have.
           conformance-matrix-ext = pkgs.runCommand "logoscore-py-conformance-matrix-ext" {
-            nativeBuildInputs = [ python logoscoreBin pkgs.openssl ]
+            nativeBuildInputs = [ python logosctlBin pkgs.openssl ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
           } ''
             cp -r ${./.}/. .
@@ -429,7 +271,7 @@
             export HOME=$PWD/home
             mkdir -p $HOME $out
             ${python}/bin/python conformance/run_matrix.py \
-              --logoscore ${logoscoreBin}/bin/logoscore \
+              --logosctl ${logosctlBin}/bin/logosctl \
               --cases   ${logos-test-modules}/conformance/ext-cases.json \
               --known   ${logos-test-modules}/conformance/known-ext.json \
               --contract ${logos-test-modules}/test-fullapi-ext-module-rust/rust-lib/test_fullapi_ext_rust.lidl \
@@ -487,12 +329,6 @@
           integration-local   = mkIntegration "local";
           integration-tcp     = mkIntegration "tcp";
           integration-tcp_ssl = mkIntegration "tcp_ssl";
-
-          # Same three transports, driven through logosctl. Split the same way
-          # and for the same reasons.
-          integration-logosctl-local   = mkIntegrationLogosctl "local";
-          integration-logosctl-tcp     = mkIntegrationLogosctl "tcp";
-          integration-logosctl-tcp_ssl = mkIntegrationLogosctl "tcp_ssl";
 
           # Back-compat alias — equivalent to `integration-local`. Kept
           # so anyone with `nix build .#checks.<system>.integration` in

@@ -3,13 +3,6 @@
 These tests verify the wrapper's argv construction, env propagation, JSON
 parsing, and exit-code → exception mapping — without needing a real
 `logosctl` binary.
-
-DELIBERATE DUPLICATE of tests/unit/test_client_with_fake.py — do not
-refactor the two into one suite. They assert different command lines
-(`module ls` vs `list-modules`), different env vars, and a different
-transport story; sharing them would mean parametrizing over the very
-differences that are the point. Retiring logoscore should be a delete of
-src/logoscore/ + tests/unit/, not an unpick.
 """
 from __future__ import annotations
 

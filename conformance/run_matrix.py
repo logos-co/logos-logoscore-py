@@ -24,7 +24,7 @@ Four things keep it honest:
     structural guard against a 31-method contract with 6 assertions.
 
 Usage:
-    run_matrix.py --cpp-modules DIR --rust-modules DIR [--logoscore BIN]
+    run_matrix.py --cpp-modules DIR --rust-modules DIR [--logosctl BIN]
                   [--proxy-consumer LABEL=MODULE=DIR[=sync|async[=PROBE]]]
                   [--contract full_api.lidl] [--jsonl out.jsonl] [--quiet]
                   [--report out.html] [--report-text] [--md known.md]
@@ -617,7 +617,7 @@ def matches(got: Result, want, raw: bool = False) -> bool:
 
 
 def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeout: float):
-    from logoscore.errors import LogoscoreError, MethodError
+    from logosctl.errors import LogosctlError, MethodError
 
     out: dict[str, Result] = {}
     for case in cases:
@@ -641,7 +641,7 @@ def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeou
             # and no change to any C++ repo could ever have moved them.
             r = Result(value=client.call(
                 module, case["method"], *args, timeout=t, decode_bytes=not raw))
-        except (MethodError, LogoscoreError) as e:
+        except (MethodError, LogosctlError) as e:
             r = Result(error=error_code_of(e))
         except Exception as e:
             # An adversarial payload can HANG the call rather than fail it (the
@@ -664,7 +664,7 @@ def run_methods(client, consumer: "Consumer", provider: str, cases: list, timeou
 
 
 def run_events(client, consumer: "Consumer", provider: str, events: list, timeout: float):
-    from logoscore.errors import LogoscoreError, MethodError
+    from logosctl.errors import LogosctlError, MethodError
 
     module = consumer.target(provider)
     out: dict[str, Result] = {}
@@ -675,7 +675,7 @@ def run_events(client, consumer: "Consumer", provider: str, events: list, timeou
         try:
             out[ev["id"]] = Result(value=capture_event(
                 client, module, ev["event"], ev["fire"], values, timeout))
-        except (MethodError, LogoscoreError) as e:
+        except (MethodError, LogosctlError) as e:
             out[ev["id"]] = Result(error=error_code_of(e))
         except Exception as e:
             out[ev["id"]] = Result(error=type(e).__name__)
@@ -706,7 +706,7 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
     import threading
     import time
 
-    from logoscore.errors import LogoscoreError, MethodError
+    from logosctl.errors import LogosctlError, MethodError
 
     received: list = []
     got = threading.Event()
@@ -722,7 +722,7 @@ def capture_event(client, module: str, event: str, fire: str, values: list, time
             sub = client.on_event(module, event, on_event)
             sub.__enter__()
             break
-        except (MethodError, LogoscoreError):
+        except (MethodError, LogosctlError):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.25)
@@ -758,7 +758,7 @@ def main() -> int:
     ap.add_argument("--rust-modules")
     ap.add_argument("--modules", action="append", default=[],
                     metavar="NAME=DIR", help="provider module dir; repeatable")
-    ap.add_argument("--logoscore", default=os.environ.get("LOGOSCORE_BIN", "logoscore"))
+    ap.add_argument("--logosctl", default=os.environ.get("LOGOSCTL_BIN", "logosctl"))
     # The table lives in logos-test-modules/conformance/; the flake points at
     # it through the store path of that input.
     conformance = os.environ.get("LOGOS_CONFORMANCE_DIR", str(HERE))
@@ -798,7 +798,7 @@ def main() -> int:
                     help="never colourise the terminal report")
     args = ap.parse_args()
 
-    from logoscore import LogoscoreDaemon
+    from logosctl import LogosctlDaemon
 
     table = json.loads(Path(args.cases).read_text())
     known = json.loads(Path(args.known).read_text())
@@ -854,7 +854,7 @@ def main() -> int:
         for provider in modules:
             key = (consumer.label, provider)
             measured[key] = {}
-            # One daemon per PHASE. Every event subscription spawns a `logoscore
+            # One daemon per PHASE. Every event subscription spawns a `logosctl
             # watch` subprocess; sharing a daemon with the ~80-call method phase
             # wedged it partway through the events (the last five failed
             # contiguously with RPC_FAILED under the nix sandbox, and every one of
@@ -880,9 +880,9 @@ def main() -> int:
             phases += [(run_methods, [c]) for c in cases if c.get("isolate")]
             phases += [(run_events, events)]
             for runner, work in phases:
-                with LogoscoreDaemon(
+                with LogosctlDaemon(
                         modules_dir=consumer.modules_dirs(modules),
-                        binary=args.logoscore) as daemon:
+                        binary=args.logosctl) as daemon:
                     client = daemon.client()
                     try:
                         consumer.prepare(client, provider, args.timeout)
@@ -1093,7 +1093,7 @@ def main() -> int:
         by_case=by_case, rows=rows, diffs=diffs, counts=counts, known=known,
         declared_cells=declared_cells, table=table, norm_type=norm_type,
         paths={"cases": args.cases, "known": args.known,
-               "contract": args.contract, "logoscore": args.logoscore})
+               "contract": args.contract, "logosctl": args.logosctl})
     color = False if args.no_color else None
     if args.report:
         Path(args.report).write_text(matrix_report.render_html(payload))

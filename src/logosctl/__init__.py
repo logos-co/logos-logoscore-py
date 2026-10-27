@@ -4,18 +4,14 @@ Launch a `logosctl` daemon, load modules, call methods, and subscribe to
 events from Python. Internally spawns `logosctl` subprocesses and parses
 their JSON output.
 
-This is the sibling of the `logoscore` package, covering the new grouped
-CLI surface (`module ls`, `token issue`, `daemon start`, …). The public
-shape is deliberately the same — same modules, same methods, same
-arguments — with one structural difference a logoscore reader has to know
-about: logosctl has no configuration flags. Module directories, the
+logosctl has no configuration flags. Module directories, the
 persistence path, per-module listeners and the client's dial spec are YAML
 documents installed into the session with `daemon config set` /
 `client config set` before the daemon starts. `LogosctlDaemon` and
 `LogosctlClient.write_config` write them for you; the only per-call knobs
 left are the config dir and the token.
 
-Two daemon lifecycle flavors, matching the logoscore package:
+Two daemon lifecycle flavors:
 
 * `LogosctlDaemon` — spawns a local `logosctl` subprocess. Use this when
   you want in-process-parent tests and fast iteration.

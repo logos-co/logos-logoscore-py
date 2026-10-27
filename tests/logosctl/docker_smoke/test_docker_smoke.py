@@ -1,9 +1,5 @@
 """Docker smoke tests — daemon in a container, client on the host, over TCP.
 
-Deliberate duplicate of `tests/docker_smoke/test_docker_smoke.py`: that file
-drives the `logoscore` CLI, this one drives `logosctl`. See
-`tests/logosctl/__init__.py`.
-
 Three scenarios:
 
 1. **Single-container, full API** — one daemon in docker; every echo method

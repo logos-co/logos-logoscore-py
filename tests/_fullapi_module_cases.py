@@ -14,11 +14,11 @@ Structure:
     `fire<X>Event(value)` emits `<X>Event` whose `data.arg0 == value`.
 
 Kept parallel to the inline assertions in
-`tests/integration/test_fullapi_module_cpp.py` so the two drift together;
+`tests/logosctl/integration/test_fullapi_module_cpp.py` so the two drift together;
 `FULLAPI_EVENT_CASES` is imported directly by that file (single source).
 
 `bytes` args/returns cross the wire as the canonical `{"_bytes":"<b64url>"}`
-tag (see `LogoscoreClient._arg_to_str` / `_proc.decode_bytes_tags`), so
+tag (see `logosctl.client._arg_to_str` / `_proc.decode_bytes_tags`), so
 every byte value round-trips. Float cases use exactly-representable values
 so a plain `==` holds across both codecs (no approximate compare needed).
 

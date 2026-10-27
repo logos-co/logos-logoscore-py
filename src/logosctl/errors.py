@@ -7,9 +7,8 @@ Exit code contract (from logos-logoscore-cli README):
     3 — module error (not found, load/unload failed)
     4 — method error (not found, call failed, timeout)
 
-Unchanged from `logoscore`: the two binaries compile the same
-`src/client/commands/*.cpp`, so `ensureConnected` still returns 2, the
-module commands 3, and `call` 4 (3 when the module itself is missing).
+`ensureConnected` returns 2, the module commands 3, and `call` 4 (3 when
+the module itself is missing).
 
 
 `code` vs `detail_code`. The envelope carries TWO codes on a failed call and

@@ -1,7 +1,3 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Part of the logosctl half of the suite — a deliberate duplicate of the
-# logoscore fixtures, not a shared abstraction. See tests/logosctl/__init__.py.
-# ─────────────────────────────────────────────────────────────────────────────
 """Shared hook + fixtures for all logosctl docker-smoke test files.
 
 The `docker_flavor` fixture is injected via `pytest_generate_tests` so
