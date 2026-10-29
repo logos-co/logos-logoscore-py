@@ -10,10 +10,6 @@ jobs:
   test:
     # ATTIC_TOKEN_PUBLIC only exists in the public-cache environment.
     environment: ${{ github.ref == 'refs/heads/master' && 'public-cache' || '' }}
-    # The `logoscore` client. Its logosctl twin is a SEPARATE job below, not
-    # extra steps here, so the two signals can never mask each other: the new
-    # CLI is still being validated and a red logosctl run must leave this job's
-    # verdict on logoscore untouched.
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +48,7 @@ jobs:
       # surfaces under its own name in the workflow log.
       #
       # Why sequential rather than a third matrix axis: the heavy
-      # cost of these jobs is the upstream nix build (logoscore CLI +
+      # cost of these jobs is the upstream nix build (logosctl CLI +
       # test modules). Each matrix entry would re-pull / re-realise
       # the same closure on a cold runner. Running all three transports
       # in one job amortises that closure across them.
@@ -65,102 +61,20 @@ jobs:
       - name: Run integration tests (tcp_ssl)
         run: nix build '.#checks.${{ matrix.arch }}.integration-tcp_ssl' --print-build-logs
 
-      # Docker smoke tests live in their own directory (`tests/docker_smoke/`)
-      # rather than under `tests/integration/`, because they can't run
-      # inside the nix sandbox (no docker socket). Separating them
-      # physically keeps the `integration` nix check clean — no silent
-      # skips — and makes this CI step the *only* place they run.
+      # Docker smoke tests live in their own directory
+      # (`tests/logosctl/docker_smoke/`) because they can't run inside the nix
+      # sandbox (no docker socket), so this is the only place they run.
       #
-      # Step 1 builds the `logoscore:smoke-portable` image (a multi-stage
-      # `docker build` that internally runs `nix build` inside a
-      # `nixos/nix` container — no dependency on the host's nix).
-      # Step 2 runs pytest via `nix develop` so python + pytest are on
-      # PATH and PYTHONPATH points at the local `logoscore` source tree.
-      # Defaults to FLAVOR=portable / --docker-flavor=portable — that's
-      # the self-contained cli-bundle-dir shape that matches how released
-      # logoscore binaries are distributed, so it's the most realistic
-      # smoke. `dev` is still available via FLAVOR=dev on the build step
-      # and --docker-flavor=dev on pytest.
+      # Step 1 builds the `logosctl:smoke-portable` image (a multi-stage
+      # `docker build` that runs `nix build` inside a `nixos/nix` container).
+      # Step 2 runs pytest via `nix develop` so python + pytest are on PATH
+      # and PYTHONPATH points at the local source tree.
       #
-      # buildx is set up before the build so the GHA cache backend
-      # (`type=gha`) can be used. Without it, `docker buildx build`
-      # falls back to the default `docker` driver which doesn't talk
-      # to GHA. The `BUILDX_CACHE_*` env vars on the build step tell
-      # `build_smoke_image.sh` to forward `--cache-from` / `--cache-to`
-      # — see the script's preamble for the protocol.
-      #
-      # `mode=max` (vs `min`) exports cache for every intermediate
-      # layer, not just the final one. The expensive layer here is
-      # `RUN nix build` inside the build stage; we want that cached
-      # so the next CI run skips ~5 min of nix work whenever
-      # flake.nix / flake.lock / src/ haven't changed.
+      # buildx is set up first so the GHA cache backend (`type=gha`) works;
+      # `mode=max` caches the expensive in-image `nix build` layer too.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build docker smoke image
-        env:
-          BUILDX_CACHE_FROM: type=gha
-          BUILDX_CACHE_TO: type=gha,mode=max
-        run: ./tests/docker_smoke/build_smoke_image.sh
-
-      - name: Run docker smoke tests
-        run: |
-          nix develop --command pytest tests/docker_smoke -v
-
-  # ── logosctl ──────────────────────────────────────────────────────────────
-  # The second client, driving the `logosctl` binary (`.#ctl` in the CLI
-  # flake). Its own job so it runs in parallel with `test` on its own runner
-  # and fails on its own name — see the note at the top of `test`.
-  #
-  # It IS a gate, not `continue-on-error`: the whole point of shipping the two
-  # clients side by side is to find out whether the new one holds up, and a
-  # suite nobody has to fix measures nothing. Branch protection is the place
-  # to decide whether it blocks a merge, not this file.
-  test-logosctl:
-    # ATTIC_TOKEN_PUBLIC only exists in the public-cache environment.
-    environment: ${{ github.ref == 'refs/heads/master' && 'public-cache' || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64-linux
-            runner: ubuntu-latest
-          - arch: aarch64-linux
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Nix and set up cache
-        uses: logos-co/setup-nix-cache-action@v1
-        with:
-          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
-          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
-          extra-nix-config: |
-            experimental-features = nix-command flakes
-
-      - name: Run unit tests (logosctl)
-        run: nix build '.#checks.${{ matrix.arch }}.unit-logosctl' --print-build-logs
-
-      # Three transports, sequential within the one job — same trade as the
-      # logoscore job above: the dominant cost is realising the CLI + test
-      # module closure once, which a third matrix axis would pay per entry.
-      - name: Run integration tests (logosctl, local)
-        run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-local' --print-build-logs
-
-      - name: Run integration tests (logosctl, tcp)
-        run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-tcp' --print-build-logs
-
-      - name: Run integration tests (logosctl, tcp_ssl)
-        run: nix build '.#checks.${{ matrix.arch }}.integration-logosctl-tcp_ssl' --print-build-logs
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # The cache scope keeps this job's layers from overwriting the `test`
-      # job's, which uses the default scope.
       - name: Build docker smoke image
         env:
           BUILDX_CACHE_FROM: type=gha,scope=logosctl-smoke-${{ matrix.arch }}

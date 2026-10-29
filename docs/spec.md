@@ -1,32 +1,34 @@
-# logoscore-py Specification
+# logos-logoscore-py Specification
 
 ## Overview
 
-`logoscore-py` is a Python control surface for the **logoscore daemon** — the
-headless runtime that hosts Logos modules and exposes their methods and events
-over RPC. It lets a Python program launch a daemon, load modules into it, call
-methods, subscribe to events, and provision authentication tokens, all without
-hand-writing subprocess invocations or parsing CLI text.
+`logos-logoscore-py` (the `logosctl` Python package) is a Python control surface for
+the **logosctl daemon** — the headless runtime that hosts Logos modules and exposes
+their methods and events over RPC. It lets a Python program launch a daemon, load
+modules into it, call methods, subscribe to events, and provision authentication
+tokens, all without hand-writing subprocess invocations or parsing CLI text.
 
 It exists for one primary audience: **test suites and automation tooling** that
 need to drive a *real* Logos runtime from Python. A module author wants to smoke-test
 a freshly built plugin against a genuine distribution of the daemon; a CI pipeline
 wants to exercise the full wire stack (local socket, TCP, TCP+TLS; JSON and CBOR
 codecs) end-to-end; an orchestration script wants several daemons running side by
-side, possibly across container boundaries. `logoscore-py` is the layer that makes
+side, possibly across container boundaries. The wrapper is the layer that makes
 those journeys ordinary Python — context managers, method calls, callbacks, and
 exceptions — instead of shell plumbing.
 
-Conceptually it is a **thin client over the logoscore command surface**: every
-operation it offers corresponds to a logoscore command, and every value it returns
+Conceptually it is a **thin client over the logosctl command surface**: every
+operation it offers corresponds to a logosctl command, and every value it returns
 is the daemon's own structured response. It introduces no new module-management
 semantics of its own — it adopts the daemon's behavior, exit-code contract, and
 data shapes wholesale, and presents them with Python ergonomics. What it adds is
 *lifecycle orchestration* (spawning and tearing down daemons in isolated state,
-locally or in containers), *connection management* (expressing how to dial a
-daemon whose well-known modules live on separate listeners), and *idiomatic
-surfacing* (typed exceptions, background-threaded event delivery, argument and
-result conversion at the language boundary).
+locally or in containers), *configuration authoring* (producing the documents the
+daemon and its clients read, since the command surface takes no configuration
+flags), *connection management* (expressing how to dial a daemon whose well-known
+modules live on separate listeners), and *idiomatic surfacing* (typed exceptions,
+background-threaded event delivery, argument and result conversion at the language
+boundary).
 
 ### Where it sits in the platform
 
@@ -35,12 +37,12 @@ result conversion at the language boundary).
             │
             ▼
    ┌──────────────────────┐
-   │     logoscore-py     │   launch · load · call · watch · tokens
+   │  logosctl (Python)   │   configure · launch · load · call · watch · tokens
    └──────────┬───────────┘
               │  drives the command surface, parses structured responses
               ▼
    ┌──────────────────────┐
-   │   logoscore daemon   │   headless module runtime
+   │   logosctl daemon    │   headless module runtime
    └──────────┬───────────┘
               │  hosts Logos modules, RPC over local socket / TCP / TCP+TLS
               ▼
@@ -51,7 +53,7 @@ result conversion at the language boundary).
 
 The daemon (`logos-logoscore-cli`) is the CLI runtime over the Logos core library;
 the modules it hosts are the same process-isolated plugins built across the Logos
-platform. `logoscore-py` is a *frontend-edge* component — it neither links the core
+platform. The wrapper is a *frontend-edge* component — it neither links the core
 nor speaks the RPC protocol itself; it commands the daemon, which does both.
 
 ### Design principles
@@ -59,9 +61,10 @@ nor speaks the RPC protocol itself; it commands the daemon, which does both.
 | Principle | What it means here |
 |-----------|--------------------|
 | **No new semantics** | Every capability mirrors a daemon command. Behavior, return shapes, and failure modes are the daemon's; the wrapper does not reinterpret them. |
-| **Isolation by default** | A spawned daemon gets its own private configuration scope, so concurrent daemons never collide and nothing leaks into the developer's global state. |
+| **Isolation by default** | A spawned daemon gets its own private session, so concurrent daemons never collide and nothing leaks into the developer's global state. |
+| **Configuration is a document** | Everything that sets a daemon up — module directories, persistence, listeners — is a configuration document installed into the session before the daemon starts, never a command-line option. |
 | **Connection is per-module** | A daemon serves two well-known modules on *separate* listeners. The wrapper always describes a connection per module, never as a single collapsed endpoint. |
-| **Disk config is authoritative for the general case** | Reaching a multi-listener or remote daemon is expressed as an on-disk connection description, because a single uniform endpoint override cannot represent two modules on two ports. |
+| **The connection description is the only dial input** | Which daemon a client reaches is decided by an on-disk connection description alone; there is no per-invocation override, so retargeting a client means writing a different description. |
 | **Idiomatic surfacing** | Lifecycle is a context manager; failures are typed exceptions keyed off the daemon's exit-code contract; events arrive on a background thread via a callback. |
 
 ---
@@ -72,21 +75,23 @@ nor speaks the RPC protocol itself; it commands the daemon, which does both.
 
 | Term | Definition |
 |------|------------|
-| **logoscore daemon** | The headless runtime process that hosts Logos modules and exposes them over RPC. `logoscore-py` launches and/or dials it; it is the authority for all module operations. |
+| **logosctl daemon** | The headless runtime process that hosts Logos modules and exposes them over RPC. The wrapper launches and/or dials it; it is the authority for all module operations. |
+| **Session** | The configuration scope a daemon and its clients act on: a directory holding the daemon's configuration and runtime state, the client's connection description, tokens, and logs. Selected per invocation; a user-wide default exists. |
+| **Daemon configuration** | The document that sets a daemon up: which directories to scan for modules, where module persistence lives, which listeners each well-known module opens, and declarations such as accepting plaintext TCP on a non-loopback address. Installed into the session before the daemon boots; the daemon validates it and rejects unknown keys by name. |
 | **Module** | A process-isolated Logos plugin hosted by the daemon. Its public surface is a set of invokable methods (and the events it emits). |
 | **Well-known modules** | Two modules the daemon always serves — **`core_service`** (the management gateway: load/unload, status, proxied method calls) and **`capability_module`** (the authorization handshake). Each is served on its *own* listener, which is why a connection must be described per module. |
 | **Invokable method** | A method a module exposes for remote invocation. Calling one is the core "do something" operation; arguments are positional and the daemon returns the method's result value. |
 | **Event** | A fire-and-forget message a module emits. A subscription streams events as they occur. |
-| **Connection description** | The per-module dial specification: for each well-known module, which transport, host, port, and codec to use. This is the authoritative way to reach a daemon, especially when its modules bound different ports. |
-| **Daemon endpoint** | One module's slice of a connection description — a single (transport, host, port, codec, verify-peer) tuple. |
+| **Connection description** | The per-module dial specification: for each well-known module, which transport, host, port, and codec to use (plus, for TLS, the CA to trust and whether to verify the peer), and which token file to present. The only input that decides which daemon a client reaches. |
+| **Daemon endpoint** | One module's slice of a connection description — a single (transport, host, port, codec, verify-peer, CA) tuple. |
 | **Runtime-state signal** | The daemon publishes its live runtime state (instance identity, resolved listener endpoints) once it has finished binding. Its appearance is the readiness signal the wrapper waits for before declaring a daemon up. |
-| **Token** | A signed credential the daemon issues per authorized client; the daemon validates an RPC connection against it. The daemon stores only a hash at rest; the raw value is handed to the client once. |
-| **Transport** | How a connection is carried: a same-host **local** socket (the default), plaintext **TCP**, or **TCP with TLS**. |
+| **Token** | A signed credential the daemon issues per authorized client; the daemon validates an RPC connection against it. The daemon stores only a hash at rest; the raw value is handed to the client once. A token may expire, and may be restricted to the local transport. |
+| **Transport** | How a connection is carried: a same-host **local** socket (the default, always present), plaintext **TCP**, or **TCP with TLS**. |
 | **Codec** | The wire encoding for a network transport: **JSON** (debuggable, default) or **CBOR** (compact). |
 | **Subscription** | A live event stream from a module, delivered to a callback on a background thread until cancelled. |
 | **Tagged-bytes form** | The platform's canonical encoding for binary values crossing the JSON boundary. Byte arrays travel as a tagged object and are decoded back to raw bytes exactly once, at the client boundary. |
 | **Structured result wrapper** | A common module return shape — `success` / `value` / `error` — used by methods that report ok-or-error outcomes. The same shape is returned regardless of which transport carried the call. |
-| **Image flavor** | For containerized daemons, the packaging of the daemon image: **portable** (self-contained, matches released binaries) vs **dev** (linked against an external store). User modules supplied to a containerized daemon must match the image's flavor. |
+| **Image flavor** | For containerized daemons, the packaging of the daemon image. The image is built **portable** (self-contained, matches released binaries); user modules supplied to it must be built in the same flavor. |
 
 ### The two well-known modules and why connection is per-module
 
@@ -110,51 +115,69 @@ well-known module. This constraint shapes every connection-related feature below
 
 The system offers three ways to obtain a usable connection to a daemon:
 
-1. **Launch a local daemon.** Spawn a daemon as a managed local process with its
-   own isolated configuration scope, so multiple daemons can coexist without
-   collision and the developer's global state is never touched. The lifecycle is a
-   context manager: entering it starts the daemon and waits until it is ready;
-   leaving it shuts the daemon down cleanly and removes any state directory the
-   wrapper created.
+1. **Launch a local daemon.** Install a configuration into a private session, then
+   spawn a daemon as a managed local process in it, so multiple daemons can coexist
+   without collision and the developer's global state is never touched. The lifecycle
+   is a context manager: entering it configures and starts the daemon and waits until
+   it is ready; leaving it shuts the daemon down cleanly and removes any session
+   directory the wrapper created.
 
 2. **Launch a containerized daemon.** Run the daemon inside a container and dial it
    over forwarded network ports — the right choice for testing against a real
    distributed build, or when the daemon must be reachable from multiple processes.
-   The wrapper handles port forwarding per module, mounts the host directories the
-   daemon reads and writes, waits for readiness, and hands back a client already
-   wired to the forwarded endpoints.
+   The wrapper installs the configuration (expressed in the container's own paths),
+   handles port forwarding per module, mounts the host directories the daemon reads
+   and writes, waits for readiness, and hands back a client already wired to the
+   forwarded endpoints.
 
 3. **Connect to an existing daemon.** Attach to a daemon already running — on the
-   same host (using its published configuration) or remote/multi-port (using an
-   explicit per-module connection description).
+   same host (using the connection description it published into its session) or
+   remote/multi-port (using an explicit per-module connection description).
 
 **Requirements**
 
-- A launched local daemon MUST run in an isolated configuration scope by default, so
-  concurrent daemons never interfere and the global default scope is never polluted.
+- A launched local daemon MUST run in an isolated session by default, so concurrent
+  daemons never interfere and the global default session is never polluted.
+- Launch MUST install the daemon configuration before starting the daemon, and MUST
+  treat a configuration the daemon rejects as a hard error that carries the daemon's
+  own explanation — a daemon that booted without the requested module directories or
+  listeners would otherwise fail later and obscurely.
+- Relative locations given by the caller MUST keep their caller-relative meaning when
+  written into the configuration.
+- A caller MUST be able to supply additional configuration settings beyond those the
+  wrapper models; they are applied last, so they can override what the wrapper
+  computed. Settings whose wrong type would abort the daemon rather than be reported
+  MUST be checked before the configuration is submitted.
+- When the configuration binds plaintext TCP on a non-loopback address, the wrapper
+  MUST declare that exposure as intentional (the daemon refuses it otherwise), unless
+  the caller has declared it either way.
 - Launch MUST block until the daemon signals readiness, and MUST surface the daemon's
   own diagnostic output if it fails to come up or never becomes ready.
 - A launched daemon MUST be torn down cleanly on context exit, with escalation
   (request shutdown → terminate → force-kill) if a clean stop does not complete in
-  time, and any wrapper-created state directory MUST be removed.
-- A caller MAY supply a configuration or persistence location to keep it after the
-  daemon exits (e.g. to pre-seed or inspect persisted state); wrapper-created
-  locations are cleaned up, caller-supplied ones are left intact.
+  time, and any wrapper-created session directory MUST be removed.
+- A caller MAY supply a session or persistence location to keep it after the daemon
+  exits (e.g. to pre-seed or inspect persisted state); wrapper-created locations are
+  cleaned up, caller-supplied ones are left intact.
 
 ### Connection and transport
 
 - A client MUST be obtainable from a launched daemon with no transport arguments;
-  the daemon's published per-module endpoints are sufficient to dial it.
+  the daemon's resolved per-module endpoints are sufficient to dial it.
+- A client for a launched daemon MUST also be obtainable in a *separate* session,
+  carrying its own connection description and a token the daemon accepts.
 - For a daemon whose well-known modules listen on **different ports** (the general
   remote case, and every containerized case), the connection MUST be expressed as a
   per-module connection description rather than a single endpoint.
 - The system MUST support the **local**, **TCP**, and **TCP+TLS** transports, and the
   **JSON** and **CBOR** codecs, for both launching daemons and dialing them.
-- For TLS, peer verification MUST be expressible per endpoint, and MUST default to a
-  setting that lets self-signed certificates connect in the common test case while
-  allowing the full verification path to be selected.
-- The system MUST NOT expose a single per-call port override, by deliberate design:
-  applied uniformly it would collapse the two well-known modules onto one port.
+- For TLS, peer verification and the CA to trust MUST be expressible per endpoint,
+  and verification MUST default to a setting that lets self-signed certificates
+  connect in the common test case while allowing the full verification path to be
+  selected.
+- Retargeting a client MUST be done by rewriting its connection description; the
+  system MUST NOT expose a per-call port override, by deliberate design: applied
+  uniformly it would collapse the two well-known modules onto one port.
 - A standalone way to write a per-module connection description to disk MUST exist,
   so callers can produce a dial spec without holding a live client.
 
@@ -182,18 +205,21 @@ The client exposes the daemon's module-management surface and method invocation:
   protocol envelope.
 - Argument conversion at the language boundary MUST follow the daemon's argument
   contract: booleans render as their textual form, filesystem-path arguments are
-  passed as file references so the daemon loads their contents, and byte values are
-  conveyed in the daemon's expected byte form. Other scalars pass through for the
-  daemon's own type coercion.
+  passed as file references so the daemon loads their contents, and byte values and
+  containers (lists, maps) are conveyed as structured values with bytes in the
+  tagged-bytes form. Other scalars pass through for the daemon's own type coercion.
 - Result conversion MUST decode the platform's tagged-bytes form back to raw bytes,
-  applied recursively so tagged values nested in maps and lists are decoded too.
+  applied recursively so tagged values nested in maps and lists are decoded too. A
+  caller MUST be able to turn the decode off and receive the result verbatim, since
+  the tagged form is indistinguishable from a one-key user map.
 - The structured result wrapper (`success` / `value` / `error`) returned by ok-or-error
   methods MUST come through identically regardless of which transport carried the call.
 
 ### Event subscriptions
 
 - A subscription MUST deliver each event to the caller's callback on a background
-  thread, without blocking the caller's main flow.
+  thread, without blocking the caller's main flow, with tagged bytes decoded as for
+  method results.
 - A subscription MUST be cancellable; cancellation MUST stop the underlying watch and
   join the delivery thread, escalating the stop signal if the watch does not exit
   promptly.
@@ -202,14 +228,17 @@ The client exposes the daemon's module-management surface and method invocation:
 - Errors during delivery (a malformed event, or an exception raised by the caller's
   callback) MUST be routed to an optional error callback, or logged if none is given,
   and MUST NOT tear down the subscription on a single bad event.
+- A watch that ends on its own (not cancelled) with a failure MUST be reported the same
+  way, together with the watcher's last diagnostic output.
 
 ### Token provisioning
 
 - Issuing, revoking, and listing tokens MUST be possible **without a running daemon**,
-  operating directly on a daemon's configuration scope, so credentials can be
-  provisioned before or alongside the daemon.
+  operating directly on a daemon's session, so credentials can be provisioned before
+  or alongside the daemon.
 - Issuing a token MUST return the freshly minted raw token to the caller (the only
-  moment it is available in the clear); the daemon's stored form is a hash.
+  moment it is available in the clear); the daemon's stored form is a hash. Issuing
+  MUST allow an expiry and a local-transport-only restriction.
 - Listing tokens MUST never reveal raw token values.
 - Revoking a non-existent token MUST surface the daemon's failure as a typed exception.
 
@@ -217,13 +246,14 @@ The client exposes the daemon's module-management surface and method invocation:
 
 - A containerized daemon MUST forward each well-known module to its own host port and
   hand back a client wired to those forwarded ports via a per-module connection
-  description.
+  description kept outside the daemon's own session.
 - Multiple containerized daemons MUST be attachable to a caller-managed shared network
   so they can discover each other by name; the wrapper MUST NOT create or destroy
   networks (the caller owns their lifecycle).
 - Files the containerized daemon writes with restrictive ownership MUST be readable
   through the container (not assumed to be host-readable), and the system MUST provide
-  a way to extract such content and to read the daemon's runtime-state and identity.
+  a way to extract such content and to read the daemon's runtime-state, identity and
+  log.
 - A facility MUST exist to **build module plugins inside a container** for ABI
   compatibility with the daemon image, accepting one or more remote flake references
   and producing a host modules directory ready to mount. Local (host-filesystem)
@@ -243,8 +273,9 @@ The client exposes the daemon's module-management surface and method invocation:
 ## Error Model
 
 Failures are surfaced as a typed exception hierarchy keyed off the daemon's exit-code
-contract. The base type carries the failing exit code, the daemon's error code (when
-present), and its diagnostic output.
+contract. The base type carries the failing exit code, the daemon's error code (the
+response verdict, when present), the failure class beneath it (when the daemon
+reports one), and its diagnostic output.
 
 | Daemon exit code | Meaning | Exception |
 |------------------|---------|-----------|
@@ -259,7 +290,8 @@ present), and its diagnostic output.
 - A non-zero daemon exit MUST be mapped to the corresponding exception subtype; an
   unrecognized code MUST map to the base error rather than being silently dropped.
 - A method call that returns an error outcome MUST raise the method-error type with
-  the daemon's message and error code attached.
+  the daemon's message, error code and failure class attached, so a transport failure
+  can be told apart from a provider rejecting the arguments.
 - Output that fails to parse as the expected structured response MUST raise the base
   error with the daemon's diagnostics attached, rather than returning malformed data.
 
@@ -275,7 +307,9 @@ load the module, introspect its methods, and call them — all inside a context 
 that guarantees the daemon and its temporary state are cleaned up afterward.
 
 ```
-launch local daemon (isolated scope)
+launch local daemon (isolated session)
+  → install configuration (module dirs, listeners)
+  → start daemon, wait for readiness
   → obtain client
   → load module
   → list/introspect modules
@@ -293,18 +327,19 @@ and joins the thread.
 ### 3. Container smoke test
 
 To test against a real distributed build, the author launches a containerized daemon
-over their compiled plugins. The wrapper forwards each well-known module to its own
-host port, waits for readiness, and returns a client dialing the forwarded endpoints.
-The same method matrix that passes locally is replayed over the network transport —
-across JSON and CBOR codecs, and over TLS — to exercise the full wire stack.
+over their compiled plugins. The wrapper installs the configuration in the container's
+terms, forwards each well-known module to its own host port, waits for readiness, and
+returns a client dialing the forwarded endpoints. The same method matrix that passes
+locally is replayed over the network transport — across JSON and CBOR codecs, and over
+TLS — to exercise the full wire stack.
 
 ### 4. Remote / multi-port connection
 
 A daemon runs on another host (or simply bound its two well-known modules to
 different ports). The caller builds a client from an explicit per-module connection
 description — one endpoint for `core_service`, one for `capability_module` — and the
-raw token the daemon issued for them. The on-disk connection description is
-authoritative; no uniform endpoint override is involved.
+raw token the daemon issued for them. The on-disk connection description is the only
+dial input.
 
 ### 5. Cross-container discovery
 
@@ -315,9 +350,8 @@ wrapper only attaches containers to it.
 ### 6. Token provisioning
 
 Before standing up a daemon — or to add a client to a long-running one — the caller
-issues a named token against the daemon's configuration scope, distributes the raw
-value to the client, and later lists or revokes it. These operations need no running
-daemon.
+issues a named token against the daemon's session, distributes the raw value to the
+client, and later lists or revokes it. These operations need no running daemon.
 
 ### 7. ABI-safe module builds
 
@@ -339,13 +373,16 @@ mounted into the daemon.
 - **One operation, one invocation.** Each operation is an independent round-trip to
   the daemon. This favors correctness and isolation over throughput — the system is a
   control and testing surface, not a high-frequency RPC path.
+- **Configuration precedes boot.** A daemon starts from whatever configuration its
+  session holds; the wrapper installs it first and never changes a running daemon's
+  configuration.
 - **Connection is always per-module for the general case.** Same-host launched
-  daemons can be dialed from their published config with no extra input; any
+  daemons can be dialed from their published description with no extra input; any
   multi-port or remote daemon requires a per-module connection description, by the
   design constraint above.
 - **Flavor must match.** For containerized daemons, user-supplied module plugins must
-  match the daemon image's flavor (self-contained vs externally linked) and the
-  daemon platform; mismatched plugins will not load.
+  match the daemon image's flavor (self-contained) and the daemon platform; mismatched
+  plugins will not load.
 - **Secrets stay out of mirrored output.** When diagnostic mirroring is enabled, only
   the daemon's diagnostic trail is mirrored — never response output that may contain
   raw tokens.

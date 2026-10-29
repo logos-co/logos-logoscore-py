@@ -1,17 +1,4 @@
-"""Exit-code → exception mapping for the `logosctl` client.
-
-DELIBERATE DUPLICATE of tests/unit/test_errors.py — do not refactor the two
-into one parametrized suite. The `logoscore` and `logosctl` packages ship
-side by side until logoscore is retired, and retiring it should be a delete
-of src/logoscore/ + tests/unit/, not an unpick.
-
-This file is the one place in the port where the duplication buys nothing
-new: the two binaries compile the same `src/client/commands/*.cpp`, so the
-exit codes and the JSON error envelope are byte-identical. That is exactly
-what makes it worth keeping — if a future logosctl-only change moves a code,
-this suite fails while the logoscore one still passes, and the divergence is
-visible instead of averaged away.
-"""
+"""Exit-code → exception mapping for the `logosctl` client."""
 from logosctl.errors import (
     DaemonNotRunningError,
     LogosctlError,

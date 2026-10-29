@@ -1,15 +1,9 @@
 """Unit tests for how a logosctl session gets configured.
 
-DELIBERATE DUPLICATE of tests/unit/test_client_config.py in name only — do
-not refactor the two together. logoscore configured a daemon with flags
-(`-m`, `--persistence-path`, `--module-transport`, `--insecure-tcp`) and
-retargeted a client with `LOGOSCORE_CLIENT_*` env vars. logosctl has none
-of those: every one of them is a key in a YAML document installed with
-`logosctl daemon config set` / written to `client/config.yaml` before the
-daemon boots. So this file tests a different mechanism against the same
-guarantees, and the two suites can only be merged by parametrizing over
-exactly the difference that matters. Retiring logoscore should be a delete
-of src/logoscore/ + tests/unit/, not an unpick.
+logosctl has no configuration flags: module dirs, persistence, listeners
+and `insecure_tcp` are keys in a YAML document installed with
+`logosctl daemon config set`, and the client's dial spec is written to
+`client/config.yaml` before the daemon boots.
 
 Nothing here needs a real `logosctl` binary or docker: the CLI is faked
 out, and what is asserted is the document that would reach it and the argv

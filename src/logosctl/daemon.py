@@ -3,7 +3,7 @@
 `LogosctlDaemon` is a context manager: on `__enter__` it installs a daemon
 config document into an isolated `--config-dir`, spawns `logosctl daemon
 start`, waits for the daemon's state file to appear, and verifies liveness
-with `status`. On exit it runs `logosctl stop`, then terminates/kills the
+with `status`. On exit it runs `logosctl daemon stop`, then terminates/kills the
 child process as a fallback, and removes any temp state directory it
 created.
 
@@ -11,11 +11,9 @@ The isolated config dir means multiple daemons can run concurrently in
 the same test process without colliding on `~/.logosctl/daemon/`, and
 nothing the wrapper does leaks into the developer's global state.
 
-The one structural difference from the `logoscore` wrapper is that none of
-the daemon's setup is expressible on the command line any more: `-m`,
-`--persistence-path`, `--module-transport` and `--insecure-tcp` were all
-deleted in favour of a YAML document installed with `logosctl daemon
-config set FILE`. `daemon start` acts on whatever is already on disk, so
+None of the daemon's setup is expressible on the command line: module
+dirs, persistence, listeners and `insecure_tcp` are a YAML document
+installed with `logosctl daemon config set FILE`. `daemon start` acts on whatever is already on disk, so
 `start()` has two phases — install the config, then boot — and a document
 the CLI rejects has to be a hard error: the daemon would otherwise come up
 silently missing every modules dir and listener the caller asked for.

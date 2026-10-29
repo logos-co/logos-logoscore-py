@@ -1,9 +1,5 @@
 """Smoke test for the `tcp_ssl` transport via docker.
 
-Deliberate duplicate of `tests/docker_smoke/test_docker_ssl_smoke.py`: that
-file drives the `logoscore` CLI, this one drives `logosctl`. See
-`tests/logosctl/__init__.py`.
-
 The container runs the daemon with a self-signed cert generated on the
 host at fixture time; `logosctl` on the host dials the daemon over TLS
 with peer verification off (because self-signed). That's the minimal path

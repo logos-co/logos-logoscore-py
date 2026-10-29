@@ -36,24 +36,12 @@ handled transparently by `LogosctlClient` (see `_arg_to_str`). Byte-array
 **event** payloads decode back to `bytes` in the event pump, symmetric
 with `call`.
 
-The argument grammar is byte-identical to logoscore's on purpose: both
-binaries compile the same `src/client/commands/call_command.cpp`, so this
-file and its logoscore twin should never disagree on a value. They are
-still separate files — see the note below.
-
 See:
   repos/logos-test-modules/test-fullapi-module-cpp/src/test_fullapi_cpp_impl.h
 
 Skipped unless LOGOSCTL_BIN and LOGOSCTL_TEST_MODULES_DIR are set — the
 Nix `integration` check wires both up (and bundles this module into the
 test modules dir).
-
-Deliberate duplicate of `tests/integration/test_fullapi_module_cpp.py`,
-which drives the `logoscore` CLI. The two clients configure a daemon in
-genuinely different ways (flags vs. config documents); duplicating means
-retiring logoscore is a delete rather than an unpick. Please don't merge
-them back together — but note the case table below IS shared, because it
-describes the module's contract rather than either CLI's.
 """
 from __future__ import annotations
 
@@ -275,10 +263,8 @@ def _capture_event(
     return received[0]
 
 
-# The typed-event matrix is shared with the logoscore suites so every
-# client stays in lockstep — see tests/_fullapi_module_cases.py. It
-# describes the MODULE's contract, not the CLI's, so it is imported
-# rather than duplicated alongside this file.
+# The typed-event matrix lives in tests/_fullapi_module_cases.py, shared
+# with the docker smoke suite: it describes the MODULE's contract.
 @pytest.mark.parametrize(
     "event,fire,value", FULLAPI_EVENT_CASES,
     ids=[c[0] for c in FULLAPI_EVENT_CASES],

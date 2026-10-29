@@ -4,13 +4,6 @@ Uses `logos-test-modules` (its `test_fullapi_cpp` exposes
 `fireStringEvent(v)`, a bool-returning trigger that emits a `stringEvent`
 carrying `v` as its `data.arg0` payload — see
 `test_fullapi_module_cpp.py` for the full type surface).
-
-Deliberate duplicate of `tests/integration/test_end_to_end.py`: that file
-drives the `logoscore` CLI, this one drives `logosctl`, and the two
-surfaces genuinely differ (flags vs. config documents — see the `daemon`
-fixture). Keeping them apart means retiring logoscore is a delete of
-`src/logosctl`'s counterpart tree, not an unpick. Please don't merge them
-back together.
 """
 from __future__ import annotations
 
@@ -34,9 +27,8 @@ def daemon(
     tcp_ssl_port,
     request,
 ):
-    # Same three-way split as the logoscore suite, but every one of these
-    # kwargs now lands in the daemon's YAML document rather than on its
-    # command line — the flags that used to express them are gone.
+    # Every one of these kwargs lands in the daemon's YAML document, not on
+    # its command line.
     #
     # transport == "local"   — the daemon prepends a local listener to
     #                          every module unconditionally, so the
@@ -74,12 +66,10 @@ def daemon(
 def client(daemon):
     """Return a callable that builds a client for `daemon`.
 
-    Unlike the logoscore fixture this takes no transport argument, and
-    that absence is the whole point of the port: the transport is a
-    property of the daemon's on-disk dial spec, which `LogosctlDaemon`
-    rewrites from `state.json` once the listeners have really bound.
-    There is no per-call override left — the `LOGOSCORE_CLIENT_*` env
-    family that used to carry one was deleted.
+    It takes no transport argument: the transport is a property of the
+    daemon's on-disk dial spec, which `LogosctlDaemon` rewrites from
+    `state.json` once the listeners have really bound. There is no
+    per-call override.
 
     Nor does `tcp_ssl` need a `no_verify_peer` default here: the cert is
     the throwaway self-signed one from `self_signed_cert`, which carries
